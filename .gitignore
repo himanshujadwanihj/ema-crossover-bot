@@ -1,0 +1,38 @@
+# Environment & Secrets
+.env
+.env.local
+
+# Logs and Data Dumps
+*.log
+*.txt
+*.vbs
+*.exe
+railway.exe
+fresh_railway_logs.txt
+railway_live.txt
+railway_logs.txt
+railway_signal_audit.txt
+
+# Python cache & temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.tmp
+.pytest_cache/
+
+# Local databases & scratch
+scratch/
+*.db
+*.sqlite3
+
+# Large Reports & Documents
+*.pdf
+*.html
+*.xlsx
+
+# Signal state files (dynamically generated at runtime)
+signal_state.json
+signal_state_v3.json
+daily_msgs.json
+bot.log

@@ -1,0 +1,9 @@
+query {
+  service(id: "f90f22a8-bf7b-436c-93cb-3042df34dd28") {
+    id
+    name
+    source {
+      repo
+    }
+  }
+}

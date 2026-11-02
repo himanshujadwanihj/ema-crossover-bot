@@ -1,0 +1,35 @@
+{
+  "baseline": {
+    "total_trades": 2683,
+    "wins": 1082,
+    "losses": 1601,
+    "win_rate": 40.327991054789415,
+    "full_moon_wins": 380,
+    "trailed_sl_wins": 606,
+    "total_pnl_r": 36.097823712282946,
+    "avg_r_per_trade": 0.013454276448856856,
+    "profit_factor": 1.023300095446423
+  },
+  "sweep_exact": {
+    "total_trades": 2683,
+    "wins": 1031,
+    "losses": 1652,
+    "win_rate": 38.42713380544167,
+    "full_moon_wins": 418,
+    "trailed_sl_wins": 552,
+    "total_pnl_r": -34.02734649120371,
+    "avg_r_per_trade": -0.012682574167425907,
+    "profit_factor": 0.9789419290341049
+  },
+  "sweep_buffer": {
+    "total_trades": 2683,
+    "wins": 1057,
+    "losses": 1626,
+    "win_rate": 39.396198285501306,
+    "full_moon_wins": 421,
+    "trailed_sl_wins": 563,
+    "total_pnl_r": 23.908641105906632,
+    "avg_r_per_trade": 0.008911159562395316,
+    "profit_factor": 1.015100191719193
+  }
+}

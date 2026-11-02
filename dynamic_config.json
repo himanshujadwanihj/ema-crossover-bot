@@ -1,0 +1,7 @@
+{
+  "ADX_THRESHOLD": 15.0,
+  "VOLUME_MULTIPLIER": 1.2,
+  "BODY_RATIO": 0.25,
+  "RSI_MIN": 45.0,
+  "RSI_MAX": 75.0
+}

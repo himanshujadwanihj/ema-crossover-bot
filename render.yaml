@@ -1,0 +1,28 @@
+services:
+  # Option A: Background Worker (Recommended for 24/7 dedicated bot)
+  - type: worker
+    name: binance-ema-bot-worker
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        value: "771305593"
+      - key: FILTER_BOT_TOKEN
+        value: "8990708294:AAHQAUYGrFSPs7Pi2bAYNvLexheJeqZeAMM"
+      - key: TIMEZONE
+        value: "Asia/Kolkata"
+      - key: SCAN_INTERVAL_MINUTES
+        value: "1"
+      - key: MAX_PAIRS
+        value: "25"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1

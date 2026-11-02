@@ -1,0 +1,7 @@
+query {
+  project(id: "1c630d68-e3c0-4ab1-9741-ca2cb3a2ceec") {
+    id
+    name
+    featureFlags
+  }
+}
