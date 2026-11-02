@@ -246,27 +246,24 @@ async def fetch_4h_volatility_movers(session: aiohttp.ClientSession, semaphore: 
 
     logger.info(f"Scanning 4H returns across FULL coin list ({len(candidates)} pairs, no volume constraint)...")
 
-    scan_sem = asyncio.Semaphore(35)
+    scan_sem = asyncio.Semaphore(20)
+    from fetcher import fetch_ohlcv_async
     async def _fetch_candidate_4h(formatted_sym, bin_sym, vol):
-        kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={bin_sym}&interval=1h&limit=6"
-        async with scan_sem:
-            try:
-                async with session.get(kline_url, headers=headers, timeout=6) as k_resp:
-                    if k_resp.status == 200:
-                        k_data = await k_resp.json()
-                        if len(k_data) >= 5:
-                            open_4h_ago = float(k_data[-5][1])
-                            current_close = float(k_data[-1][4])
-                            if open_4h_ago > 0:
-                                pct_4h = ((current_close - open_4h_ago) / open_4h_ago) * 100.0
-                                return {
-                                    "symbol": formatted_sym,
-                                    "pct_4h": pct_4h,
-                                    "close": current_close,
-                                    "volume": vol
-                                }
-            except Exception:
-                pass
+        try:
+            df = await fetch_ohlcv_async(session, formatted_sym, "1h", 6, scan_sem)
+            if df is not None and len(df) >= 5:
+                open_4h_ago = float(df.iloc[-5]["open"])
+                current_close = float(df.iloc[-1]["close"])
+                if open_4h_ago > 0:
+                    pct_4h = ((current_close - open_4h_ago) / open_4h_ago) * 100.0
+                    return {
+                        "symbol": formatted_sym,
+                        "pct_4h": pct_4h,
+                        "close": current_close,
+                        "volume": vol
+                    }
+        except Exception:
+            pass
         return None
 
     tasks = [_fetch_candidate_4h(c[0], c[1], c[2]) for c in candidates]
