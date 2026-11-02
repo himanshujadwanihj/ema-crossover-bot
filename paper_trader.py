@@ -350,7 +350,7 @@ async def register_paper_trade(alert_data: dict):
         f"🛡️ <b>Target Risk ({risk_pct * 100:.2f}%):</b> ₹{target_risk_inr:,.2f} INR\n"
         f"🎯 <b>Targets:</b> TP1: {format_price(tp1, symbol)} (70% Book + +0.4R Lock) | TP2: {format_price(tp2, symbol)} (30% Runner)\n"
         f"🛡️ <b>Est. Liquidation:</b> ~{format_price(liq_price, symbol)}\n"
-        f"⏱️ <b>Rules:</b> 30-Min Fill Window | 20-Hour Timeout @ CTC\n"
+        f"⏱️ <b>Rules:</b> 30-Min Fill Window | 20-Hour Timeout @ Market Price\n"
         f"💼 <b>Virtual Wallet Balance:</b> {balance_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
@@ -1229,19 +1229,30 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
                             logger.warning(f"Error checking 12-hr stale runner for {symbol}: {ex_stale}")
 
                 if is_timeout and not pos.get("tp3_hit", False):
-                    # 20-Hour Position Timeout: Close remaining size at CTC (Cost-to-Cost)
+                    # 20-Hour Position Timeout: Close remaining size at Current Market Price
                     position_closed = True
-                    pos["status"] = "CLOSED_20HR_TIMEOUT_CTC"
+                    pos["status"] = "CLOSED_20HR_TIMEOUT_MARKET"
                     pos["closed_at"] = now_utc.isoformat()
 
-                    # Deduct taker exit fee on remaining position
+                    # Live exit price (from live ticker if available, else candle close, else entry)
+                    exit_p = live_price if (live_price is not None and live_price > 0) else float(candle.get("close", entry))
                     rem_portion = 1.0 if not pos.get("tp1_hit", False) else 0.30
-                    taker_fee = (pos.get("notional_inr", NOTIONAL_INR) * rem_portion) * TAKER_FEE_RATE
-                    wallet["balance"] -= taker_fee
-                    wallet["realized_pnl"] -= taker_fee
+                    rem_notional = pos.get("notional_inr", NOTIONAL_INR) * rem_portion
+
+                    if signal == "BUY":
+                        rem_gross = rem_notional * ((exit_p - entry) / entry)
+                    else:
+                        rem_gross = rem_notional * ((entry - exit_p) / entry)
+
+                    taker_fee = rem_notional * TAKER_FEE_RATE
+                    rem_net = rem_gross - taker_fee
+
+                    wallet["balance"] += rem_net
+                    wallet["realized_pnl"] += rem_net
                     wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
                     pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                    pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) - taker_fee
+                    pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + rem_net
+                    pos["exit_price"] = exit_p
                     pos["remaining_qty"] = 0.0
 
                     if pos["cumulative_pnl"] >= 0:
@@ -1255,13 +1266,19 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
 
                     roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
                     pnl_str = format_inr(pos["cumulative_pnl"])
+                    pts_diff = (exit_p - entry) if signal == "BUY" else (entry - exit_p)
+                    pts_pct = (pts_diff / entry) * 100.0 if entry > 0 else 0.0
                     msg = (
-                        f"⏱️ <b>PAPER POSITION CLOSED (20-HOUR TIMEOUT @ CTC)</b>\n"
+                        f"⏱️ <b>PAPER POSITION CLOSED (20-HOUR TIMEOUT @ MARKET PRICE)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"<b>Asset:</b> {symbol} [{signal}]\n"
-                        f"<b>Reason:</b> Position ran for 20 hours without hitting TP2. Closed at Cost-to-Cost.\n"
-                        f"<b>Total Realized Profit:</b> {pnl_str}\n"
+                        f"<b>Reason:</b> Position active for 20 hours. Squared off at live market price!\n"
+                        f"🎯 <b>Entry Price:</b> {format_price(entry, symbol)}\n"
+                        f"🏁 <b>Exit Price (Market):</b> {format_price(exit_p, symbol)} ({pts_diff:+.4f} pts | {pts_pct:+.2f}%)\n"
+                        f"💰 <b>Total Trade Realized Profit:</b> {pnl_str}\n"
                         f"💳 <b>Total Fees Paid:</b> ₹{pos['fee_paid']:,.2f} INR\n"
-                        f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)"
+                        f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     if not pos.get("closed_alert_sent"):
                         pos["closed_alert_sent"] = True
@@ -1286,15 +1303,26 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
             # ── 20-HOUR TIMEOUT CHECK (AFTER FULL SWEEP) ──
             if not position_closed and pos_cutoff_dt and now_utc >= pos_cutoff_dt and not pos.get("tp3_hit", False):
                 position_closed = True
-                pos["status"] = "CLOSED_20HR_TIMEOUT_CTC"
+                pos["status"] = "CLOSED_20HR_TIMEOUT_MARKET"
                 pos["closed_at"] = now_utc.isoformat()
+                exit_p = live_price if (live_price is not None and live_price > 0) else entry
                 rem_portion = 1.0 if not pos.get("tp1_hit", False) else 0.30
-                taker_fee = (pos.get("notional_inr", NOTIONAL_INR) * rem_portion) * TAKER_FEE_RATE
-                wallet["balance"] -= taker_fee
-                wallet["realized_pnl"] -= taker_fee
+                rem_notional = pos.get("notional_inr", NOTIONAL_INR) * rem_portion
+
+                if signal == "BUY":
+                    rem_gross = rem_notional * ((exit_p - entry) / entry)
+                else:
+                    rem_gross = rem_notional * ((entry - exit_p) / entry)
+
+                taker_fee = rem_notional * TAKER_FEE_RATE
+                rem_net = rem_gross - taker_fee
+
+                wallet["balance"] += rem_net
+                wallet["realized_pnl"] += rem_net
                 wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
                 pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) - taker_fee
+                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + rem_net
+                pos["exit_price"] = exit_p
                 pos["remaining_qty"] = 0.0
 
                 if pos["cumulative_pnl"] >= 0:
@@ -1306,13 +1334,19 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
                 wallet_updated = True
                 roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
                 pnl_str = format_inr(pos["cumulative_pnl"])
+                pts_diff = (exit_p - entry) if signal == "BUY" else (entry - exit_p)
+                pts_pct = (pts_diff / entry) * 100.0 if entry > 0 else 0.0
                 msg = (
-                    f"⏱️ <b>PAPER POSITION CLOSED (20-HOUR TIMEOUT @ CTC)</b>\n"
+                    f"⏱️ <b>PAPER POSITION CLOSED (20-HOUR TIMEOUT @ MARKET PRICE)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<b>Asset:</b> {symbol} [{signal}]\n"
-                    f"<b>Reason:</b> Position ran for 20 hours without hitting TP2. Closed at Cost-to-Cost.\n"
-                    f"<b>Total Realized Profit:</b> {pnl_str}\n"
+                    f"<b>Reason:</b> Position active for 20 hours. Squared off at live market price!\n"
+                    f"🎯 <b>Entry Price:</b> {format_price(entry, symbol)}\n"
+                    f"🏁 <b>Exit Price (Market):</b> {format_price(exit_p, symbol)} ({pts_diff:+.4f} pts | {pts_pct:+.2f}%)\n"
+                    f"💰 <b>Total Trade Realized Profit:</b> {pnl_str}\n"
                     f"💳 <b>Total Fees Paid:</b> ₹{pos['fee_paid']:,.2f} INR\n"
-                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)"
+                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 )
                 if not pos.get("closed_alert_sent"):
                     pos["closed_alert_sent"] = True
@@ -1504,7 +1538,8 @@ async def generate_trades_ledger_card() -> str:
                 "CLOSED_CTC_BREAKEVEN": "TP1 + CTC Breakeven 🛡️",
                 "SL_HIT": "Stop-Loss Hit 🔴",
                 "LIQUIDATED": "Liquidated 💀",
-                "CLOSED_20HR_TIMEOUT_CTC": "20H Timeout CTC ⏱️",
+                "CLOSED_20HR_TIMEOUT_MARKET": "20H Timeout Market ⏱️",
+                "CLOSED_20HR_TIMEOUT_CTC": "20H Timeout Market ⏱️",
                 "CANCELLED_20MIN_EXPIRED": "20m Expired (Cancelled) ⏳",
                 "CLOSED_SIGNAL_REVERSAL": "Reversal Close 🔄"
             }.get(status, status)
