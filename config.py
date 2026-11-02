@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "8921341725:AAFRPRj9xxPIuEyNLTR8Iob0TtIC54n1hfE")
 TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID", "771305593")
 if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "8921341725":
     TELEGRAM_CHAT_ID = "771305593"
