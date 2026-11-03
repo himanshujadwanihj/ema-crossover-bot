@@ -78,6 +78,15 @@ def load_wallet() -> dict:
     data["initial_capital"] = INITIAL_CAPITAL
     data["balance"] = round(INITIAL_CAPITAL + float(data.get("realized_pnl", 0.0)), 2)
 
+    # Reconcile scoreboard strictly from actual closed trades list (purges old backtest artifacts)
+    closed_list = data.get("closed_trades", [])
+    if closed_list:
+        real_wins = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) > 0 and t.get("symbol") != "PROFIT_INJECTION")
+        real_losses = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) < 0)
+        data["wins"] = real_wins
+        data["losses"] = real_losses
+        data["total_trades"] = real_wins + real_losses
+
     return data
 
 
@@ -88,6 +97,14 @@ def save_wallet(data: dict) -> None:
         # Balance is strictly anchored to Initial Capital + Realized PnL.
         data["initial_capital"] = INITIAL_CAPITAL
         data["balance"] = round(INITIAL_CAPITAL + float(data.get("realized_pnl", 0.0)), 2)
+
+        closed_list = data.get("closed_trades", [])
+        if closed_list:
+            real_wins = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) > 0 and t.get("symbol") != "PROFIT_INJECTION")
+            real_losses = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) < 0)
+            data["wins"] = real_wins
+            data["losses"] = real_losses
+            data["total_trades"] = real_wins + real_losses
 
         dirname = os.path.dirname(WALLET_FILE)
         if dirname and not os.path.exists(dirname):
@@ -1366,9 +1383,11 @@ async def generate_strategy_lookout_card(session=None) -> str:
     balance = wallet.get("balance", INITIAL_CAPITAL)
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
-    wins = wallet.get("wins", 0)
-    losses = wallet.get("losses", 0)
-    total_trades = wallet.get("total_trades", 0)
+    closed_list = wallet.get("closed_trades", [])
+    wins = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) > 0 and t.get("symbol") != "PROFIT_INJECTION")
+    losses = sum(1 for t in closed_list if (t.get("cumulative_pnl") or t.get("pnl", 0.0)) < 0)
+    total_trades = wins + losses
+    win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
     active = wallet.get("active_positions", [])
     resting = wallet.get("resting_orders", [])
     now_utc = datetime.now(timezone.utc)
@@ -1398,7 +1417,7 @@ async def generate_strategy_lookout_card(session=None) -> str:
         f"💼 <b>PAPER TRADING — REAL-TIME STRATEGY LOOKOUT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Wallet Balance:</b> ₹{balance:,.2f} INR ({total_roi:+.2f}% ROI)\n"
-        f"📊 <b>Scoreboard:</b> {wins}W - {losses}L (Total: {total_trades} Closed)\n"
+        f"📊 <b>Scoreboard:</b> {wins}W - {losses}L ({win_rate:.1f}% WR | {total_trades} Closed)\n"
     )
 
     if active:
@@ -1437,15 +1456,16 @@ async def generate_strategy_lookout_card(session=None) -> str:
                 except Exception:
                     pass
 
+            pos_notional = pos.get("notional_inr", NOTIONAL_INR)
             rem_contracts = pos.get('remaining_qty', pos.get('qty', 0.0))
-            notional_u = pos.get('notional_usd', NOTIONAL_INR / USD_INR_RATE)
+            notional_u = pos.get('notional_usd', pos_notional / USD_INR_RATE)
             liq_p = pos.get('liq_price', 0.0)
 
             msg += (
                 f"{i}. <b>{sym} [{sig}] 10x Isolated</b>\n"
                 f"   • Entry: {format_price(entry, sym)} | Live: {format_price(curr_px, sym)}\n"
                 f"   • {pnl_icon} Floating PnL: {pnl_sign}₹{pnl_inr:,.2f} INR ({pnl_pct:+.2f}%)\n"
-                f"   • 📦 Contracts: {rem_contracts:.4f} (~${notional_u:.2f} USD / ₹{NOTIONAL_INR:,.0f} INR)\n"
+                f"   • 📦 Contracts: {rem_contracts:.4f} (~${notional_u:.2f} USD / ₹{pos_notional:,.0f} INR)\n"
                 f"   • 🎯 Targets: TP1: {format_price(tp1, sym)} | TP2: {format_price(tp2 or tp3, sym)}\n"
                 f"   • 🛡️ Current SL: {format_price(sl, sym)} (Buffer: {dist_sl:.2f}%)\n"
                 f"   • 💀 Est. Liq: ~{format_price(liq_p, sym)}\n"
