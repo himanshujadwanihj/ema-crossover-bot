@@ -1,6 +1,6 @@
 """
 paper_trader.py — Virtual Paper Trading Engine (₹1,00,000 INR Starting Capital).
-Tracks resting limit orders, active positions, 3-stage TP/SL trailing brackets,
+Tracks resting limit orders, active positions, 2-stage TP/SL trailing brackets,
 30-minute limit fill expiry, 20-hour position timeout at CTC, realized PnL,
 wallet balance, and broadcasts Telegram notifications.
 """
@@ -1086,7 +1086,7 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
                     f"💳 <b>Maker Fee (0.02%):</b> -₹{maker_fee:.2f} INR\n"
                     f"🛡️ <b>Est. Liq Price:</b> ~{format_price(order.get('liq_price', 0.0), symbol)}\n"
                     f"💼 <b>Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR\n"
-                    f"<i>Status: Position Active. 3-Stage TP/SL brackets armed!</i>\n"
+                    f"<i>Status: Position Active. 2-Stage TP/SL brackets armed (TP1: 70% Book | TP2: 30% Runner)!</i>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 )
                 asyncio.create_task(notify_telegram(msg))
