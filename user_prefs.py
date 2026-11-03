@@ -29,6 +29,8 @@ DEFAULT_MIN_STARS = 3
 
 _prefs_cache = None
 
+BACKUP_PREFS_FILE = "user_subscriptions_backup.json"
+
 def _load_prefs() -> Dict[str, Any]:
     global _prefs_cache
     if _prefs_cache is not None:
@@ -42,6 +44,31 @@ def _load_prefs() -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Error loading {PREFS_FILE}: {e}")
             data = {}
+
+    # AUTO-RECOVERY & MERGE: Never lose any user subscription
+    backup_data = {}
+    if os.path.exists(BACKUP_PREFS_FILE):
+        try:
+            with open(BACKUP_PREFS_FILE, "r", encoding="utf-8") as fb:
+                backup_data = json.load(fb)
+        except Exception as eb:
+            logger.error(f"Error loading {BACKUP_PREFS_FILE}: {eb}")
+
+    # Merge users from backup into live data if missing
+    merged = False
+    for uid, udata in backup_data.items():
+        if uid not in data:
+            data[uid] = udata
+            merged = True
+
+    # If data has users not in backup, update backup immediately
+    if len(data) > len(backup_data) or merged:
+        try:
+            with open(BACKUP_PREFS_FILE, "w", encoding="utf-8") as fb:
+                json.dump(data, fb, indent=2)
+        except Exception:
+            pass
+
     _prefs_cache = data
     return _prefs_cache
 
@@ -54,6 +81,13 @@ def _save_prefs(data: Dict[str, Any]) -> None:
             json.dump(_prefs_cache, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving {PREFS_FILE}: {e}")
+
+    # Synchronous dual backup
+    try:
+        with open(BACKUP_PREFS_FILE, "w", encoding="utf-8") as fb:
+            json.dump(_prefs_cache, fb, indent=2)
+    except Exception as eb:
+        logger.error(f"Error saving {BACKUP_PREFS_FILE}: {eb}")
 
 def get_user_prefs(chat_id: str, user_obj=None) -> Dict[str, Any]:
     prefs = _load_prefs()

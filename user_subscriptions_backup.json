@@ -1,0 +1,105 @@
+{
+  "771305593": {
+    "enabled": true,
+    "coin_groups": [
+      "core_10",
+      "alts_25"
+    ],
+    "timeframes": [
+      "15m",
+      "1h",
+      "4h",
+      "1d"
+    ],
+    "min_stars": 3,
+    "gold_scalp_5m_15m": false,
+    "squeeze_only": false,
+    "signal_types": [
+      "crossover",
+      "retest"
+    ],
+    "squeeze_alerts": true
+  },
+  "7292597013": {
+    "enabled": true,
+    "coin_groups": [
+      "core_10"
+    ],
+    "timeframes": [
+      "1h",
+      "4h",
+      "1d",
+      "1w"
+    ],
+    "signal_types": [
+      "crossover",
+      "retest"
+    ],
+    "custom_coins": [
+      "BEAT/USDT",
+      "PENDLE/USDT"
+    ],
+    "min_stars": 3,
+    "gold_scalp_5m_15m": false,
+    "squeeze_alerts": true,
+    "squeeze_only": false,
+    "username": "nouseofthisid",
+    "first_name": "Raju",
+    "joined_at": "2026-11-02 10:35 UTC"
+  },
+  "7997136982": {
+    "enabled": true,
+    "coin_groups": [
+      "custom"
+    ],
+    "timeframes": [
+      "1h",
+      "4h",
+      "1d",
+      "1w"
+    ],
+    "signal_types": [
+      "crossover",
+      "retest"
+    ],
+    "custom_coins": [
+      "BNB/USDT",
+      "BTC/USDT",
+      "ETH/USDT",
+      "SOL/USDT"
+    ],
+    "min_stars": 3,
+    "gold_scalp_5m_15m": false,
+    "squeeze_alerts": false,
+    "squeeze_only": false,
+    "username": null,
+    "first_name": "RITUL",
+    "joined_at": "2026-11-02 16:30 UTC"
+  },
+  "6208893193": {
+    "enabled": true,
+    "coin_groups": [
+      "core_10",
+      "alts_25",
+      "us_stocks"
+    ],
+    "timeframes": [
+      "1h",
+      "4h",
+      "1d",
+      "1w"
+    ],
+    "signal_types": [
+      "crossover",
+      "retest"
+    ],
+    "custom_coins": [],
+    "min_stars": 4,
+    "gold_scalp_5m_15m": true,
+    "squeeze_alerts": true,
+    "squeeze_only": false,
+    "username": null,
+    "first_name": "Sagar",
+    "joined_at": "2026-11-03 19:18 UTC"
+  }
+}
