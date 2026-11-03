@@ -817,7 +817,8 @@ async def main_loop():
                 try:
                     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
                     today_str = now_ist.strftime("%Y-%m-%d")
-                    is_night_pause = (now_ist.hour == 0 and now_ist.minute >= 30) or (1 <= now_ist.hour < 5) or (now_ist.hour == 5 and now_ist.minute < 30)
+                    # USER DIRECTIVE: 24/7 Continuous Scanning & Trading - ZERO Night Pause
+                    is_night_pause = False
                     
                     # Always resolve pending active trades (TP / SL / Breakeven Shield)
                     await resolve_pending_trades_async(session, semaphore)
