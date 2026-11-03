@@ -269,19 +269,14 @@ async def register_paper_trade(alert_data: dict):
         if risk_pct <= 0:
             risk_pct = 0.015
 
-        # USER DIRECTIVE: 2.0% Account Risk Position Sizing Engine
-        # Money NEVER artificially changes — capital and balance are strictly preserved!
+        # USER DIRECTIVE: Exact 2.0% Margin Sizing per Trade
+        # Trade Margin is strictly 2.0% of Wallet Balance (e.g. ~₹2,500 on ₹1,25,000 balance).
+        # Trade Notional is strictly Margin * LEVERAGE (e.g. ~₹25,000 on 10x).
         wallet_bal = float(wallet.get("balance", INITIAL_CAPITAL))
-        target_risk_inr = max(500.0, wallet_bal * 0.02)  # Strict 2.0% Account Risk per trade
-        calc_notional_inr = target_risk_inr / risk_pct
-        calc_margin_inr = calc_notional_inr / LEVERAGE
-
-        # Strict safety bounds: Min ₹1,500 margin, Max 15% of account balance
-        min_margin = MARGIN_INR  # 1500.0 INR
-        max_margin = max(min_margin, wallet_bal * 0.15)
-        trade_margin_inr = max(min_margin, min(calc_margin_inr, max_margin))
-        trade_notional_inr = trade_margin_inr * LEVERAGE
+        trade_margin_inr = round(max(MIN_MARGIN_INR, wallet_bal * 0.02), 2)
+        trade_notional_inr = round(trade_margin_inr * LEVERAGE, 2)
         actual_risk_inr = trade_notional_inr * risk_pct
+        target_risk_inr = actual_risk_inr
 
         used_margin = sum(item.get("margin_inr", MARGIN_INR) for item in active_list + resting_list)
         available_margin = max(0.0, wallet_bal - used_margin)
