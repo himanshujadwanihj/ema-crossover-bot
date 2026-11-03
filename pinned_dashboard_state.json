@@ -1,11 +1,12 @@
 {
   "locked_gainers": [
-    "RAYSOL/USDT",
-    "DRIFT/USDT"
+    "RUNE/USDT",
+    "HUMA/USDT"
   ],
   "locked_losers": [
-    "GRIFFAIN/USDT",
-    "\u9f99\u867e/USDT"
+    "BMT/USDT",
+    "HOT/USDT"
   ],
-  "locked_time": 1791378782.320148
+  "locked_time": 1793727667.0097203,
+  "-1004332146822": 6409
 }

@@ -1,0 +1,495 @@
+[
+  {
+    "id": "1793616869_11334",
+    "timestamp": 1793616869.3286161,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11334,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11335
+      }
+    ],
+    "desc": "XRP/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793619504_11336",
+    "timestamp": 1793619504.0344896,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11336,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11337
+      }
+    ],
+    "desc": "DOGE/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793619918_11338",
+    "timestamp": 1793619918.5604353,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11338,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11339
+      }
+    ],
+    "desc": "UNI/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793625038_11340",
+    "timestamp": 1793625038.5113285,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11340,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11341
+      }
+    ],
+    "desc": "XRP/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793625619_11342",
+    "timestamp": 1793625619.8066702,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11342,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11343
+      }
+    ],
+    "desc": "SOL/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793625778_11344",
+    "timestamp": 1793625778.0813816,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11344,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11345
+      }
+    ],
+    "desc": "AVAX/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793627499_11346",
+    "timestamp": 1793627499.8905818,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11346,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11347
+      }
+    ],
+    "desc": "BNB/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793627500_11348",
+    "timestamp": 1793627500.6669438,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11348,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11349
+      }
+    ],
+    "desc": "LINK/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793627798_11350",
+    "timestamp": 1793627798.0286202,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11350,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11351
+      }
+    ],
+    "desc": "BNB/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793629990_11353",
+    "timestamp": 1793629990.9576652,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11353,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11354
+      }
+    ],
+    "desc": "AVAX/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793636239_11360",
+    "timestamp": 1793636239.3828301,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11360,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11361
+      }
+    ],
+    "desc": "XRP/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793636240_11362",
+    "timestamp": 1793636240.3625286,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11362,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11363
+      }
+    ],
+    "desc": "DOGE/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793637014_11367",
+    "timestamp": 1793637014.1717923,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11367,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11368
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11369
+      }
+    ],
+    "desc": "UNI/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793637015_11370",
+    "timestamp": 1793637015.2901628,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11370,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11371
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11372
+      }
+    ],
+    "desc": "UNI/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793683840_11374",
+    "timestamp": 1793683840.3548634,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11374,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11375
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11376
+      }
+    ],
+    "desc": "SOL/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793683841_11377",
+    "timestamp": 1793683841.2463598,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11377,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11378
+      }
+    ],
+    "desc": "ADA/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793683951_11379",
+    "timestamp": 1793683951.3998413,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11379,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11380
+      }
+    ],
+    "desc": "DOGE/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793684105_11381",
+    "timestamp": 1793684105.0181952,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11381,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11382
+      }
+    ],
+    "desc": "LINK/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793684279_11383",
+    "timestamp": 1793684279.5767357,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11383,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11384
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11385
+      }
+    ],
+    "desc": "ETH/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793684764_11386",
+    "timestamp": 1793684764.1482556,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11386,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11387
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11388
+      }
+    ],
+    "desc": "BTC/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793686451_11389",
+    "timestamp": 1793686451.2536805,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11389,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11390
+      }
+    ],
+    "desc": "XRP/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793694966_11391",
+    "timestamp": 1793694966.7123957,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11391,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11392
+      }
+    ],
+    "desc": "AVAX/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793699164_11393",
+    "timestamp": 1793699164.0932314,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11393,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11394
+      }
+    ],
+    "desc": "DOGE/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793704894_11415",
+    "timestamp": 1793704894.9123547,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11415,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11416
+      }
+    ],
+    "desc": "LINK/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793705796_11417",
+    "timestamp": 1793705796.4037993,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11417,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11418
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11419
+      }
+    ],
+    "desc": "BTC/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793705852_11420",
+    "timestamp": 1793705852.2400863,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11420,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11421
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11422
+      }
+    ],
+    "desc": "BNB/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1793705907_11423",
+    "timestamp": 1793705907.2471461,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11423,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11424
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11425
+      }
+    ],
+    "desc": "BTC/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793730496_11437",
+    "timestamp": 1793730496.9643223,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11437,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11438
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11439
+      }
+    ],
+    "desc": "BNB/USDT 1H",
+    "deleted": false
+  }
+]
