@@ -1370,9 +1370,12 @@ async def generate_strategy_lookout_card(session=None) -> str:
     balance = wallet.get("balance", INITIAL_CAPITAL)
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
-    wins = wallet.get("wins", 2762)
-    losses = wallet.get("losses", 116)
-    total_trades = wallet.get("total_trades", 2878)
+    closed = wallet.get("closed_trades", [])
+    exec_wins = sum(1 for t in closed if ("WIN" in str(t.get("status","")) or "TP" in str(t.get("status","")) or "PROFIT_LOCK" in str(t.get("status","")) or float(t.get("cumulative_pnl", 0) or 0) > 0) and "CANCEL" not in str(t.get("status","")) and t.get("symbol") != "PROFIT_INJECTION")
+    exec_losses = sum(1 for t in closed if ("SL" in str(t.get("status","")) or "LOSS" in str(t.get("status","")) or float(t.get("cumulative_pnl", 0) or 0) < 0) and "CANCEL" not in str(t.get("status","")) and t.get("symbol") != "PROFIT_INJECTION")
+    wins = wallet.get("wins", exec_wins)
+    losses = wallet.get("losses", exec_losses)
+    total_trades = wallet.get("total_trades", wins + losses)
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
     active = wallet.get("active_positions", [])
     resting = wallet.get("resting_orders", [])
