@@ -1,12 +1,12 @@
 {
   "locked_gainers": [
-    "RUNE/USDT",
-    "HUMA/USDT"
+    "BMT/USDT",
+    "BFUSD/USDT"
   ],
   "locked_losers": [
-    "BMT/USDT",
+    "KORUB/USDT",
     "HOT/USDT"
   ],
-  "locked_time": 1793727667.0097203,
+  "locked_time": 1793764854.2267525,
   "-1004332146822": 6409
 }

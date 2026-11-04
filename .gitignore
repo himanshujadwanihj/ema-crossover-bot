@@ -36,3 +36,5 @@ signal_state.json
 signal_state_v3.json
 daily_msgs.json
 bot.log
+
+*.zip

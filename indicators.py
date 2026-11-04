@@ -147,10 +147,10 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         if signal == "BUY":
-            tp1, tp2, tp3 = entry + (1.2 * risk), entry + (2.2 * risk), entry + (3.2 * risk)
+            tp1, tp2, tp3 = entry + (2.0 * risk), entry + (3.0 * risk), entry + (4.0 * risk)
         else:
-            tp1, tp2, tp3 = entry - (1.2 * risk), entry - (2.2 * risk), entry - (3.2 * risk)
-        return sl, (tp1, tp2, tp3), (1.2, 2.2, 3.2), ("Near Swing Target", "Mid Swing Target", "Extended Expansion Target")
+            tp1, tp2, tp3 = entry - (2.0 * risk), entry - (3.0 * risk), entry - (4.0 * risk)
+        return sl, (tp1, tp2, tp3), (2.0, 3.0, 4.0), ("2.0 R:R Target 1", "3.0 R:R Target 2", "Extended Expansion Target")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -226,17 +226,24 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             tr = pd.concat([tr0, tr1, tr2], axis=1).max(axis=1)
             atr_val = float(tr.rolling(14).mean().iloc[-1]) if not pd.isna(tr.rolling(14).mean().iloc[-1]) else (entry * 0.005)
         
-        # ── HUMAN-EYE LIQUIDITY SWEEP SL + 0.25*ATR BUFFER + 0.8% SAFETY FLOOR ──
+        # ── 26 EMA DYNAMIC BASELINE + STRUCTURAL SWEEP SL WITH 0.25*ATR BUFFER ──
         recent_lows = lows[-5:] if len(lows) >= 5 else [entry * 0.99]
         sweep_low = float(np.min(recent_lows))
         sweep_sl = sweep_low - (0.25 * atr_val) if atr_val > 0 else (sweep_low * 0.9975)
 
-        valid_ssl = [p for p in refine_ssl if p < entry] if refine_ssl else [p for p in ssl_levels if p < entry]
-        ssl_low = max(valid_ssl) if valid_ssl else sweep_low
-        struct_sl = ssl_low * 0.998
+        # 26 EMA Protection: SL must sit strictly BELOW 26 EMA with 0.25*ATR buffer
+        ema_26_val = None
+        if df is not None and 'ema_26' in df.columns and not pd.isna(df['ema_26'].iloc[-1]):
+            ema_26_val = float(df['ema_26'].iloc[-1])
+        elif default_sl and default_sl < entry:
+            ema_26_val = default_sl
 
-        # Hybrid: Tighter structural sweep level for higher R:R
-        candidate_sl = max(sweep_sl, struct_sl)
+        if ema_26_val and ema_26_val < entry:
+            ema_sl = ema_26_val - (0.25 * atr_val) if atr_val > 0 else (ema_26_val * 0.9975)
+            # Guarantee SL is below both recent swing and 26 EMA baseline
+            candidate_sl = min(sweep_sl, ema_sl)
+        else:
+            candidate_sl = sweep_sl
 
         # Enforce Minimum 0.80% Stop-Loss Floor (protects against micro-wick noise / spread stopouts)
         min_sl_dist_floor = entry * (1.0 - min_sl_pct)
@@ -257,36 +264,40 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # High-Probability Single TP Target (>1.5x R:R to 1.8x R:R):
-        min_tp1 = entry + max(1.6 * risk, entry * 0.015)
+        # USER DIRECTIVE: Strictly Minimum 1:2.0 R:R on TP1 WITH Front-Running Below Order Block / Liquidity Pool
+        # Front-run buffer: 0.35% below the order block / fractal resistance high for maximum fill probability
+        FRONT_RUN_PCT = 0.0035
+        min_tp1_required = entry + max(2.0 * risk, entry * 0.016)
+        pool_threshold = min_tp1_required / (1.0 - FRONT_RUN_PCT)
         
-        irl_bsl = sorted(list(set([p for p in internal_bsl if p >= min_tp1])))
-        erl_bsl = sorted(list(set([p for p in refine_bsl if p >= min_tp1])))
-        all_bsl = sorted(list(set(irl_bsl + erl_bsl)))
+        base_bsl = [p for p in bsl_levels if p >= pool_threshold]
+        irl_bsl = [p for p in internal_bsl if p >= pool_threshold]
+        erl_bsl = [p for p in refine_bsl if p >= pool_threshold]
+        all_bsl = sorted(list(set(base_bsl + irl_bsl + erl_bsl)))
         
         if len(all_bsl) >= 1:
-            raw_tp1 = max(all_bsl[0], min_tp1)
-            tp1 = max(raw_tp1 * 0.998, min_tp1)  # 0.20% Front-running buffer
-            lbl1 = "Liquidity Pool Target 1 (0.2% Front-Run)"
+            raw_tp1 = all_bsl[0]
+            tp1 = round(raw_tp1 * (1.0 - FRONT_RUN_PCT), 6)
+            lbl1 = "Order Block / Liquidity Target 1 (0.35% Front-Run Below High)"
         else:
-            tp1 = entry + (1.6 * risk)
-            lbl1 = "1.6 R:R Expansion Target 1"
+            tp1 = entry + (2.0 * risk)
+            lbl1 = "2.0 R:R Expansion Target 1"
 
-        higher_bsl = [p for p in all_bsl if p > tp1 * 1.003]
+        higher_bsl = [p for p in all_bsl if p > tp1 * 1.005]
         if len(higher_bsl) >= 1:
-            tp2 = higher_bsl[0]
-            lbl2 = "Liquidity Pool Target 2"
+            tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
+            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run)"
         else:
-            tp2 = max(tp1 * 1.005, entry + (2.5 * risk))
-            lbl2 = "2.5 R:R Expansion Target 2"
+            tp2 = max(tp1 * 1.005, entry + (3.0 * risk))
+            lbl2 = "3.0 R:R Expansion Target 2"
 
-        even_higher_bsl = [p for p in higher_bsl if p > tp2 * 1.003]
+        even_higher_bsl = [p for p in higher_bsl if p > tp2 * 1.005]
         if len(even_higher_bsl) >= 1:
-            tp3 = even_higher_bsl[0]
+            tp3 = round(even_higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
             lbl3 = "Liquidity Pool Target 3"
         else:
-            tp3 = max(tp2 * 1.005, entry + (3.5 * risk))
-            lbl3 = "3.5 R:R Expansion Target 3"
+            tp3 = max(tp2 * 1.005, entry + (4.0 * risk))
+            lbl3 = "4.0 R:R Expansion Target 3"
 
         rr1 = (tp1 - entry) / risk
         rr2 = (tp2 - entry) / risk
@@ -318,17 +329,24 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             tr = pd.concat([tr0, tr1, tr2], axis=1).max(axis=1)
             atr_val = float(tr.rolling(14).mean().iloc[-1]) if not pd.isna(tr.rolling(14).mean().iloc[-1]) else (entry * 0.005)
 
-        # ── HUMAN-EYE LIQUIDITY SWEEP SL + 0.25*ATR BUFFER + 0.8% SAFETY CEILING ──
+        # ── 26 EMA DYNAMIC BASELINE + STRUCTURAL SWEEP SL WITH 0.25*ATR BUFFER ──
         recent_highs = highs[-5:] if len(highs) >= 5 else [entry * 1.01]
         sweep_high = float(np.max(recent_highs))
         sweep_sl = sweep_high + (0.25 * atr_val) if atr_val > 0 else (sweep_high * 1.0025)
 
-        valid_bsl = [p for p in refine_bsl if p > entry] if refine_bsl else [p for p in bsl_levels if p > entry]
-        bsl_high = min(valid_bsl) if valid_bsl else sweep_high
-        struct_sl = bsl_high * 1.002
+        # 26 EMA Protection: SL must sit strictly ABOVE 26 EMA with 0.25*ATR buffer
+        ema_26_val = None
+        if df is not None and 'ema_26' in df.columns and not pd.isna(df['ema_26'].iloc[-1]):
+            ema_26_val = float(df['ema_26'].iloc[-1])
+        elif default_sl and default_sl > entry:
+            ema_26_val = default_sl
 
-        # Hybrid: Tighter structural sweep level for higher R:R
-        candidate_sl = min(sweep_sl, struct_sl)
+        if ema_26_val and ema_26_val > entry:
+            ema_sl = ema_26_val + (0.25 * atr_val) if atr_val > 0 else (ema_26_val * 1.0025)
+            # Guarantee SL is above both recent swing and 26 EMA baseline
+            candidate_sl = max(sweep_sl, ema_sl)
+        else:
+            candidate_sl = sweep_sl
 
         # Enforce Minimum 0.80% Stop-Loss Ceiling (protects against micro-wick noise / spread stopouts)
         max_sl_dist_ceiling = entry * (1.0 + min_sl_pct)
@@ -350,36 +368,40 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # High-Probability TP Targets (TP1, TP2, TP3):
-        max_tp1 = entry - max(1.6 * risk, entry * 0.015)
+        # USER DIRECTIVE: Strictly Minimum 1:2.0 R:R on TP1 WITH Front-Running Above Order Block / Liquidity Pool
+        # Front-run buffer: 0.35% above the order block / fractal support low for maximum fill probability
+        FRONT_RUN_PCT = 0.0035
+        max_tp1_required = entry - max(2.0 * risk, entry * 0.016)
+        pool_threshold = max_tp1_required / (1.0 + FRONT_RUN_PCT)
         
-        irl_ssl = sorted(list(set([p for p in internal_ssl if p <= max_tp1])), reverse=True)
-        erl_ssl = sorted(list(set([p for p in refine_ssl if p <= max_tp1])), reverse=True)
-        all_ssl = sorted(list(set(irl_ssl + erl_ssl)), reverse=True)
+        base_ssl = [p for p in ssl_levels if p <= pool_threshold]
+        irl_ssl = [p for p in internal_ssl if p <= pool_threshold]
+        erl_ssl = [p for p in refine_ssl if p <= pool_threshold]
+        all_ssl = sorted(list(set(base_ssl + irl_ssl + erl_ssl)), reverse=True)
         
         if len(all_ssl) >= 1:
-            raw_tp1 = min(all_ssl[0], max_tp1)
-            tp1 = min(raw_tp1 * 1.002, max_tp1)  # 0.20% Front-running buffer
-            lbl1 = "Liquidity Pool Target 1 (0.2% Front-Run)"
+            raw_tp1 = all_ssl[0]
+            tp1 = round(raw_tp1 * (1.0 + FRONT_RUN_PCT), 6)
+            lbl1 = "Order Block / Liquidity Target 1 (0.35% Front-Run Above Low)"
         else:
-            tp1 = entry - (1.6 * risk)
-            lbl1 = "1.6 R:R Expansion Target 1"
+            tp1 = entry - (2.0 * risk)
+            lbl1 = "2.0 R:R Expansion Target 1"
 
-        lower_ssl = [p for p in all_ssl if p < tp1 * 0.997]
+        lower_ssl = [p for p in all_ssl if p < tp1 * 0.995]
         if len(lower_ssl) >= 1:
-            tp2 = lower_ssl[0]
-            lbl2 = "Liquidity Pool Target 2"
+            tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
+            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run)"
         else:
-            tp2 = min(tp1 * 0.995, entry - (2.5 * risk))
-            lbl2 = "2.5 R:R Expansion Target 2"
+            tp2 = min(tp1 * 0.995, entry - (3.0 * risk))
+            lbl2 = "3.0 R:R Expansion Target 2"
 
-        even_lower_ssl = [p for p in lower_ssl if p < tp2 * 0.997]
+        even_lower_ssl = [p for p in lower_ssl if p < tp2 * 0.995]
         if len(even_lower_ssl) >= 1:
-            tp3 = even_lower_ssl[0]
+            tp3 = round(even_lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
             lbl3 = "Liquidity Pool Target 3"
         else:
-            tp3 = min(tp2 * 0.995, entry - (3.5 * risk))
-            lbl3 = "3.5 R:R Expansion Target 3"
+            tp3 = min(tp2 * 0.995, entry - (4.0 * risk))
+            lbl3 = "4.0 R:R Expansion Target 3"
 
         rr1 = (entry - tp1) / risk
         rr2 = (entry - tp2) / risk
@@ -727,8 +749,8 @@ async def check_btc_volatility_shock(session: aiohttp.ClientSession, semaphore: 
             candle_range_pct = ((h - l) / o) * 100.0
             body_move_pct = (abs(c - o) / o) * 100.0
             
-            if body_move_pct >= 1.8 or candle_range_pct >= 2.2:
-                new_until = now_utc + timedelta(minutes=15)
+            if body_move_pct >= 1.2 or candle_range_pct >= 1.5:
+                new_until = now_utc + timedelta(minutes=30)
                 if _btc_shock_until is None or new_until > _btc_shock_until:
                     _btc_shock_until = new_until
                     
@@ -747,7 +769,7 @@ async def check_btc_volatility_shock(session: aiohttp.ClientSession, semaphore: 
                             f"⚡ <b>BTC VOLATILITY SHOCK SHIELD ACTIVATED</b> 🛡️\n\n"
                             f"• <b>BTC 15M Move:</b> {candle_range_pct:.2f}% Range (Body: {body_move_pct:.2f}%)\n"
                             f"• <b>Reason:</b> Extreme market volatility detected. Pausing new entries to prevent buying spike peaks/falling knives.\n"
-                            f"• <b>Action:</b> New signal scanning PAUSED for 15 minutes.\n"
+                            f"• <b>Action:</b> New signal scanning PAUSED for 30 minutes.\n"
                             f"• <b>Resumes:</b> {until_ist}\n\n"
                             f"<i>ℹ️ Active position TP/SL guards, step-trailing SL, and auto-healing remain 100% FULLY ARMED.</i>"
                         )
@@ -756,7 +778,7 @@ async def check_btc_volatility_shock(session: aiohttp.ClientSession, semaphore: 
                     except Exception as tel_err:
                         logger.error(f"Failed to send BTC shock Telegram alert: {tel_err}")
                         
-                    logger.warning(f"⚡ BTC Volatility Shock Shield triggered! Range: {candle_range_pct:.2f}%, Move: {body_move_pct:.2f}%. Scanner paused for 15m until {new_until.isoformat()}")
+                    logger.warning(f"⚡ BTC Volatility Shock Shield triggered! Range: {candle_range_pct:.2f}%, Move: {body_move_pct:.2f}%. Scanner paused for 30m until {new_until.isoformat()}")
                 
                 rem = (_btc_shock_until - now_utc).total_seconds() / 60.0
                 return True, rem

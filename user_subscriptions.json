@@ -39,7 +39,7 @@
       "BEAT/USDT",
       "PENDLE/USDT"
     ],
-    "min_stars": 3,
+    "min_stars": 4,
     "gold_scalp_5m_15m": false,
     "squeeze_alerts": true,
     "squeeze_only": false,

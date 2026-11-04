@@ -214,7 +214,6 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         tp1_hit_at_dt = candle_dt
                         tp1_hit_at_str = tp1_hit_at_dt.isoformat()
                         update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         cur_sl = profit_lock_sl
 
                     # 3. Check TP2 Hit (30% profit booked -> move SL to TP1)
@@ -223,14 +222,12 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         tp2_hit_at_dt = candle_dt
                         tp2_hit_at_str = tp2_hit_at_dt.isoformat()
                         update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         cur_sl = tp1
 
                     # 4. Check TP3 Hit (Final Moonbag)
                     if tp2_hit and row['high'] >= tp3:
                         outcome = "WIN"
                         final_price = tp3
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         break
 
                 elif direction == "SELL":
@@ -246,7 +243,6 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         tp1_hit_at_dt = candle_dt
                         tp1_hit_at_str = tp1_hit_at_dt.isoformat()
                         update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         cur_sl = profit_lock_sl
 
                     # 3. Check TP2 Hit
@@ -255,14 +251,12 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         tp2_hit_at_dt = candle_dt
                         tp2_hit_at_str = tp2_hit_at_dt.isoformat()
                         update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         cur_sl = tp1
 
                     # 4. Check TP3 Hit
                     if tp2_hit and row['low'] <= tp3:
                         outcome = "WIN"
                         final_price = tp3
-                        # if shark_order_placed: await executor.update_trailing_sl_on_tp_hit(...) # Disabled: handled strictly by Shark Native Monitor
                         break
 
             if not limit_filled and now_utc > limit_cutoff:
@@ -545,8 +539,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 risk = abs(entry - sl)
                 if risk == 0: continue
                 
-                tp = cross.get("tp", entry + (1.5 * risk) if signal == "BUY" else entry - (1.5 * risk))
-                rr = cross.get("rr", 1.5)
+                tp = cross.get("tp", entry + (2.0 * risk) if signal == "BUY" else entry - (2.0 * risk))
+                rr = cross.get("rr", 2.0)
                 tp_label = cross.get("tp_label", "Liquidity Pool Target")
                 
                 tp1 = cross.get("tp1")
@@ -611,6 +605,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "candle_ts": candle_ts,
                     "rr3": rr3 or 1.5,
                     "adx": cross.get("adx"),
+                    "rsi": rsi,
                 }
                 return cand
                 
@@ -991,8 +986,21 @@ async def main_loop():
                             from executor import executor
                             def _is_auto_trade_eligible(c):
                                 stars = c.get("aligned_count", 0)
-                                # STRICT USER DIRECTIVE: Execute BOTH Fresh Crossovers & Retests, ONLY for 4-Star (4/4 ⭐⭐⭐⭐) setups!
-                                return stars >= 4
+                                # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
+                                if stars < 3:
+                                    return False
+                                rsi = c.get("rsi")
+                                sig = c.get("signal", "BUY").upper()
+                                if rsi is not None:
+                                    try:
+                                        f_rsi = float(rsi)
+                                        if sig == "BUY" and not (45.0 <= f_rsi <= 72.0):
+                                            return False
+                                        elif sig == "SELL" and not (28.0 <= f_rsi <= 55.0):
+                                            return False
+                                    except (ValueError, TypeError):
+                                        pass
+                                return True
 
                             eligible_candidates = [c for c in raw_candidates if _is_auto_trade_eligible(c)]
                             
@@ -1031,7 +1039,10 @@ async def main_loop():
                                         s = executor.clean_sym(o)
                                         if s: active_syms.add(s)
 
-                                available_slots = max(0, executor.max_concurrent_trades - len(active_syms))
+                                if executor.max_concurrent_trades and executor.max_concurrent_trades >= 999:
+                                    available_slots = len(eligible_candidates)
+                                else:
+                                    available_slots = max(0, executor.max_concurrent_trades - len(active_syms))
 
                                 if available_slots <= 0:
                                     logger.info(f"🚫 PORTFOLIO FULL ({len(active_syms)}/{executor.max_concurrent_trades} slots occupied). Skipping auto-execution for all {len(eligible_candidates)} candidate(s).")

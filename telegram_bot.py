@@ -280,6 +280,20 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     
     if is_retest_sig:
         BATCH_RETESTS.append(alert_data)
+        # USER DIRECTIVE: Retest alerts must be dispatched TURANT (Instantly) to both personal DM and Scanner Channel!
+        try:
+            from config import TELEGRAM_CHAT_ID
+            header = "🔄 <b>LIVE EMA RETEST</b>\n"
+            retest_msg = header + _build_single_coin_block(alert_data)
+            EMA_SCANNER_CHANNEL = "-1004332146822"
+            targets = set([EMA_SCANNER_CHANNEL, TELEGRAM_CHAT_ID or "771305593"])
+            for ch in targets:
+                if ch:
+                    asyncio.create_task(send_text_to_chat(str(ch), retest_msg))
+            alert_data["instant_sent"] = True
+            logger.info(f"⚡ INSTANT RETEST ALERT DISPATCHED: {symbol} {tf_label} {signal} -> {targets}")
+        except Exception as e_ret:
+            logger.error(f"Error dispatching instant retest alert: {e_ret}")
     elif is_dedicated_sq:
         BATCH_BREAKOUTS.append(alert_data)
     else:
@@ -468,12 +482,12 @@ def _build_single_coin_block(data, index=None):
     block += f"🔴 <b>STOP-LOSS:</b> {format_price(sl, symbol)}\n"
     
     if tp1 and tp3 and (tp1 != tp3):
-        f_rr1 = float(rr1) if rr1 is not None else 1.5
+        f_rr1 = float(rr1) if rr1 is not None else 2.0
         f_rr2 = float(rr3) if rr3 is not None else 3.5
         block += f"🟢 <b>TP1:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"
         block += f"🚀 <b>TP2:</b> {format_price(tp3, symbol)} (1:{f_rr2:.1f} R:R)\n"
     elif tp1:
-        f_rr1 = float(rr1) if rr1 is not None else 1.6
+        f_rr1 = float(rr1) if rr1 is not None else 2.0
         block += f"🎯 <b>TARGET:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"
     else:
         block += f"🎯 <b>TARGET:</b> {format_price(data.get('tp'), symbol)}\n"
@@ -627,15 +641,16 @@ async def flush_alerts():
 
     if scanner_retests:
         scanner_retests.sort(key=_get_sort_key)
-        if len(scanner_retests) == 1:
+        unsent_retests = [item for item in scanner_retests if not item.get("instant_sent")]
+        if len(unsent_retests) == 1:
             try:
                 header = "🔄 <b>LIVE EMA RETEST</b>\n"
-                msg = header + _build_single_coin_block(scanner_retests[0])
+                msg = header + _build_single_coin_block(unsent_retests[0])
                 await send_text_to_chat(EMA_SCANNER_CHANNEL, msg)
             except Exception as e:
                 logger.error(f"Failed to send curated retest alert to {EMA_SCANNER_CHANNEL}: {e}")
-        else:
-            await _send_chunked_digest(scanner_retests, "LIVE EMA RETEST", "🔄", [EMA_SCANNER_CHANNEL])
+        elif len(unsent_retests) > 1:
+            await _send_chunked_digest(unsent_retests, "LIVE EMA RETEST", "🔄", [EMA_SCANNER_CHANNEL])
 
     # 3. AlphaCryptoSignals Filter Bot Subscribers Dispatch:
     try:

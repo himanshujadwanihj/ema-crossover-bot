@@ -273,22 +273,20 @@ async def register_paper_trade(alert_data: dict):
         if risk_pct <= 0:
             risk_pct = 0.015
 
-        # USER DIRECTIVE: Exact 2.0% Margin Sizing per Trade
-        # Trade Margin is strictly 2.0% of Wallet Balance (e.g. ~₹2,500 on ₹1,25,000 balance).
-        # Trade Notional is strictly Margin * LEVERAGE (e.g. ~₹25,000 on 10x).
+        # USER DIRECTIVE: Exact 2.0% Margin Sizing on AVAILABLE (Free) Margin on Broker / Wallet
         wallet_bal = float(wallet.get("balance", INITIAL_CAPITAL))
-        trade_margin_inr = round(max(MIN_MARGIN_INR, wallet_bal * 0.02), 2)
-        trade_notional_inr = round(trade_margin_inr * LEVERAGE, 2)
-        actual_risk_inr = trade_notional_inr * risk_pct
-        target_risk_inr = actual_risk_inr
-
         used_margin = sum(item.get("margin_inr", MARGIN_INR) for item in active_list + resting_list)
         available_margin = max(0.0, wallet_bal - used_margin)
 
-        # STRICT: Zero artificial money boosts. If free margin < required, skip trade!
-        if available_margin < trade_margin_inr:
-            logger.info(f"PAPER TRADER: Insufficient free margin (Available: ₹{available_margin:,.2f} < Required: ₹{trade_margin_inr:,.2f}). Skipping {symbol}.")
+        # STRICT: If free available margin < MIN_MARGIN_INR (₹500), skip trade!
+        if available_margin < MIN_MARGIN_INR:
+            logger.info(f"PAPER TRADER: Insufficient free available margin (Available: ₹{available_margin:,.2f} < Min ₹{MIN_MARGIN_INR:,.2f}). Skipping {symbol}.")
             return
+
+        trade_margin_inr = round(max(MIN_MARGIN_INR, available_margin * 0.02), 2)
+        trade_notional_inr = round(trade_margin_inr * LEVERAGE, 2)
+        actual_risk_inr = trade_notional_inr * risk_pct
+        target_risk_inr = actual_risk_inr
 
         # 4. Create & Activate new Virtual Limit Order with Real Contract Sizing
         notional_usd = trade_notional_inr / USD_INR_RATE
@@ -1371,11 +1369,10 @@ async def generate_strategy_lookout_card(session=None) -> str:
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
     closed = wallet.get("closed_trades", [])
-    exec_wins = sum(1 for t in closed if ("WIN" in str(t.get("status","")) or "TP" in str(t.get("status","")) or "PROFIT_LOCK" in str(t.get("status","")) or float(t.get("cumulative_pnl", 0) or 0) > 0) and "CANCEL" not in str(t.get("status","")) and t.get("symbol") != "PROFIT_INJECTION")
-    exec_losses = sum(1 for t in closed if ("SL" in str(t.get("status","")) or "LOSS" in str(t.get("status","")) or float(t.get("cumulative_pnl", 0) or 0) < 0) and "CANCEL" not in str(t.get("status","")) and t.get("symbol") != "PROFIT_INJECTION")
-    wins = wallet.get("wins", exec_wins)
-    losses = wallet.get("losses", exec_losses)
-    total_trades = wallet.get("total_trades", wins + losses)
+    exec_trades = [t for t in closed if "CANCEL" not in str(t.get("status", "")) and t.get("symbol") != "PROFIT_INJECTION"]
+    wins = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) > 0)
+    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) <= 0)
+    total_trades = len(exec_trades)
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
     active = wallet.get("active_positions", [])
     resting = wallet.get("resting_orders", [])
@@ -1498,12 +1495,12 @@ async def generate_trades_ledger_card() -> str:
     balance = wallet.get("balance", INITIAL_CAPITAL)
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
-    wins = wallet.get("wins", 0)
-    losses = wallet.get("losses", 0)
-    total_trades = wallet.get("total_trades", 0)
     fees_paid = wallet.get("total_fees_paid", 0.0)
     closed = wallet.get("closed_trades", [])
-
+    exec_trades = [t for t in closed if "CANCEL" not in str(t.get("status", "")) and t.get("symbol") != "PROFIT_INJECTION"]
+    wins = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) > 0)
+    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) <= 0)
+    total_trades = len(exec_trades)
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
 
     gross_wins = sum(t.get("cumulative_pnl", 0.0) for t in closed if t.get("cumulative_pnl", 0.0) > 0)

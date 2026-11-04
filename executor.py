@@ -1,28 +1,27 @@
 """
 executor.py — Automated Trade Execution & Order Bracket Engine for Shark Exchange (India).
 
-Enforces:
+Enforces Master Production Strategy:
 1. Fixed 10x Leverage on all executed trades.
-2. Fixed ₹1,000 INR Margin cap per trade (~$9.80 USDT at ~₹102.0/USDT).
-3. Shark Exchange Multi-Order Bracket Structure:
-   - 1 Entry Limit Order at Entry Price for Total Qty Q.
-   - 3 TP Limit Orders (TP1: 40% Qty, TP2: 30% Qty, TP3: 30% Qty) placed via placeType: 'POSITION' (₹0 extra margin lock).
-   - 1 Stop-Loss STOP_LIMIT Order for Total Qty Q at Initial SL (STRICT LIMIT ONLY — NO MARKET ORDERS).
+2. Dynamic 2.0% Available (Free) Margin Sizing per trade (Min ₹500 floor).
+3. 2-Tier Target Bracket Structure:
+   - 1 Entry Limit Order at Entry Price (30-min fill timeout).
+   - TP1 (70% Qty) with 0.35% Order Block Front-Running Buffer (Min 1:2.0 RR).
+   - TP2 (30% Qty Runner) at Macro Liquidity Expansion (Min 1:3.0 RR).
+   - 1 Stop-Loss STOP_LIMIT Order placed strictly below 26 EMA with 0.25*ATR buffer.
 4. Step Trailing Stop-Loss Engine:
-   - TP1 Hit: SL Order moved to Entry Price (Cost-to-Cost Shield) for remaining 60% Qty.
-   - TP2 Hit: SL Order moved to TP1 Price Level (Guaranteed Profit) for remaining 30% Qty.
-   - TP3 Hit: Trade 100% Closed (Full Win), remaining SL cancelled.
-5. Structural Retest Trailing Engine:
-   - Confirmed 15M/30M/1H EMA 26 Support/Resistance retest dynamically ratchets SL tighter (One-way: Longs trail UP, Shorts trail DOWN).
-6. Strict Single Order Margin Shield:
+   - TP1 Hit: SL Order moved to Cost-to-Cost (Breakeven Shield) for remaining 30% Qty.
+   - 12-Hour Stale Runner Rule: Closes 30% runner at market if 12h elapse without hitting TP2/SL.
+   - 20-Hour Position Timeout: Squares off stagnant trades at live market price.
+5. Strict Single Order Margin Shield:
    - Maximum 1 active order or open position per coin across exchange.
    - Rejects duplicate signal orders for the same coin to prevent multiple margin blocks.
-7. Global Portfolio Cap:
-   - Maximum 7 concurrent active trades.
-8. BTC/ETH Auto-Trade Exclusion:
-   - Excludes BTC and ETH from exchange execution (signals sent to Telegram, orders skipped).
-9. US Stock Token Exclusion:
-   - Only crypto coins traded. US equity tokens (GOOGLB, TSLA, NVDAB, etc.) are strictly excluded.
+6. Uncapped Concurrent Portfolio:
+   - Driven dynamically by broker free margin availability (zero artificial trade count caps).
+7. 15-Second Background Auto-Healing Loop:
+   - Verifies bracket integrity and restores any missing SL/TP orders automatically.
+8. Liquidation Shield:
+   - SL mathematically clamped >= 2.5% inside exchange liquidation price.
 """
 
 
@@ -76,7 +75,7 @@ def get_stop_limit_execution_price(symbol: str, side: str, stop_price: float) ->
     Ensures STRICT LIMIT ORDER execution (NEVER submits MARKET or STOP_MARKET orders).
     """
     clean_sym = clean_contract_symbol(symbol)
-    buffer_pct = 0.0020
+    buffer_pct = 0.0035  # Upgraded to 0.35% execution buffer for guaranteed fill on fast altcoin wicks
     if side.upper() in ["SELL", "LONG"]:
         limit_price = stop_price * (1.0 - buffer_pct)
     else:
@@ -380,7 +379,22 @@ class SharkExchangeExecutor:
             logger.error(f"Shark DELETE {endpoint} error: {e}")
             return 500, str(e)
 
-    def calculate_position_size(self, symbol: str, entry_price: float, sl_price: float = None, account_balance_inr: float = None, adx: float = None) -> tuple:
+    async def get_available_margin_inr(self, session: aiohttp.ClientSession) -> float:
+        """Fetches available (free) margin in INR from Shark Exchange futures wallet for dynamic 2% sizing."""
+        if not self.is_configured() or not session:
+            return 0.0
+        try:
+            status, resp = await self.shark_get(session, "/v1/wallet/futures-wallet/details")
+            if status == 200 and isinstance(resp, dict):
+                data = resp.get("data", {})
+                avail_bal = float(data.get("availableBalance") or 0.0)
+                if avail_bal > 0:
+                    return avail_bal * self.usd_inr_rate
+        except Exception as e:
+            logger.error(f"Error fetching available margin for dynamic sizing: {e}")
+        return 0.0
+
+    def calculate_position_size(self, symbol: str, entry_price: float, sl_price: float = None, available_margin_inr: float = None, adx: float = None) -> tuple:
         """
         Calculates position quantities for ₹1,500 INR margin at 10x leverage.
         Notional Value = (₹1,500 / 102.0) * 10 = ~$147.06 USDT.
@@ -390,8 +404,14 @@ class SharkExchangeExecutor:
         Returns (total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt).
         """
         clean_sym = clean_contract_symbol(symbol)
-        # STRICT USER DIRECTIVE: Every trade is strictly fixed ₹1,500 INR Margin @ 10x Leverage
-        margin_inr = float(self.margin_inr) if self.margin_inr and self.margin_inr > 0 else 1500.0
+        # USER DIRECTIVE: Exact 2.0% Dynamic Margin Sizing based on AVAILABLE (Free) Margin on Broker
+        # Trade Margin is strictly 2.0% of Available Margin (e.g. ₹1,500 on ₹75,000 free margin).
+        if available_margin_inr and float(available_margin_inr) > 0:
+            margin_inr = round(max(500.0, float(available_margin_inr) * 0.02), 2)
+        elif self.margin_inr and float(self.margin_inr) > 0:
+            margin_inr = float(self.margin_inr)
+        else:
+            margin_inr = 1500.0
         notional_inr = margin_inr * self.leverage
 
         margin_usdt = margin_inr / self.usd_inr_rate
@@ -544,7 +564,7 @@ class SharkExchangeExecutor:
         active_symbols = position_symbols | pending_entry_symbols | unexpired_local
         logger.info(f"Cap check [{len(active_symbols)}/{self.max_concurrent_trades}]: positions={position_symbols} pending={pending_entry_symbols} local={unexpired_local}")
 
-        if len(active_symbols) >= self.max_concurrent_trades and clean_sym not in active_symbols:
+        if self.max_concurrent_trades and self.max_concurrent_trades < 999 and len(active_symbols) >= self.max_concurrent_trades and clean_sym not in active_symbols:
             logger.warning(
                 f"🚫 STRICT HARD CAP REACHED: {len(active_symbols)}/{self.max_concurrent_trades} slots full (Active: {active_symbols}). "
                 f"REJECTING new order for {clean_sym}."
@@ -585,14 +605,8 @@ class SharkExchangeExecutor:
         """
         SAFE CLEANUP: Cancels ONLY pending ENTRY limit orders (placeType=ORDER_FORM)
         that push total active slots beyond max_concurrent_trades cap.
-
-        Rules:
-        - NEVER cancels TP/SL bracket orders (placeType=POSITION)
-        - NEVER cancels or modifies any filled/live positions
-        - Cancels the OLDEST pending entry orders first (FIFO)
-        - Sends Telegram alert for each cancelled pending order
         """
-        if not self.is_configured() or not session:
+        if not self.is_configured() or not session or (self.max_concurrent_trades and self.max_concurrent_trades >= 999):
             return
         try:
             positions  = await self.get_open_positions(session)
@@ -748,8 +762,12 @@ class SharkExchangeExecutor:
         except Exception as e:
             logger.error(f"Error checking exchange state for {clean_sym}: {e}")
 
-        # 3. Position Sizing
-        total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt = self.calculate_position_size(clean_sym, entry, sl_price=sl, adx=adx)
+        # 3. Position Sizing (Exact 2.0% Dynamic sizing on AVAILABLE Free Margin on Broker)
+        avail_margin_inr = await self.get_available_margin_inr(session)
+        if avail_margin_inr and avail_margin_inr < 500.0:
+            logger.warning(f"INSUFFICIENT AVAILABLE MARGIN ON BROKER: Only ₹{avail_margin_inr:,.2f} INR free (Min ₹500 required). Skipping {clean_sym}.")
+            return {"status": "skipped", "reason": f"Insufficient available margin on broker (₹{avail_margin_inr:,.0f} INR)"}
+        total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt = self.calculate_position_size(clean_sym, entry, sl_price=sl, available_margin_inr=avail_margin_inr, adx=adx)
         if total_qty <= 0:
             logger.error(f"Position size calculation resulted in 0 quantity for {clean_sym}.")
             return {"status": "error", "reason": "Invalid position size calculation"}
@@ -1268,6 +1286,82 @@ class SharkExchangeExecutor:
             logger.error(f"Error cancelling open orders for {clean_sym}: {e}")
             return False
 
+    async def close_position_market(self, session: aiohttp.ClientSession, symbol: str, reason: str = "TIMEOUT") -> bool:
+        """
+        Closes an open position at market price on Shark Exchange and cancels all attached open orders.
+        Used for 20-Hour Position Timeout and 12-Hour Stale Runner rule.
+        """
+        clean_sym = clean_contract_symbol(symbol)
+        if not self.is_configured() or not session:
+            return False
+        try:
+            pos = await self.get_open_position(session, clean_sym)
+            if not pos:
+                return False
+
+            pos_id = pos.get("positionId")
+            qty = abs(float(pos.get("quantity") or pos.get("positionAmount") or pos.get("amount") or 0))
+            if qty <= 0:
+                return False
+
+            pos_dir_raw = str(pos.get("positionType") or pos.get("positionSide") or pos.get("side") or "").upper()
+            exit_side = "SELL" if pos_dir_raw in ("LONG", "BUY") else "BUY"
+
+            clean_qty = round_coin_qty(clean_sym, qty)
+
+            payload = {
+                "placeType": "POSITION",
+                "positionId": pos_id,
+                "reduceOnly": True,
+                "type": "MARKET",
+                "side": exit_side,
+                "symbol": clean_sym,
+                "quantity": clean_qty
+            }
+            st, res = await self.shark_post(session, "/v1/order/place-order", payload)
+            if st in (200, 201):
+                logger.info(f"Position for {clean_sym} closed at MARKET on Shark Exchange ({reason}).")
+                await self.cancel_open_orders_for_symbol(session, clean_sym)
+                
+                exit_p = float(pos.get("markPrice") or pos.get("lastPrice") or pos.get("entryPrice") or 0)
+                entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
+                unreal_pnl = float(pos.get("unrealizedPnl") or 0)
+                pnl_inr = unreal_pnl * self.usd_inr_rate
+                pnl_str = f"+₹{pnl_inr:,.2f} INR" if pnl_inr >= 0 else f"-₹{abs(pnl_inr):,.2f} INR"
+                
+                from telegram_bot import send_text_alert
+                if "12-HR" in reason.upper() or "STALE" in reason.upper():
+                    msg = (
+                        f"⏳ <b>SHARK RUNNER CLOSED (12-HR STALE TRADE RULE)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>Asset:</b> {clean_sym}\n"
+                        f"<b>Reason:</b> 12 hours elapsed after TP1 hit without hitting TP2 or Breakeven SL.\n"
+                        f"🎯 <b>Exit Price:</b> {format_price(exit_p, clean_sym)}\n"
+                        f"💰 <b>Estimated PnL:</b> {pnl_str}\n"
+                        f"💡 <i>Freed broker margin for fresh high-momentum setups!</i>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                else:
+                    msg = (
+                        f"⏱️ <b>SHARK POSITION CLOSED (20-HOUR TIMEOUT RULE)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>Asset:</b> {clean_sym}\n"
+                        f"<b>Reason:</b> Position active for 20 hours. Squared off at live market price!\n"
+                        f"🎯 <b>Entry Price:</b> {format_price(entry_p, clean_sym)}\n"
+                        f"🏁 <b>Exit Price (Market):</b> {format_price(exit_p, clean_sym)}\n"
+                        f"💰 <b>Estimated PnL:</b> {pnl_str}\n"
+                        f"💼 <i>Margin released safely on exchange!</i>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                await send_text_alert(msg)
+                return True
+            else:
+                logger.error(f"Failed to close position at market for {clean_sym}: {res}")
+                return False
+        except Exception as e:
+            logger.error(f"Error in close_position_market for {clean_sym}: {e}")
+            return False
+
     async def sweep_expired_entry_orders(self, session: aiohttp.ClientSession, max_minutes: float = 30.0) -> None:
         """
         EXCHANGE-NATIVE 30-MIN ORDER SWEEPER:
@@ -1428,6 +1522,41 @@ class SharkExchangeExecutor:
                     continue
 
                 sym_orders = orders_by_sym.get(sym, [])
+
+                # Check 20-Hour Position Timeout and 12-Hour Stale Runner on Real Exchange
+                now_utc = datetime.now(timezone.utc)
+                pos_time = None
+                raw_pos_t = pos.get("createdAt") or pos.get("time") or (state_entry.get("limit_filled_at") if state_entry else None) or (state_entry.get("created_at") if state_entry else None)
+                if raw_pos_t:
+                    try:
+                        raw_s = str(raw_pos_t).strip().replace("Z", "+00:00").replace(" ", "T")
+                        if raw_s.replace(".", "", 1).isdigit():
+                            ts_n = float(raw_s)
+                            if ts_n > 1e11: ts_n /= 1000.0
+                            pos_time = datetime.fromtimestamp(ts_n, tz=timezone.utc)
+                        else:
+                            pos_time = datetime.fromisoformat(raw_s)
+                            if pos_time.tzinfo is None: pos_time = pos_time.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+
+                # 1. 20-Hour Position Timeout
+                if pos_time and (now_utc - pos_time).total_seconds() >= 20 * 3600:
+                    logger.warning(f"⏱️ 20-Hour Timeout reached for {sym} on Shark Exchange. Squaring off position at market.")
+                    await self.close_position_market(session, sym, reason="20-HOUR TIMEOUT")
+                    continue
+
+                # 2. 12-Hour Stale Runner Rule (if TP1 was hit > 12 hours ago)
+                if state_entry and state_entry.get("tp1_hit") and state_entry.get("tp1_hit_at"):
+                    try:
+                        tp1_t = datetime.fromisoformat(str(state_entry.get("tp1_hit_at")).replace("Z", "+00:00"))
+                        if tp1_t.tzinfo is None: tp1_t = tp1_t.replace(tzinfo=timezone.utc)
+                        if (now_utc - tp1_t).total_seconds() >= 12 * 3600:
+                            logger.warning(f"⏳ 12-Hour Stale Runner reached for {sym} on Shark Exchange. Squaring off runner at market.")
+                            await self.close_position_market(session, sym, reason="12-HR STALE RUNNER")
+                            continue
+                    except Exception:
+                        pass
 
                 # Count TP orders (Native position TP brackets & reduceOnly position limit orders)
                 tp_orders = [
@@ -1754,24 +1883,14 @@ class SharkExchangeExecutor:
             pnl_inr  = pnl_usdt * self.usd_inr_rate
             runner_qty = real_qty if real_qty > 0 else tp3_qty
 
-            # 2. Compute +0.4R Profit-Lock SL
-            risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (abs(tp1 - real_entry) / 1.5)
-            if direction == "BUY":
-                profit_lock_sl = real_entry + (0.40 * risk)
-                if profit_lock_sl >= tp1:
-                    profit_lock_sl = real_entry + (0.20 * risk)
-                profit_lock_sl = max(profit_lock_sl, real_entry * 1.002)
-            else:
-                profit_lock_sl = real_entry - (0.40 * risk)
-                if profit_lock_sl <= tp1:
-                    profit_lock_sl = real_entry - (0.20 * risk)
-                profit_lock_sl = min(profit_lock_sl, real_entry * 0.998)
+            # 2. Shift SL to pure Entry Price (Cost-to-Cost / Breakeven Shield)
+            trailed_sl = round_price(clean_sym, real_entry)
 
             # Clamp with Liquidation Shield
-            safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, profit_lock_sl, direction, self.leverage, live_liq)
+            safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange to safe_trailed_sl for remaining runner
-            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to +0.4R Profit-Lock {safe_trailed_sl} (Runner qty={runner_qty})")
+            # 3. Modify Stop-Loss order on Shark Exchange to Cost-to-Cost for remaining runner
+            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to Cost-to-Cost {safe_trailed_sl} (Runner qty={runner_qty})")
             if runner_qty > 0:
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty)
 
@@ -1793,9 +1912,9 @@ class SharkExchangeExecutor:
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                 f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
                 f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR) 💰\n"
-                f"🛡️ <b>SL Trailed to +0.4R Profit-Lock:</b> {format_price(safe_trailed_sl)}\n"
+                f"🛡️ <b>SL Trailed to Entry Price (Cost-to-Cost / Breakeven):</b> {format_price(safe_trailed_sl)}\n"
                 f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
-                f"<i>Stepped Trailing Engine Active: Ratchets to +1.2R at +2.2R, and +2.0R at +3.0R!</i>{bal_block}"
+                f"<i>Trade is now 100% Zero-Risk. Aiming for full 1:3.0+ RR expansion!</i>{bal_block}"
             )
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(msg)

@@ -491,5 +491,42 @@
     ],
     "desc": "BNB/USDT 1H",
     "deleted": false
+  },
+  {
+    "id": "1793768479_11463",
+    "timestamp": 1793768479.9791434,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11463,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11464
+      }
+    ],
+    "desc": "BTC/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1793768481_11465",
+    "timestamp": 1793768481.13946,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11465,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7292597013",
+        "message_id": 11466
+      },
+      {
+        "bot_type": "filter",
+        "chat_id": "6208893193",
+        "message_id": 11467
+      }
+    ],
+    "desc": "SUI/USDT 4H",
+    "deleted": false
   }
 ]

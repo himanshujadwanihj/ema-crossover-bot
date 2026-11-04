@@ -464,6 +464,7 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         "unique_key": unique_key,
                         "candle_ts": dedup_ts,
                         "rr3": rr3 or 1.5,
+                        "rsi": cur_rsi,
                     }
         except Exception as e:
             logger.error(f"Error in pullback tracker for {symbol}: {e}")
