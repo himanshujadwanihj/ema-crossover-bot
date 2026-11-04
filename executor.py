@@ -1787,9 +1787,11 @@ class SharkExchangeExecutor:
                         if sl_p_raw > 0:
                             # Strict Liquidation Check: Is SL on or beyond liquidation price?
                             is_beyond_liq = (direction == "BUY" and live_liq > 0 and sl_p_raw <= live_liq) or                                             (direction == "SELL" and live_liq > 0 and sl_p_raw >= live_liq)
-                            # Noise check: Is SL too tight?
+                            # Noise check: Is SL too tight on an UNTRAILED / FRESH trade?
+                            # IMPORTANT: If TP1 has already hit or position is trailed to breakeven/profit, do NOT downgrade SL!
+                            is_trailed = bool(state_entry and (state_entry.get("tp1_hit") or (state_entry.get("trail_stage") or 0) > 0))
                             min_dist_threshold = round_price(sym, entry_price * (1.0 - min_sl_pct if direction == "BUY" else 1.0 + min_sl_pct))
-                            is_too_tight = (direction == "BUY" and sl_p_raw > min_dist_threshold) or (direction == "SELL" and sl_p_raw < min_dist_threshold)
+                            is_too_tight = not is_trailed and ((direction == "BUY" and sl_p_raw > min_dist_threshold) or (direction == "SELL" and sl_p_raw < min_dist_threshold))
 
                             if is_beyond_liq:
                                 logger.critical(f"🚨 DANGER: SL {sl_p_raw} for {sym} [{direction}] is beyond liquidation {live_liq}! Upgrading SL above liquidation now!")
@@ -1883,14 +1885,22 @@ class SharkExchangeExecutor:
             pnl_inr  = pnl_usdt * self.usd_inr_rate
             runner_qty = real_qty if real_qty > 0 else tp3_qty
 
-            # 2. Shift SL to pure Entry Price (Cost-to-Cost / Breakeven Shield)
-            trailed_sl = round_price(clean_sym, real_entry)
+            # 2. Shift SL to Cost-to-Cost + 0.4% (Guaranteed Fee-Proof Shield & Profit-Lock)
+            risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (real_entry * 0.012)
+            if direction == "BUY":
+                # Entry + 0.40% CTC buffer or +0.4R (whichever gives stronger protection)
+                target_sl = max(real_entry * 1.004, real_entry + (0.40 * risk))
+                trailed_sl = round_price(clean_sym, min(target_sl, tp1 * 0.998))
+            else:
+                # Entry - 0.40% CTC buffer or -0.4R (whichever gives stronger protection)
+                target_sl = min(real_entry * 0.996, real_entry - (0.40 * risk))
+                trailed_sl = round_price(clean_sym, max(target_sl, tp1 * 1.002))
 
             # Clamp with Liquidation Shield
             safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange to Cost-to-Cost for remaining runner
-            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to Cost-to-Cost {safe_trailed_sl} (Runner qty={runner_qty})")
+            # 3. Modify Stop-Loss order on Shark Exchange to CTC + 0.4% for remaining runner
+            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC + 0.4% {safe_trailed_sl} (Runner qty={runner_qty})")
             if runner_qty > 0:
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty)
 

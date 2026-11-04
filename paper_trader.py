@@ -623,12 +623,12 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                 pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
                 pos["remaining_qty"] = pos.get("initial_qty", pos.get("qty", 0.0)) * 0.30
 
-                # Compute +0.4R Profit-Lock SL
+                # Compute CTC + 0.4% / +0.4R Profit-Lock SL
                 risk = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-                profit_lock_sl = entry + (0.40 * risk)
+                profit_lock_sl = max(entry * 1.004, entry + (0.40 * risk))
                 if profit_lock_sl >= tp1:
                     profit_lock_sl = entry + (0.20 * risk)
-                profit_lock_sl = max(profit_lock_sl, entry * 1.002)
+                profit_lock_sl = max(profit_lock_sl, entry * 1.004)
 
                 # Clamp with liquidation shield
                 profit_lock_sl = enforce_sl_above_liquidation(symbol, entry, profit_lock_sl, signal, LEVERAGE, liq)
@@ -879,12 +879,12 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                 pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
                 pos["remaining_qty"] = pos.get("initial_qty", pos.get("qty", 0.0)) * 0.30
 
-                # Compute +0.4R Profit-Lock SL
+                # Compute CTC - 0.4% / -0.4R Profit-Lock SL
                 risk = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-                profit_lock_sl = entry - (0.40 * risk)
+                profit_lock_sl = min(entry * 0.996, entry - (0.40 * risk))
                 if profit_lock_sl <= tp1:
                     profit_lock_sl = entry - (0.20 * risk)
-                profit_lock_sl = min(profit_lock_sl, entry * 0.998)
+                profit_lock_sl = min(profit_lock_sl, entry * 0.996)
 
                 # Clamp with liquidation shield
                 profit_lock_sl = enforce_sl_above_liquidation(symbol, entry, profit_lock_sl, signal, LEVERAGE, liq)

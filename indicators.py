@@ -303,18 +303,7 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         rr2 = (tp2 - entry) / risk
         rr3 = (tp3 - entry) / risk
 
-        # High Volume Expansion Rule (>= 1.5x 20-SMA Volume): Upgrade primary target (tp1) to upper liquidity pool (tp2)
-        vol_expansion = 1.0
-        if df is not None and 'volume' in df.columns and len(df) >= 20:
-            vol_sma = df['volume'].rolling(20).mean().iloc[-1]
-            if vol_sma > 0:
-                vol_expansion = float(df['volume'].iloc[-1] / vol_sma)
-
-        if vol_expansion >= 1.5 and tp2 > tp1:
-            tp1 = tp2
-            lbl1 = f"High Volume Expansion ({vol_expansion:.1f}x) Upper Liquidity Target"
-            rr1 = rr2
-
+        # 70/30 Rule: TP1 strictly locked at >= 1:2.0 RR partial profit target (No volume override)
         return sl, (tp1, tp2, tp3), (round(rr1, 2), round(rr2, 2), round(rr3, 2)), (lbl1, lbl2, lbl3)
 
     else: # SELL
@@ -407,18 +396,7 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         rr2 = (entry - tp2) / risk
         rr3 = (entry - tp3) / risk
 
-        # High Volume Expansion Rule (>= 1.5x 20-SMA Volume): Upgrade primary target (tp1) to lower liquidity pool (tp2)
-        vol_expansion = 1.0
-        if df is not None and 'volume' in df.columns and len(df) >= 20:
-            vol_sma = df['volume'].rolling(20).mean().iloc[-1]
-            if vol_sma > 0:
-                vol_expansion = float(df['volume'].iloc[-1] / vol_sma)
-
-        if vol_expansion >= 1.5 and tp2 < tp1:
-            tp1 = tp2
-            lbl1 = f"High Volume Expansion ({vol_expansion:.1f}x) Lower Liquidity Target"
-            rr1 = rr2
-
+        # 70/30 Rule: TP1 strictly locked at >= 1:2.0 RR partial profit target (No volume override)
         return sl, (tp1, tp2, tp3), (round(rr1, 2), round(rr2, 2), round(rr3, 2)), (lbl1, lbl2, lbl3)
 
 def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict = None) -> list:
