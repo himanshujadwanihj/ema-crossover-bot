@@ -379,14 +379,21 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 cvd_aligned = cvd_metrics.get("is_aligned", True)
                                 
                                 if cvd_aligned:
-                                    entry = candle_close
-                                    sl = float(df_1h['low'].iloc[-4:].min()) * 0.998 if sq_signal == 'BUY' else float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                    # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
+                                    # Instead of chasing the candle_close top, anchor limit entry near broken range boundary
+                                    if sq_signal == 'BUY':
+                                        retest_target = range_high * 1.0015
+                                        entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
+                                        sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                        cross_type = "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
+                                    else:
+                                        retest_target = range_low * 0.9985
+                                        entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
+                                        sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                        cross_type = "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
+
                                     from indicators import find_liquidity_pool_targets, _compute_indicators
                                     dyn_sl, (tp1, tp2, tp3), (rr1, rr2, rr3), (lbl1, lbl2, lbl3) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
-                                    if sq_signal == 'BUY':
-                                        cross_type = "🚀 1H Short-Squeeze Breakout (Radar Cleared + CVD ✅)"
-                                    else:
-                                        cross_type = "🩸 1H Long-Squeeze Breakdown (Radar Cleared + CVD ✅)"
                                     
                                     df_1h_ind = _compute_indicators(df_1h)
                                     sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0

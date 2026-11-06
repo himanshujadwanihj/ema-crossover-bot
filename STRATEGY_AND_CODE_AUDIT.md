@@ -24,6 +24,7 @@
 | **14** | **30-Min Entry Limit Expiry** | Unfilled entry limit orders are cancelled directly on exchange after 30 minutes. | `executor.py` (Lines 1290–1370) |
 | **15** | **BTC Volatility Shock Shield** | If BTC 15M candle range >= 1.5% or body move >= 1.2%, altcoin scanning pauses for 30 minutes. | `indicators.py` (Lines 730–765), `main.py` (L876) |
 | **16** | **15-Sec Auto-Healing Loop** | Background loop continuously queries exchange positions & orders; restores any missing SL/TP bracket orders. | `executor.py` (Lines 1372–1540), `main.py` (L706) |
+| **17** | **1H Squeeze Retest Breakout (Upgrade 2)** | Squeeze breakouts anchor limit entry near broken range boundary (retest bounce) instead of chasing candle close top. Multiplies RR to 3.0R+. | main.py (Lines 380–400), indicators.py (L789–845) |
 
 ---
 

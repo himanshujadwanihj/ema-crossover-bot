@@ -415,10 +415,16 @@ def _build_single_coin_block(data, index=None):
     close_time_str = calculate_candle_close_time(data.get("candle_time"), tf_label)
     retest_time_str = _format_time(data.get("candle_time"))
 
-    # Squeeze Badge header & Market Dynamic explanation (Strict separation: Retests are NEVER Squeezes)
-    is_retest = "Retest" in cross_type
-    is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
-    is_squeeze = (data.get("is_dedicated_squeeze", False) or "Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type) and not is_retest and not is_cross
+    # Squeeze Badge header & Market Dynamic explanation (Strict separation: Dedicated Squeeze takes priority)
+    is_dedicated_sq = bool(data.get("is_dedicated_squeeze", False))
+    if is_dedicated_sq:
+        is_squeeze = True
+        is_retest = False
+        is_cross = False
+    else:
+        is_retest = "Retest" in cross_type
+        is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
+        is_squeeze = ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type) and not is_retest and not is_cross
     if is_squeeze:
         if signal == "BUY":
             sq_icon = "🟢"
