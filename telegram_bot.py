@@ -544,10 +544,23 @@ def _build_single_coin_block(data, index=None):
             tf_label=tf_label,
             cross_type=cross_type,
         )
-        block += analysis["analysis_block"]
+        # Background only -- do NOT append to Telegram message
+        logger.info(
+            "[AI-ANALYSER] %s %s %s | Score=%s/100 | %s | "
+            "RSI=%s ADX=%s Vol=%s HTF=%s MACD=%s Body=%s Session=%s",
+            symbol, tf_label, signal,
+            analysis["score"], analysis["verdict"],
+            analysis["components"].get("rsi", 0),
+            analysis["components"].get("adx", 0),
+            analysis["components"].get("volume", 0),
+            analysis["components"].get("htf", 0),
+            analysis["components"].get("macd", 0),
+            analysis["components"].get("body", 0),
+            analysis["components"].get("session", 0),
+        )
     except Exception as _ae:
         pass
-    # -- END AI SIGNAL ANALYSIS BLOCK --
+    # -- END AI SIGNAL ANALYSIS BLOCK (background logging only) --
     return block
 
 def _format_time(candle_time):
