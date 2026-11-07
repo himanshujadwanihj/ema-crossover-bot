@@ -903,6 +903,33 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await message_sync.delete_last_n_broadcasts(count)
 
+
+async def cmd_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Immediately stops all bots, scanners, and channels."""
+    user_id = str(update.effective_user.id if update.effective_user else "")
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593")
+    if user_id != admin_id:
+        return
+    with open("STOP_BOT.flag", "w") as f:
+        f.write("STOPPED via Telegram /stop at " + datetime.now(timezone.utc).isoformat())
+    await update.message.reply_text("🛑 <b>EMERGENCY STOP TRIGGERED</b>\n\nAll scanners, trades, and channels have been immediately stopped and frozen!\n\nTo resume, send /startbot", parse_mode="HTML")
+
+async def cmd_resume_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Resumes bots."""
+    user_id = str(update.effective_user.id if update.effective_user else "")
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593")
+    if user_id != admin_id:
+        return
+    if os.path.exists("STOP_BOT.flag"):
+        try:
+            os.remove("STOP_BOT.flag")
+        except Exception:
+            pass
+    await update.message.reply_text("✅ <b>BOT RESUMED</b>\n\nSTOP_BOT lock cleared. Scanners are active.", parse_mode="HTML")
+
+
 def get_application() -> Application:
     """Returns singleton Application instance configured with interactive handlers."""
     global _app_instance
@@ -917,6 +944,8 @@ def get_application() -> Application:
         _app_instance.add_handler(CommandHandler(["getid", "channelid", "id"], cmd_getid))
         _app_instance.add_handler(CommandHandler(["positions", "paper", "wallet", "trades"], cmd_positions))
         _app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
+        _app_instance.add_handler(CommandHandler(["stop", "kill", "halt", "pause"], cmd_stop_bot))
+        _app_instance.add_handler(CommandHandler(["startbot", "resume", "resumebot"], cmd_resume_bot))
         _app_instance.add_handler(MessageHandler(filters.FORWARDED, on_forwarded_message))
         _app_instance.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_any_channel_message))
         

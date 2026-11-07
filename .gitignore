@@ -38,3 +38,5 @@ daily_msgs.json
 bot.log
 
 *.zip
+
+STOP_BOT.flag

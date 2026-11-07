@@ -528,5 +528,53 @@
     ],
     "desc": "SUI/USDT 4H",
     "deleted": false
+  },
+  {
+    "id": "1794029893_11476",
+    "timestamp": 1794029893.8859491,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11476,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "6208893193",
+        "message_id": 11477
+      }
+    ],
+    "desc": "INJ/USDT 4H",
+    "deleted": false
+  },
+  {
+    "id": "1794030203_11478",
+    "timestamp": 1794030203.2455137,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11478,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "7997136982",
+        "message_id": 11479
+      }
+    ],
+    "desc": "SOL/USDT 1H",
+    "deleted": false
+  },
+  {
+    "id": "1794030353_11480",
+    "timestamp": 1794030353.381321,
+    "admin_bot_type": "filter",
+    "admin_chat_id": "771305593",
+    "admin_msg_id": 11480,
+    "recipients": [
+      {
+        "bot_type": "filter",
+        "chat_id": "6208893193",
+        "message_id": 11481
+      }
+    ],
+    "desc": "FET/USDT 1H",
+    "deleted": false
   }
 ]

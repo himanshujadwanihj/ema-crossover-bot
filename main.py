@@ -28,6 +28,72 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
+
+async def run_startup_reconciliation(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
+    """
+    1-Minute Startup Reconciliation & Offline Audit:
+    When bot resumes after being stopped:
+    1. Audits all pending/active paper positions and resting orders to see what happened offline.
+    2. Checks for hits (TP1, TP2, TP3, SL) and 30-min expirations.
+    3. Reconciles wallet balance, locked profits, and fees.
+    4. Logs detailed breakdown and sends an admin notification.
+    5. Waits the remaining time of 60 seconds for full order book and market data stabilization before scanning.
+    """
+    start_recon = time.time()
+    logger.info("=" * 65)
+    logger.info("🔄 BOT RESUMED: Starting 60-Second Offline Audit & Reconciliation...")
+    logger.info("=" * 65)
+    
+    # 1. Resolve pending trades & paper wallet
+    from paper_trader import evaluate_paper_trades_async, load_wallet
+    w_before = load_wallet()
+    active_before = len(w_before.get("active_positions", []))
+    resting_before = len(w_before.get("resting_orders", []))
+    closed_before = len(w_before.get("closed_trades", []))
+    
+    await resolve_pending_trades_async(session, semaphore)
+    await evaluate_paper_trades_async(session, semaphore)
+    
+    w_after = load_wallet()
+    active_after = len(w_after.get("active_positions", []))
+    resting_after = len(w_after.get("resting_orders", []))
+    closed_after = len(w_after.get("closed_trades", []))
+    
+    newly_closed = closed_after - closed_before
+    
+    logger.info(f"📊 RECONCILIATION AUDIT:")
+    logger.info(f"   • Active Positions: {active_before} -> {active_after}")
+    logger.info(f"   • Resting Orders:   {resting_before} -> {resting_after}")
+    logger.info(f"   • Offline Resolved: {newly_closed} closed trades updated")
+    logger.info(f"   • Current Balance:  ₹{w_after.get('balance', 0):,.2f} INR")
+    
+    # Send one clean Telegram admin notification about the reconciliation
+    try:
+        from telegram_bot import send_text_to_chat
+        from config import TELEGRAM_CHAT_ID
+        admin_chat = TELEGRAM_CHAT_ID or "771305593"
+        recon_msg = (
+            "🔄 <b>BOT RE-ACTIVATED & RECONCILED</b>\n\n"
+            f"<b>Offline Audit Results:</b>\n"
+            f"• Active Positions: <b>{active_after}</b>\n"
+            f"• Closed/Expired while offline: <b>{newly_closed}</b>\n"
+            f"• Live Paper Balance: <b>₹{w_after.get('balance', 0):,.2f} INR</b>\n\n"
+            "⏳ <i>Warming up feeds... Fresh live market scan starting in a few seconds (Deduplication Guard active).</i>"
+        )
+        await send_text_to_chat(admin_chat, recon_msg)
+    except Exception as e_tg:
+        logger.warning(f"Could not dispatch reconciliation Telegram alert: {e_tg}")
+
+    # Ensure full 60 seconds warm-up before kicking off the first scan
+    elapsed = time.time() - start_recon
+    remain_sleep = max(0, 60.0 - elapsed)
+    if remain_sleep > 0:
+        logger.info(f"⏳ Market warm-up in progress ({remain_sleep:.1f}s remaining). Waiting before initial live scan...")
+        await asyncio.sleep(remain_sleep)
+    
+    logger.info("✅ 60-Second Reconciliation Complete. Initiating Fresh Live Scan...")
+
+
 async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
     # Always evaluate virtual paper trading positions (₹1,00,000 INR starting capital)
     try:
@@ -372,8 +438,15 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             elif not is_safe:
                                 logger.info(f"FILTERED 1H SQUEEZE: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
                                 sq_signal = None
+                            # Breakout Freshness Guard: Reject historical breakouts older than 65 minutes
+                            if sq_signal and candle_ts:
+                                c_dt = _parse_iso_dt(candle_ts)
+                                if c_dt and (datetime.now(timezone.utc) - c_dt).total_seconds() > 3900:
+                                    logger.info(f"FILTERED STALE SQUEEZE: {symbol} 1H breakout candle was {(datetime.now(timezone.utc) - c_dt).total_seconds()/60:.1f}m ago while bot was offline.")
+                                    sq_signal = None
+
                             unique_sq_key = f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}"
-                            if not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
+                            if sq_signal and not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
                                 micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h)
                                 cvd_metrics = micro_1h.get("cvd_metrics", {})
                                 cvd_aligned = cvd_metrics.get("is_aligned", True)
@@ -815,7 +888,13 @@ async def main_loop():
             last_dashboard_update_time = 0
             daily_digest_sent_today = False
 
+            # 1-Minute Startup Reconciliation & Offline Audit on Resume
+            await run_startup_reconciliation(session, semaphore)
+
             while True:
+                if os.path.exists("STOP_BOT.flag"):
+                    logger.warning("STOP_BOT.flag detected! Emergency Stop Switch triggered. Exiting main scanner loop.")
+                    break
                 try:
                     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
                     today_str = now_ist.strftime("%Y-%m-%d")
