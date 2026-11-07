@@ -19,6 +19,8 @@ from market_cache import (
     MARKET_CACHE
 )
 
+from signal_analyser import analyse_signal
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -498,6 +500,54 @@ def _build_single_coin_block(data, index=None):
     else:
         block += f"🎯 <b>TARGET:</b> {format_price(data.get('tp'), symbol)}\n"
         
+    # -- AI SIGNAL ANALYSIS BLOCK --
+    try:
+        df_tf = None
+        if isinstance(data.get("tf_data"), dict):
+            df_tf = data["tf_data"].get(data.get("tf_label")) or data["tf_data"].get("1H")
+
+        vol_now = None
+        vol_sma_now = None
+        body_ratio_now = None
+        macd_line_now = None
+        macd_sig_now = None
+
+        if df_tf is not None and len(df_tf) >= 22:
+            try:
+                vol_now = float(df_tf["volume"].iloc[-2])
+                vol_sma_now = float(df_tf["volume"].iloc[-22:-2].mean())
+                c_open  = float(df_tf["open"].iloc[-2])
+                c_high  = float(df_tf["high"].iloc[-2])
+                c_low   = float(df_tf["low"].iloc[-2])
+                c_close = float(df_tf["close"].iloc[-2])
+                c_body  = abs(c_close - c_open)
+                c_range = max(c_high - c_low, 1e-8)
+                body_ratio_now = c_body / c_range
+                macd_line_ser  = df_tf["close"].ewm(span=12, adjust=False).mean() - df_tf["close"].ewm(span=26, adjust=False).mean()
+                macd_sig_ser   = macd_line_ser.ewm(span=9, adjust=False).mean()
+                macd_line_now  = float(macd_line_ser.iloc[-2])
+                macd_sig_now   = float(macd_sig_ser.iloc[-2])
+            except Exception:
+                pass
+
+        analysis = analyse_signal(
+            symbol=symbol,
+            signal=signal,
+            rsi=data.get("rsi"),
+            adx=data.get("adx"),
+            volume=vol_now,
+            volume_sma=vol_sma_now,
+            macd_line=macd_line_now,
+            macd_signal_val=macd_sig_now,
+            body_ratio=body_ratio_now,
+            aligned_count=aligned_count,
+            tf_label=tf_label,
+            cross_type=cross_type,
+        )
+        block += analysis["analysis_block"]
+    except Exception as _ae:
+        pass
+    # -- END AI SIGNAL ANALYSIS BLOCK --
     return block
 
 def _format_time(candle_time):
