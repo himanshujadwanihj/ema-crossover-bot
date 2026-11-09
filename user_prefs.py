@@ -30,6 +30,90 @@ DEFAULT_MIN_STARS = 3
 _prefs_cache = None
 
 BACKUP_PREFS_FILE = "user_subscriptions_backup.json"
+BANNED_FILE = "/data/banned_users.json" if os.path.isdir("/data") else "banned_users.json"
+BACKUP_BANNED_FILE = "banned_users_backup.json"
+
+def _load_banned() -> Dict[str, Any]:
+    banned = {}
+    if os.path.exists(BANNED_FILE):
+        try:
+            with open(BANNED_FILE, "r", encoding="utf-8") as f:
+                banned = json.load(f)
+        except Exception:
+            pass
+    if not banned and os.path.exists(BACKUP_BANNED_FILE):
+        try:
+            with open(BACKUP_BANNED_FILE, "r", encoding="utf-8") as fb:
+                banned = json.load(fb)
+        except Exception:
+            pass
+    return banned
+
+def _save_banned(banned: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(BANNED_FILE) if os.path.dirname(BANNED_FILE) else ".", exist_ok=True)
+        with open(BANNED_FILE, "w", encoding="utf-8") as f:
+            json.dump(banned, f, indent=2)
+    except Exception:
+        pass
+    try:
+        with open(BACKUP_BANNED_FILE, "w", encoding="utf-8") as fb:
+            json.dump(banned, fb, indent=2)
+    except Exception:
+        pass
+
+def is_user_banned(chat_id: str) -> bool:
+    banned = _load_banned()
+    return str(chat_id).strip() in banned
+
+def remove_user(chat_id: str) -> bool:
+    """Removes a user completely from active subscriptions and dual backups."""
+    cid = str(chat_id).strip()
+    prefs = _load_prefs()
+    found = False
+    if cid in prefs:
+        del prefs[cid]
+        found = True
+        _save_prefs(prefs)
+    
+    if os.path.exists(BACKUP_PREFS_FILE):
+        try:
+            with open(BACKUP_PREFS_FILE, "r", encoding="utf-8") as fb:
+                bdata = json.load(fb)
+            if cid in bdata:
+                del bdata[cid]
+                found = True
+                with open(BACKUP_PREFS_FILE, "w", encoding="utf-8") as fb:
+                    json.dump(bdata, fb, indent=2)
+        except Exception:
+            pass
+    return found
+
+def ban_user(chat_id: str, reason: str = "") -> bool:
+    """Permanently bans a user so they cannot receive alerts or re-subscribe."""
+    cid = str(chat_id).strip()
+    remove_user(cid)
+    banned = _load_banned()
+    banned[cid] = {
+        "banned_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason
+    }
+    _save_banned(banned)
+    return True
+
+def unban_user(chat_id: str) -> bool:
+    """Unbans a user allowing them to use the bot again."""
+    cid = str(chat_id).strip()
+    banned = _load_banned()
+    if cid in banned:
+        del banned[cid]
+        _save_banned(banned)
+        return True
+    return False
+
+def get_banned_users() -> Dict[str, Any]:
+    return _load_banned()
+
 
 def _load_prefs() -> Dict[str, Any]:
     global _prefs_cache
@@ -90,6 +174,8 @@ def _save_prefs(data: Dict[str, Any]) -> None:
         logger.error(f"Error saving {BACKUP_PREFS_FILE}: {eb}")
 
 def get_user_prefs(chat_id: str, user_obj=None) -> Dict[str, Any]:
+    if is_user_banned(chat_id):
+        return {"enabled": False, "banned": True}
     prefs = _load_prefs()
     cid = str(chat_id)
     if cid not in prefs:
@@ -238,6 +324,8 @@ def remove_custom_coin(chat_id: str, coin: str) -> Dict[str, Any]:
     return u
 
 def is_alert_allowed_for_user(chat_id: str, alert_data: dict) -> bool:
+    if is_user_banned(chat_id):
+        return False
     """
     Checks whether an alert matches this specific user's multi-selected preferences.
     Enforces user timeframe architecture:

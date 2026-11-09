@@ -255,12 +255,11 @@ def build_coin_picker_text(chat_id: str) -> str:
     )
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Exclusive Admin Command: View all registered users and their exact filter choices."""
+    """Exclusive Admin Command: View all registered users, filter choices, and management buttons."""
     from config import TELEGRAM_CHAT_ID
     sender_id = str(update.effective_chat.id)
     admin_id = str(TELEGRAM_CHAT_ID).strip()
 
-    # If sender doesn't match admin ID, report sender ID so it's clear
     if sender_id != admin_id:
         await update.message.reply_text(
             f"⛔ <b>Access Denied:</b> This command is restricted to the Admin.\n"
@@ -270,31 +269,109 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     all_data = user_prefs._load_prefs()
-    if not all_data:
+    banned_data = user_prefs.get_banned_users()
+    if not all_data and not banned_data:
         await update.message.reply_text("📊 <b>No users registered yet.</b>", parse_mode="HTML")
         return
 
-    msg = f"👑 <b>ADMIN SUBSCRIBER AUDIT</b>\nTotal Users: <b>{len(all_data)}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg = f"👑 <b>ADMIN SUBSCRIBER AUDIT</b>\n"
+    msg += f"Active Subscribers: <b>{len(all_data)}</b> | Banned: <b>{len(banned_data)}</b>\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    buttons = []
     for idx, (cid, p) in enumerate(all_data.items(), 1):
         status = "🟢 ON" if p.get("enabled", True) else "🔴 OFF"
         uname = f"@{p.get('username')}" if p.get('username') else p.get('first_name', 'Unknown')
         groups = ", ".join(p.get("coin_groups", [])) or "None"
         sigs = ", ".join(p.get("signal_types", [])) or "None"
         stars = f"{p.get('min_stars', 3)}★+"
-        gold_status = "⚡ ON (5M & 15M)" if p.get("gold_scalp_5m_15m", False) else "OFF"
+        gold_status = "⚡ ON" if p.get("gold_scalp_5m_15m", False) else "OFF"
         custom = ", ".join(p.get("custom_coins", [])) or "None"
 
+        is_admin_tag = " (Admin)" if cid == admin_id else ""
         msg += (
-            f"<b>{idx}. {uname}</b> (<code>{cid}</code>) • {status}\n"
-            f"• <b>Setups:</b> <code>{sigs}</code>\n"
-            f"• <b>Stars:</b> <code>{stars}</code>\n"
-            f"• <b>Groups:</b> <code>{groups}</code>\n"
-            f"• <b>Gold Scalp:</b> <code>{gold_status}</code>\n"
-            f"• <b>Custom Coins:</b> <code>{custom}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{idx}. {uname}</b> (<code>{cid}</code>){is_admin_tag} • {status}\n"
+            f"• <b>Setups:</b> <code>{sigs}</code> | <b>Stars:</b> <code>{stars}</code>\n"
+            f"• <b>Groups:</b> <code>{groups}</code> | <b>Gold:</b> <code>{gold_status}</code>\n"
         )
+        if cid != admin_id:
+            msg += f"• <i>Remove:</i> <code>/removeuser {cid}</code> | <i>Ban:</i> <code>/ban {cid}</code>\n"
+            btn_label = f"❌ Remove {uname[:12]} ({cid[-4:]})"
+            buttons.append([InlineKeyboardButton(btn_label, callback_data=f"adm_rm_{cid}")])
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
-    await update.message.reply_text(msg, parse_mode="HTML")
+    if banned_data:
+        msg += f"\n🚫 <b>Banned Users ({len(banned_data)}):</b>\n"
+        for bcid, binfo in banned_data.items():
+            msg += f"• <code>{bcid}</code> &mdash; Unban: <code>/unban {bcid}</code>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    msg += (
+        f"\n💡 <b>Admin Commands:</b>\n"
+        f"• <code>/removeuser &lt;id&gt;</code> &mdash; Remove user\n"
+        f"• <code>/ban &lt;id&gt;</code> &mdash; Permanently ban user\n"
+        f"• <code>/unban &lt;id&gt;</code> &mdash; Restore banned user\n"
+        f"• <code>/broadcast &lt;text&gt;</code> &mdash; Broadcast message"
+    )
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def cmd_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Exclusive Admin Command: /removeuser <chat_id> or /ban <chat_id> or /unban <chat_id>"""
+    from config import TELEGRAM_CHAT_ID
+    sender_id = str(update.effective_chat.id)
+    admin_id = str(TELEGRAM_CHAT_ID).strip()
+
+    if sender_id != admin_id:
+        await update.message.reply_text("⛔ <b>Access Denied:</b> This command is restricted to the Admin.", parse_mode="HTML")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "ℹ️ <b>Admin User Controls:</b>\n\n"
+            "• <code>/removeuser &lt;user_id&gt;</code> &mdash; Remove from active subscribers\n"
+            "• <code>/ban &lt;user_id&gt;</code> &mdash; Permanently ban user from receiving signals\n"
+            "• <code>/unban &lt;user_id&gt;</code> &mdash; Unban user\n\n"
+            "<i>💡 Type <code>/admin</code> to view all user IDs with 1-click remove buttons.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    target_id = str(args[0]).strip()
+    cmd_text = (update.message.text or "").split()[0].lower()
+
+    if "unban" in cmd_text:
+        unbanned = user_prefs.unban_user(target_id)
+        if unbanned:
+            await update.message.reply_text(f"✅ User <code>{target_id}</code> has been <b>UNBANNED</b>.", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"⚠️ User <code>{target_id}</code> was not in the ban list.", parse_mode="HTML")
+        return
+
+    is_ban = "ban" in cmd_text
+    success = user_prefs.ban_user(target_id) if is_ban else user_prefs.remove_user(target_id)
+
+    action_label = "PERMANENTLY BANNED" if is_ban else "REMOVED"
+    if success:
+        await update.message.reply_text(
+            f"✅ <b>Action Successful!</b>\n\n"
+            f"User <code>{target_id}</code> has been <b>{action_label}</b> from AlphaCryptoSignals.\n"
+            f"They will no longer receive any alert dispatches.",
+            parse_mode="HTML"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="⚠️ <b>Notice:</b> Your subscription to AlphaCryptoSignals has been discontinued by the administrator.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(f"⚠️ User ID <code>{target_id}</code> was not found in active subscribers.", parse_mode="HTML")
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -412,6 +489,77 @@ async def on_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = str(query.message.chat_id)
 
     if data == "noop":
+        return
+
+    # ── Admin User Removal Callbacks ──────────────────────────────────
+    if data.startswith("adm_rm_"):
+        from config import TELEGRAM_CHAT_ID
+        admin_id = str(TELEGRAM_CHAT_ID).strip()
+        if chat_id != admin_id:
+            await query.answer("Access Denied.", show_alert=True)
+            return
+        target_uid = data.replace("adm_rm_", "").strip()
+        confirm_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚠️ Confirm Remove", callback_data=f"adm_cfm_rm_{target_uid}"),
+                InlineKeyboardButton("🚫 Ban", callback_data=f"adm_cfm_ban_{target_uid}")
+            ],
+            [InlineKeyboardButton("🔙 Cancel", callback_data="adm_cancel_rm")]
+        ])
+        await query.edit_message_text(
+            f"❓ <b>Confirm Action for User:</b> <code>{target_uid}</code>\n\n"
+            f"Choose whether to remove them from active subscribers or permanently ban them:",
+            reply_markup=confirm_kb,
+            parse_mode="HTML"
+        )
+        return
+
+    elif data.startswith("adm_cfm_rm_"):
+        from config import TELEGRAM_CHAT_ID
+        admin_id = str(TELEGRAM_CHAT_ID).strip()
+        if chat_id != admin_id:
+            await query.answer("Access Denied.", show_alert=True)
+            return
+        target_uid = data.replace("adm_cfm_rm_", "").strip()
+        user_prefs.remove_user(target_uid)
+        await query.edit_message_text(
+            f"✅ User <code>{target_uid}</code> has been <b>REMOVED</b> from AlphaCryptoSignals.",
+            parse_mode="HTML"
+        )
+        try:
+            await query.bot.send_message(
+                chat_id=target_uid,
+                text="⚠️ <b>Notice:</b> Your subscription to AlphaCryptoSignals has been removed by the administrator.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return
+
+    elif data.startswith("adm_cfm_ban_"):
+        from config import TELEGRAM_CHAT_ID
+        admin_id = str(TELEGRAM_CHAT_ID).strip()
+        if chat_id != admin_id:
+            await query.answer("Access Denied.", show_alert=True)
+            return
+        target_uid = data.replace("adm_cfm_ban_", "").strip()
+        user_prefs.ban_user(target_uid)
+        await query.edit_message_text(
+            f"🚫 User <code>{target_uid}</code> has been <b>PERMANENTLY BANNED</b> from AlphaCryptoSignals.",
+            parse_mode="HTML"
+        )
+        try:
+            await query.bot.send_message(
+                chat_id=target_uid,
+                text="⚠️ <b>Notice:</b> Your account has been banned from AlphaCryptoSignals by the administrator.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return
+
+    elif data == "adm_cancel_rm":
+        await query.edit_message_text("🔙 User removal action cancelled.", parse_mode="HTML")
         return
 
     if data.startswith("tf_"):
@@ -676,6 +824,7 @@ async def start_filter_bot_service():
         _filter_app_instance.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
         _filter_app_instance.add_handler(CommandHandler(["admin", "users", "subscribers"], cmd_admin))
         _filter_app_instance.add_handler(CommandHandler(["broadcast"], cmd_broadcast))
+        _filter_app_instance.add_handler(CommandHandler(["removeuser", "deleteuser", "kick", "ban", "unban"], cmd_remove_user))
         _filter_app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
         _filter_app_instance.add_handler(CallbackQueryHandler(on_button_callback))
         _filter_app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_user_text_message))
