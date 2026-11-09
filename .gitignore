@@ -5,6 +5,8 @@
 # Logs and Data Dumps
 *.log
 *.txt
+!requirements.txt
+!runtime.txt
 *.vbs
 *.exe
 railway.exe
