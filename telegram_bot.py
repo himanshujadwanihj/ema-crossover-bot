@@ -282,18 +282,15 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     
     if is_retest_sig:
         BATCH_RETESTS.append(alert_data)
-        # USER DIRECTIVE: Retest alerts must be dispatched TURANT (Instantly) to both personal DM and Scanner Channel!
+        # ARCHITECTURE ROUTING: Retest signals go STRICTLY to EMA Scanner Channel (-1004332146822)!
+        # EMA Signal Bot (Personal DM / 771305593) is strictly reserved for TRADING EXECUTION ONLY!
         try:
-            from config import TELEGRAM_CHAT_ID
             header = "🔄 <b>LIVE EMA RETEST</b>\n"
             retest_msg = header + _build_single_coin_block(alert_data)
             EMA_SCANNER_CHANNEL = "-1004332146822"
-            targets = set([EMA_SCANNER_CHANNEL, TELEGRAM_CHAT_ID or "771305593"])
-            for ch in targets:
-                if ch:
-                    asyncio.create_task(send_text_to_chat(str(ch), retest_msg))
+            asyncio.create_task(send_text_to_chat(EMA_SCANNER_CHANNEL, retest_msg))
             alert_data["instant_sent"] = True
-            logger.info(f"⚡ INSTANT RETEST ALERT DISPATCHED: {symbol} {tf_label} {signal} -> {targets}")
+            logger.info(f"⚡ INSTANT RETEST ALERT DISPATCHED: {symbol} {tf_label} {signal} -> {EMA_SCANNER_CHANNEL}")
         except Exception as e_ret:
             logger.error(f"Error dispatching instant retest alert: {e_ret}")
     elif is_dedicated_sq:
