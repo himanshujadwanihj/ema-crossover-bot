@@ -255,7 +255,7 @@ def build_coin_picker_text(chat_id: str) -> str:
     )
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Exclusive Admin Command: View all registered users with 1-click remove option right next to their name."""
+    """Exclusive Admin Command: View all registered users with exact 9-action management panel."""
     from config import TELEGRAM_CHAT_ID
     sender_id = str(update.effective_chat.id)
     admin_id = str(TELEGRAM_CHAT_ID).strip()
@@ -268,60 +268,13 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    all_data = user_prefs._load_prefs()
-    banned_data = user_prefs.get_banned_users()
-    if not all_data and not banned_data:
-        await update.message.reply_text("📊 <b>No users registered yet.</b>", parse_mode="HTML")
-        return
-
-    msg = f"👑 <b>ALPHACRYPTOSIGNALS &mdash; SUBSCRIBER AUDIT</b>\n"
-    msg += f"Active Users: <b>{len(all_data)}</b> | Banned: <b>{len(banned_data)}</b>\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    buttons = []
-    for idx, (cid, p) in enumerate(all_data.items(), 1):
-        status = "🟢" if p.get("enabled", True) else "🔴"
-        uname = f"@{p.get('username')}" if p.get('username') else p.get('first_name', 'Unknown')
-        groups = ", ".join(p.get("coin_groups", [])) or "None"
-        sigs = ", ".join(p.get("signal_types", [])) or "None"
-        stars = f"{p.get('min_stars', 3)}★+"
-
-        if cid == admin_id:
-            msg += f"<b>{idx}. {uname}</b> (<code>{cid}</code>) 👑 [Admin]\n"
-        else:
-            # Remove option right alongside the user name in both text and inline button row
-            msg += (
-                f"<b>{idx}. {uname}</b> (<code>{cid}</code>) {status} "
-                f"[❌ /remove_{cid}] [🚫 /ban_{cid}]\n"
-            )
-            buttons.append([
-                InlineKeyboardButton(f"👤 {uname[:14]}", callback_data="noop"),
-                InlineKeyboardButton("❌ Remove", callback_data=f"adm_rm_{cid}"),
-                InlineKeyboardButton("🚫 Ban", callback_data=f"adm_cfm_ban_{cid}")
-            ])
-
-        msg += (
-            f"   └ <b>Setups:</b> <code>{sigs}</code> | <b>Stars:</b> <code>{stars}</code> | <b>Coins:</b> <code>{groups}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
-
-    if banned_data:
-        msg += f"\n🚫 <b>Banned Users:</b>\n"
-        for bcid, binfo in banned_data.items():
-            msg += f"• <code>{bcid}</code> &mdash; Unban: <code>/unban_{bcid}</code>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-    msg += (
-        f"\n💡 <i>Tap any [❌ /remove_id] or click [❌ Remove] right next to the user to remove them instantly!</i>"
-    )
-
-    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
-
+    import admin_panel
+    text, kb = admin_panel.build_admin_overview()
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 
 async def cmd_quick_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles 1-tap inline text commands like /remove_12345, /ban_12345, /unban_12345"""
+    """Handles 1-tap inline text commands like /rm_scan_12345, /ban_alpha_12345, /unban_cross_12345, etc."""
     from config import TELEGRAM_CHAT_ID
     sender_id = str(update.effective_chat.id)
     admin_id = str(TELEGRAM_CHAT_ID).strip()
@@ -332,31 +285,34 @@ async def cmd_quick_admin_action(update: Update, context: ContextTypes.DEFAULT_T
     if not text.startswith("/"):
         return
 
-    parts = text[1:].split("_", 1)
-    if len(parts) != 2:
-        return
-    act, target_id = parts[0].lower(), parts[1].strip()
+    import re
+    import admin_panel
 
-    if act == "remove":
-        success = user_prefs.remove_user(target_id)
-        if success:
+    # Check unified 9-action pattern
+    match = re.match(r"^/(rm|ban|unban)_(scan|scanner|cross|alpha)_(\d+)", text)
+    if match:
+        act_verb, platform, target_uid = match.groups()
+        plat = "scan" if "scan" in platform else platform
+        act_key = f"{act_verb}_{plat}"
+        ok, res_msg = await admin_panel.execute_action(context.bot, act_key, target_uid)
+        status_emoji = "✅" if ok else "⚠️"
+        await update.message.reply_text(f"{status_emoji} <b>{res_msg}</b>", parse_mode="HTML")
+        return
+
+    # Fallback legacy /remove_12345, /ban_12345, /unban_12345
+    parts = text[1:].split("_", 1)
+    if len(parts) == 2:
+        act, target_id = parts[0].lower(), parts[1].strip()
+        if act == "remove":
+            user_prefs.remove_user(target_id)
             await update.message.reply_text(f"✅ User <code>{target_id}</code> <b>REMOVED</b> from AlphaCryptoSignals.", parse_mode="HTML")
-            try:
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text="⚠️ <b>Notice:</b> Your subscription to AlphaCryptoSignals has been discontinued by the administrator.",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
-        else:
-            await update.message.reply_text(f"⚠️ User <code>{target_id}</code> not found in active subscribers.", parse_mode="HTML")
-    elif act == "ban":
-        user_prefs.ban_user(target_id)
-        await update.message.reply_text(f"🚫 User <code>{target_id}</code> <b>PERMANENTLY BANNED</b>.", parse_mode="HTML")
-    elif act == "unban":
-        user_prefs.unban_user(target_id)
-        await update.message.reply_text(f"✅ User <code>{target_id}</code> <b>UNBANNED</b>.", parse_mode="HTML")
+        elif act == "ban":
+            user_prefs.ban_user(target_id)
+            await update.message.reply_text(f"🚫 User <code>{target_id}</code> <b>PERMANENTLY BANNED</b> from Alpha.", parse_mode="HTML")
+        elif act == "unban":
+            user_prefs.unban_user(target_id)
+            await update.message.reply_text(f"✅ User <code>{target_id}</code> <b>UNBANNED</b> in Alpha.", parse_mode="HTML")
+
 
 async def cmd_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Exclusive Admin Command: /removeuser <chat_id> or /ban <chat_id> or /unban <chat_id>"""
@@ -530,6 +486,38 @@ async def on_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if data == "noop":
         return
+
+    # ── Unified Admin Panel Action Callbacks ─────────────────────────
+    if data.startswith("act_"):
+        from config import TELEGRAM_CHAT_ID
+        admin_id = str(TELEGRAM_CHAT_ID).strip()
+        if chat_id != admin_id:
+            await query.answer("Access Denied.", show_alert=True)
+            return
+
+        import admin_panel
+        if data == "act_refresh" or data == "act_back_users":
+            text, kb = admin_panel.build_admin_overview()
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if data.startswith("act_user_"):
+            target_uid = data.replace("act_user_", "").strip()
+            text, kb = admin_panel.build_user_action_menu(target_uid)
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        parts = data.split("_")
+        if len(parts) >= 4:
+            act_key = f"{parts[1]}_{parts[2]}"
+            target_uid = parts[3]
+            ok, res_msg = await admin_panel.execute_action(context.bot, act_key, target_uid)
+            await query.answer(res_msg, show_alert=True)
+            text, kb = admin_panel.build_user_action_menu(target_uid)
+            status_emoji = "✅" if ok else "⚠️"
+            await query.edit_message_text(f"{status_emoji} <b>{res_msg}</b>\n\n" + text, reply_markup=kb, parse_mode="HTML")
+            return
+
 
     # ── Admin User Removal Callbacks ──────────────────────────────────
     if data.startswith("adm_rm_"):

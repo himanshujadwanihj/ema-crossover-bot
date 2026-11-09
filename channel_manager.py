@@ -1,5 +1,5 @@
 """
-channel_manager.py — Manages members, kicks, and bans for EMA Cross and EMA Signal Scanner channels.
+channel_manager.py — Manages members, kicks, bans, and unbans for EMA Cross and EMA Signal Scanner channels.
 Persists member lists and ban lists under /data/channel_members.json on Railway.
 """
 
@@ -26,6 +26,16 @@ CHANNELS = {
 }
 
 _members_cache = None
+_channel_bot = None
+
+def get_channel_bot():
+    """Returns the dedicated Bot instance with admin rights in both channels."""
+    global _channel_bot
+    if _channel_bot is None:
+        from telegram import Bot
+        from config import TELEGRAM_BOT_TOKEN
+        _channel_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    return _channel_bot
 
 def _load_members() -> Dict[str, Any]:
     global _members_cache
@@ -106,14 +116,12 @@ def get_all_channel_data() -> Dict[str, Any]:
 
 async def kick_channel_member(bot, chat_id: str, user_id: str) -> tuple[bool, str]:
     """Kicks a member from a channel (bans then unbans so they are removed but not permanently blocked from re-joining)."""
+    target_bot = bot or get_channel_bot()
     try:
         cid = int(chat_id)
         uid = int(user_id)
-        # Ban to remove
-        await bot.ban_chat_member(chat_id=cid, user_id=uid)
-        # Unban to allow them to be re-invited in future if needed
-        await bot.unban_chat_member(chat_id=cid, user_id=uid)
-        # Remove from local tracking
+        await target_bot.ban_chat_member(chat_id=cid, user_id=uid)
+        await target_bot.unban_chat_member(chat_id=cid, user_id=uid)
         track_member_update(str(chat_id), str(user_id), status="kicked")
         return True, "Kicked successfully"
     except Exception as e:
@@ -122,21 +130,35 @@ async def kick_channel_member(bot, chat_id: str, user_id: str) -> tuple[bool, st
 
 async def ban_channel_member(bot, chat_id: str, user_id: str) -> tuple[bool, str]:
     """Permanently bans a member from a channel."""
+    target_bot = bot or get_channel_bot()
     try:
         cid = int(chat_id)
         uid = int(user_id)
-        await bot.ban_chat_member(chat_id=cid, user_id=uid)
+        await target_bot.ban_chat_member(chat_id=cid, user_id=uid)
         track_member_update(str(chat_id), str(user_id), status="kicked")
         return True, "Banned permanently"
     except Exception as e:
         logger.error(f"Failed to ban user {user_id} from {chat_id}: {e}")
         return False, str(e)
 
+async def unban_channel_member(bot, chat_id: str, user_id: str) -> tuple[bool, str]:
+    """Unbans a member in a channel."""
+    target_bot = bot or get_channel_bot()
+    try:
+        cid = int(chat_id)
+        uid = int(user_id)
+        await target_bot.unban_chat_member(chat_id=cid, user_id=uid, only_if_banned=True)
+        return True, "Unbanned successfully"
+    except Exception as e:
+        logger.error(f"Failed to unban user {user_id} in {chat_id}: {e}")
+        return False, str(e)
+
 async def sync_channel_admins(bot):
     """Auto-discovers and populates channel administrators into member cache."""
+    target_bot = bot or get_channel_bot()
     for ch_id in CHANNELS:
         try:
-            admins = await bot.get_chat_administrators(ch_id)
+            admins = await target_bot.get_chat_administrators(ch_id)
             for a in admins:
                 u = a.user
                 if not u.is_bot:
