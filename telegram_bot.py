@@ -1,3 +1,4 @@
+import channel_manager
 import time
 import asyncio
 import logging
@@ -975,6 +976,213 @@ async def cmd_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f.write("STOPPED via Telegram /stop at " + datetime.now(timezone.utc).isoformat())
     await update.message.reply_text("🛑 <b>EMERGENCY STOP TRIGGERED</b>\n\nAll scanners, trades, and channels have been immediately stopped and frozen!\n\nTo resume, send /startbot", parse_mode="HTML")
 
+
+# ── CHANNEL MEMBERSHIP & KICK/BAN ADMIN MANAGEMENT ───────────────────
+
+async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to list and manage members in EMA Cross and EMA Signal Scanner."""
+    user_id = str(update.effective_user.id if update.effective_user else "")
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593").strip()
+    if user_id != admin_id:
+        return
+
+    try:
+        await channel_manager.sync_channel_admins(context.bot)
+    except Exception:
+        pass
+
+    all_data = channel_manager.get_all_channel_data()
+    msg = "👑 <b>CHANNEL MANAGEMENT & AUDIT</b>\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    buttons = []
+    has_any = False
+
+    for ch_id, ch_info in all_data.items():
+        title = ch_info.get("title", channel_manager.CHANNELS.get(ch_id, "Channel"))
+        alias = "scanner" if "4332146822" in ch_id else "cross"
+        members = ch_info.get("members", {})
+        count = len(members)
+
+        msg += f"📡 <b>{title}</b>\n"
+        msg += f"ID: <code>{ch_id}</code> | Tracked Members: <b>{count}</b>\n"
+
+        if not members:
+            msg += f"<i>(No members active yet. Bot will auto-track members joining.)</i>\n\n"
+        else:
+            has_any = True
+            for idx, (uid, m) in enumerate(members.items(), 1):
+                uname = f"@{m.get('username')}" if m.get('username') else m.get('first_name', 'Member')
+                role = f" [{m.get('status', 'member')}]" if m.get('status') in ['administrator', 'creator'] else ""
+                
+                # Remove/kick option placed directly beside user name in both text and inline row
+                msg += (
+                    f"<b>{idx}. {uname}</b> (<code>{uid}</code>){role} "
+                    f"[❌ /kick_{alias}_{uid}] [🚫 /ban_{alias}_{uid}]\n"
+                )
+                buttons.append([
+                    InlineKeyboardButton(f"👤 {uname[:12]} ({alias.title()})", callback_data="noop"),
+                    InlineKeyboardButton("❌ Kick", callback_data=f"ch_k_{alias}_{uid}"),
+                    InlineKeyboardButton("🚫 Ban", callback_data=f"ch_b_{alias}_{uid}")
+                ])
+            msg += "\n"
+
+    buttons.append([InlineKeyboardButton("🔄 Refresh / Sync Admins", callback_data="ch_sync")])
+
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += (
+        f"💡 <i>Tap any [❌ /kick_...] right next to the user's name or click [❌ Kick] to remove them instantly from that channel!</i>\n"
+    )
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def cmd_kick_or_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /kick <scanner|cross> <user_id> or /banchannel <scanner|cross> <user_id>"""
+    user_id = str(update.effective_user.id if update.effective_user else "")
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593").strip()
+    if user_id != admin_id:
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "ℹ️ <b>Channel Member Control Usage:</b>\n\n"
+            "• <code>/kick &lt;scanner|cross&gt; &lt;user_id&gt;</code> &mdash; Kick user from channel\n"
+            "• <code>/banchannel &lt;scanner|cross&gt; &lt;user_id&gt;</code> &mdash; Ban user from channel\n\n"
+            "<i>💡 Type <code>/channels</code> to see all members with 1-click kick options next to their names.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    ch_target = args[0].lower().strip()
+    target_uid = args[1].strip()
+    cmd_name = (update.message.text or "").split()[0].lower()
+    is_ban = "ban" in cmd_name
+
+    ch_id = "-1004332146822" if "scan" in ch_target or "4332146822" in ch_target else "-1004463573705"
+    ch_title = channel_manager.CHANNELS.get(ch_id, "Channel")
+
+    if is_ban:
+        ok, res = await channel_manager.ban_channel_member(context.bot, ch_id, target_uid)
+        act_text = "PERMANENTLY BANNED"
+    else:
+        ok, res = await channel_manager.kick_channel_member(context.bot, ch_id, target_uid)
+        act_text = "KICKED / REMOVED"
+
+    if ok:
+        await update.message.reply_text(
+            f"✅ User <code>{target_uid}</code> has been <b>{act_text}</b> from <b>{ch_title}</b>.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Failed to remove user <code>{target_uid}</code> from <b>{ch_title}</b>:\n<code>{res}</code>",
+            parse_mode="HTML"
+        )
+
+
+async def cmd_quick_channel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles 1-tap commands like /kick_scanner_12345 or /ban_cross_12345 directly next to member name."""
+    user_id = str(update.effective_user.id if update.effective_user else "")
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593").strip()
+    if user_id != admin_id:
+        return
+
+    text = (update.message.text or "").strip()
+    if not text.startswith("/"):
+        return
+
+    parts = text[1:].split("_")
+    if len(parts) != 3:
+        return
+
+    act, ch_alias, uid = parts[0].lower(), parts[1].lower(), parts[2].strip()
+    ch_id = "-1004332146822" if "scan" in ch_alias else "-1004463573705"
+    ch_title = channel_manager.CHANNELS.get(ch_id, "Channel")
+
+    if act == "kick":
+        ok, res = await channel_manager.kick_channel_member(context.bot, ch_id, uid)
+        act_text = "KICKED"
+    else:
+        ok, res = await channel_manager.ban_channel_member(context.bot, ch_id, uid)
+        act_text = "PERMANENTLY BANNED"
+
+    if ok:
+        await update.message.reply_text(
+            f"✅ User <code>{uid}</code> <b>{act_text}</b> from <b>{ch_title}</b>.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Could not execute action on user <code>{uid}</code> in <b>{ch_title}</b>: {res}",
+            parse_mode="HTML"
+        )
+
+
+async def on_channel_member_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593").strip()
+    user_id = str(update.effective_user.id if update.effective_user else "")
+
+    if user_id != admin_id:
+        await query.answer("Access Denied.", show_alert=True)
+        return
+
+    if data == "ch_sync":
+        await channel_manager.sync_channel_admins(context.bot)
+        await query.answer("Channel admins synced successfully!", show_alert=True)
+        return
+
+    parts = data.split("_")
+    if len(parts) >= 4:
+        act, ch_alias, uid = parts[1], parts[2], parts[3]
+        ch_id = "-1004332146822" if "scan" in ch_alias else "-1004463573705"
+        ch_title = channel_manager.CHANNELS.get(ch_id, "Channel")
+
+        if act == "k":
+            ok, res = await channel_manager.kick_channel_member(context.bot, ch_id, uid)
+            act_text = "Kicked"
+        else:
+            ok, res = await channel_manager.ban_channel_member(context.bot, ch_id, uid)
+            act_text = "Banned"
+
+        if ok:
+            await query.edit_message_text(
+                f"✅ User <code>{uid}</code> has been <b>{act_text}</b> from <b>{ch_title}</b>.",
+                parse_mode="HTML"
+            )
+        else:
+            await query.answer(f"Failed: {res}", show_alert=True)
+
+
+async def on_channel_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Real-time listener for users joining, leaving, or being promoted in channels."""
+    result = update.chat_member
+    if not result:
+        return
+    chat_id = str(result.chat.id)
+    if chat_id not in channel_manager.CHANNELS:
+        return
+    u = result.new_chat_member.user
+    if u.is_bot:
+        return
+    status = result.new_chat_member.status
+    channel_manager.track_member_update(
+        chat_id=chat_id,
+        user_id=str(u.id),
+        username=u.username,
+        first_name=u.first_name,
+        status=status
+    )
+
 async def cmd_resume_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command: Resumes bots."""
     user_id = str(update.effective_user.id if update.effective_user else "")
@@ -1006,6 +1214,14 @@ def get_application() -> Application:
         _app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
         _app_instance.add_handler(CommandHandler(["stop", "kill", "halt", "pause"], cmd_stop_bot))
         _app_instance.add_handler(CommandHandler(["startbot", "resume", "resumebot"], cmd_resume_bot))
+
+        # Channel member management handlers
+        _app_instance.add_handler(CommandHandler(["channels", "channelusers", "channelmembers", "members"], cmd_channels))
+        _app_instance.add_handler(CommandHandler(["kick", "kickchannel", "removechanneluser", "banchannel"], cmd_kick_or_ban))
+        _app_instance.add_handler(MessageHandler(filters.Regex(r"^/(kick|ban)_(scanner|cross)_\d+"), cmd_quick_channel_action))
+        _app_instance.add_handler(CallbackQueryHandler(on_channel_member_callback, pattern=r"^(ch_k_|ch_b_|ch_sync)"))
+        _app_instance.add_handler(ChatMemberHandler(on_channel_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+
         _app_instance.add_handler(MessageHandler(filters.FORWARDED, on_forwarded_message))
         _app_instance.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_any_channel_message))
         
@@ -1022,7 +1238,7 @@ async def start_telegram_bot_service():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(
-        allowed_updates=["message", "channel_post", "my_chat_member", "callback_query"],
+        allowed_updates=["message", "channel_post", "my_chat_member", "chat_member", "callback_query"],
         drop_pending_updates=False
     )
     logger.info("Telegram Interactive Bot Polling STARTED (commands & interactive filters active).")
