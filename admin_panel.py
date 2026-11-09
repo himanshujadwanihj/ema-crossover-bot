@@ -87,50 +87,62 @@ def get_all_users_combined() -> dict:
 
 
 def build_admin_overview() -> tuple[str, InlineKeyboardMarkup]:
-    """Builds the main /admin overview text and user selection keyboard."""
+    """Builds the clean /admin overview — just name + manage button, with banned list at bottom."""
     users = get_all_users_combined()
+    banned_alpha = user_prefs.get_banned_users()
+
+    # Count total banned (alpha + channel)
+    active_count = len(users)
+    banned_count = len(banned_alpha)
 
     msg = "👑 <b>UNIFIED ADMIN CONTROL PANEL</b>\n"
-    msg += f"Active Tracked Users: <b>{len(users)}</b>\n"
+    msg += f"Active: <b>{active_count}</b> | Banned: <b>{banned_count}</b>\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    if not users:
-        msg += "<i>No subscribers or members found yet. When users interact with the bots or channels, they will automatically appear here.</i>\n\n"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh List", callback_data="act_refresh")]])
-        return msg, kb
-
     buttons = []
-    for idx, (uid, u) in enumerate(users.items(), 1):
-        uname = f"@{u['username']}" if u["username"] else "No Username"
-        name = u["name"]
 
-        # Exactly the format requested by user:
-        # name
-        # remove ema scanner
-        # remove ema cross
-        # remove alpha
-        # ban ema scanner
-        # ban ema cross
-        # ban alpha
-        # and same for unban
-        msg += f"👤 <b>{idx}. {name}</b> ({uname} | <code>{uid}</code>)\n"
-        msg += f"❌ <b>Remove:</b>\n"
-        msg += f"  • Remove EMA Scanner: /rm_scan_{uid}\n"
-        msg += f"  • Remove EMA Cross: /rm_cross_{uid}\n"
-        msg += f"  • Remove Alpha: /rm_alpha_{uid}\n"
-        msg += f"🚫 <b>Ban:</b>\n"
-        msg += f"  • Ban EMA Scanner: /ban_scan_{uid}\n"
-        msg += f"  • Ban EMA Cross: /ban_cross_{uid}\n"
-        msg += f"  • Ban Alpha: /ban_alpha_{uid}\n"
-        msg += f"✅ <b>Unban:</b>\n"
-        msg += f"  • Unban EMA Scanner: /unban_scan_{uid}\n"
-        msg += f"  • Unban EMA Cross: /unban_cross_{uid}\n"
-        msg += f"  • Unban Alpha: /unban_alpha_{uid}\n"
+    # ── Active Users ──────────────────────────────
+    if not users:
+        msg += "<i>No subscribers or members yet.</i>\n\n"
+    else:
+        msg += "<b>👥 ACTIVE USERS</b>\n\n"
+        for idx, (uid, u) in enumerate(users.items(), 1):
+            uname = f"@{u['username']}" if u["username"] else "—"
+            name = u["name"]
+            # Platforms this user is in
+            platforms = []
+            if u.get("in_alpha"):
+                platforms.append("Alpha")
+            if u.get("in_scanner"):
+                platforms.append("Scanner")
+            if u.get("in_cross"):
+                platforms.append("Cross")
+            platform_str = " | ".join(platforms) if platforms else "Unknown"
+
+            msg += f"<b>{idx}. {name}</b>\n"
+            msg += f"   {uname} · <code>{uid}</code> · <i>{platform_str}</i>\n\n"
+
+            buttons.append([InlineKeyboardButton(
+                f"⚙️ Manage {name[:16]}",
+                callback_data=f"act_user_{uid}"
+            )])
+
+    # ── Banned Users ──────────────────────────────
+    if banned_alpha:
         msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"🚫 <b>BANNED USERS (Alpha)</b>\n\n"
+        for bid, binfo in banned_alpha.items():
+            bname = binfo.get("first_name") or binfo.get("username") or f"User {bid[-4:]}"
+            buname = f"@{binfo.get('username')}" if binfo.get("username") else "—"
+            banned_at = binfo.get("banned_at", "")[:10] if binfo.get("banned_at") else "—"
+            msg += f"🔴 <b>{bname}</b> ({buname} · <code>{bid}</code>)\n"
+            msg += f"   Banned on: <i>{banned_at}</i>\n\n"
+            buttons.append([InlineKeyboardButton(
+                f"✅ Unban {bname[:16]}",
+                callback_data=f"act_user_{bid}"
+            )])
 
-        buttons.append([InlineKeyboardButton(f"⚙️ Manage {name[:14]} ({uid[-4:]})", callback_data=f"act_user_{uid}")])
-
-    buttons.append([InlineKeyboardButton("🔄 Refresh List", callback_data="act_refresh")])
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="act_refresh")])
     return msg, InlineKeyboardMarkup(buttons)
 
 
