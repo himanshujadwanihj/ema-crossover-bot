@@ -1,3 +1,55 @@
+
+STOCK_ALIAS_MAP = {
+    "NVDAUSDT": "NVDABUSDT", "TSLAUSDT": "TSLABUSDT", "AAPLUSDT": "AAPLBUSDT",
+    "MSTRUSDT": "MSTRBUSDT", "AMZNUSDT": "AMZNBUSDT", "METAUSDT": "METABUSDT",
+    "MSFTUSDT": "MSFTBUSDT", "GOOGLUSDT": "GOOGLBUSDT", "SPYUSDT": "SPYBUSDT",
+    "QQQUSDT": "QQQBUSDT", "COINUSDT": "COINBUSDT", "AMDUSDT": "AMDBUSDT",
+    "NFLXUSDT": "NFLXBUSDT", "BABAUSDT": "BABABUSDT",
+}
+
+STOCK_YFINANCE_MAP = {
+    "NVDA": "NVDA", "NVDAB": "NVDA", "NVDAUSDT": "NVDA", "NVDABUSDT": "NVDA",
+    "TSLA": "TSLA", "TSLAB": "TSLA", "TSLAUSDT": "TSLA", "TSLABUSDT": "TSLA",
+    "AAPL": "AAPL", "AAPLB": "AAPL", "AAPLUSDT": "AAPL", "AAPLBUSDT": "AAPL",
+    "MSTR": "MSTR", "MSTRB": "MSTR", "MSTRUSDT": "MSTR", "MSTRBUSDT": "MSTR",
+    "AMZN": "AMZN", "AMZNB": "AMZN", "AMZNUSDT": "AMZN", "AMZNBUSDT": "AMZN",
+    "META": "META", "METAB": "META", "METAUSDT": "META", "METABUSDT": "META",
+    "MSFT": "MSFT", "MSFTB": "MSFT", "MSFTUSDT": "MSFT", "MSFTBUSDT": "MSFT",
+    "GOOGL": "GOOGL", "GOOGLB": "GOOGL", "GOOGLUSDT": "GOOGL", "GOOGLBUSDT": "GOOGL",
+    "SPY": "SPY", "SPYB": "SPY", "SPYUSDT": "SPY", "SPYBUSDT": "SPY",
+    "QQQ": "QQQ", "QQQB": "QQQ", "QQQUSDT": "QQQ", "QQQBUSDT": "QQQ",
+    "COIN": "COIN", "COINB": "COIN", "COINUSDT": "COIN", "COINBUSDT": "COIN",
+    "AMD": "AMD", "AMDB": "AMD", "AMDUSDT": "AMD", "AMDBUSDT": "AMD",
+    "NFLX": "NFLX", "NFLXB": "NFLX", "NFLXUSDT": "NFLX", "NFLXBUSDT": "NFLX",
+    "BABA": "BABA", "BABAB": "BABA", "BABAUSDT": "BABA", "BABABUSDT": "BABA",
+}
+
+def _fetch_stock_yfinance_sync(ticker: str, interval: str, limit: int = 100):
+    """Fallback fetcher for US Equities via yfinance when exchange token candle is unavailable."""
+    try:
+        import yfinance as yf
+        import pandas as pd
+        interval_map = {
+            "5m": ("5d", "5m"), "15m": ("5d", "15m"), "30m": ("5d", "30m"),
+            "1h": ("60d", "1h"), "4h": ("60d", "1h"), "1d": ("1y", "1d"), "1w": ("2y", "1wk")
+        }
+        period, itv = interval_map.get(interval.lower(), ("60d", "1h"))
+        t = yf.Ticker(ticker)
+        df = t.history(period=period, interval=itv)
+        if df is not None and len(df) > 0:
+            if interval.lower() == "4h":
+                agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+                df = df.resample("4h").agg(agg).dropna()
+            df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            df.columns = ["open", "high", "low", "close", "volume"]
+            df.index = df.index.tz_convert("UTC") if df.index.tz is not None else df.index.tz_localize("UTC")
+            df.index.name = "timestamp"
+            res_df = df.astype(float)
+            return res_df.iloc[-limit:] if (limit and len(res_df) > limit) else res_df
+    except Exception as e:
+        logger.debug(f"yfinance fallback error for {ticker}: {e}")
+    return None
+
 """
 fetcher.py — Fetch OHLCV data from Binance Futures API via direct async HTTP calls.
 Provides complete coverage for Futures USDT contracts (AIN/USDT, BTC/USDT, SOL/USDT, etc.).
@@ -286,7 +338,12 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
         logger.warning(f"Spot gold route returned no data for {symbol} {interval}, falling back to Binance")
 
     # 2. ALL OTHER ASSETS USE NATIVE USDT TOKENS (Binance Futures API)
-    binance_symbol = symbol.replace("/", "")
+    binance_symbol = symbol.replace("/", "").upper()
+    target_symbols = [binance_symbol]
+    if binance_symbol in STOCK_ALIAS_MAP:
+        target_symbols.insert(0, STOCK_ALIAS_MAP[binance_symbol])
+    elif binance_symbol.endswith("BUSDT"):
+        target_symbols.append(binance_symbol[:-5] + "USDT")
     vision_url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
     spot_me_url = f"https://api.binance.me/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
     futures_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
@@ -297,7 +354,16 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
         await asyncio.sleep(0.10)  # Throttling to prevent Binance rate limit WAF bans
         try:
             # Try unblocked vision/me API first, then Futures/Spot
-            for k_url in [vision_url, spot_me_url, futures_url, spot_url]:
+            urls_to_try = []
+            for t_sym in target_symbols:
+                urls_to_try.extend([
+                    f"https://data-api.binance.vision/api/v3/klines?symbol={t_sym}&interval={interval}&limit={limit}",
+                    f"https://api.binance.me/api/v3/klines?symbol={t_sym}&interval={interval}&limit={limit}",
+                    f"https://fapi.binance.com/fapi/v1/klines?symbol={t_sym}&interval={interval}&limit={limit}",
+                    f"https://api.binance.com/api/v3/klines?symbol={t_sym}&interval={interval}&limit={limit}",
+                ])
+
+            for k_url in urls_to_try:
                 try:
                     async with session.get(k_url, headers=headers, timeout=5) as response:
                         if response.status == 200:
@@ -337,6 +403,16 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
                         res_df = df.astype(float)
                         _ohlcv_cache[cache_key] = (res_df, time.time())
                         return res_df
+
+            # Check yfinance fallback for US stocks
+            yf_ticker = STOCK_YFINANCE_MAP.get(binance_symbol)
+            if yf_ticker:
+                loop = asyncio.get_running_loop()
+                yf_df = await loop.run_in_executor(None, _fetch_stock_yfinance_sync, yf_ticker, interval, limit)
+                if yf_df is not None and len(yf_df) >= 5:
+                    _ohlcv_cache[cache_key] = (yf_df, time.time())
+                    logger.info(f"Loaded US Stock {symbol} ({yf_ticker}) via yfinance fallback.")
+                    return yf_df
 
             logger.warning(f"Failed to fetch OHLCV for {symbol} {interval} from Binance Futures/Spot")
             return None

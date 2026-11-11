@@ -987,10 +987,9 @@ async def main_loop():
                             # Outside US market hours, tokenized US equities are closed/flatline in crypto, so skip scanning them
                             is_us_open = (now_ist.weekday() < 5) and (now_ist.hour >= 19 or now_ist.hour == 0 or (now_ist.hour == 1 and now_ist.minute <= 30))
                             US_STOCKS_LIST = [
-                                "NVDA/USDT", "TSLA/USDT", "MSTR/USDT", "MSFT/USDT",
-                                "GOOGL/USDT", "QQQ/USDT", "COIN/USDT", "INTC/USDT",
-                                "AMD/USDT", "AAPL/USDT", "AMZN/USDT", "META/USDT",
-                                "NFLX/USDT", "SPY/USDT", "BABA/USDT"
+                                "NVDAB/USDT", "TSLAB/USDT", "MSTRB/USDT", "AAPLB/USDT",
+                                "AMZNB/USDT", "METAB/USDT", "MSFTB/USDT", "GOOGLB/USDT",
+                                "SPYB/USDT", "QQQB/USDT", "COIN/USDT", "AMD/USDT"
                             ] if is_us_open else []
                             weekend_blocked_assets = set()
                         

@@ -110,6 +110,31 @@ def format_display_symbol(symbol: str) -> str:
     }
     if symbol in cfd_labels:
         return cfd_labels[symbol]
+    stock_display_map = {
+        "NVDAB/USDT": "NVIDIA (NVDA)",
+        "TSLAB/USDT": "TESLA (TSLA)",
+        "AAPLB/USDT": "APPLE (AAPL)",
+        "MSTRB/USDT": "MICROSTRATEGY (MSTR)",
+        "AMZNB/USDT": "AMAZON (AMZN)",
+        "METAB/USDT": "META (META)",
+        "MSFTB/USDT": "MICROSOFT (MSFT)",
+        "GOOGLB/USDT": "ALPHABET (GOOGL)",
+        "SPYB/USDT": "S&P 500 ETF (SPY)",
+        "QQQB/USDT": "NASDAQ 100 ETF (QQQ)",
+        "NVDA/USDT": "NVIDIA (NVDA)",
+        "TSLA/USDT": "TESLA (TSLA)",
+        "AAPL/USDT": "APPLE (AAPL)",
+        "MSTR/USDT": "MICROSTRATEGY (MSTR)",
+        "AMZN/USDT": "AMAZON (AMZN)",
+        "META/USDT": "META (META)",
+        "MSFT/USDT": "MICROSOFT (MSFT)",
+        "GOOGL/USDT": "ALPHABET (GOOGL)",
+        "SPY/USDT": "S&P 500 ETF (SPY)",
+        "QQQ/USDT": "NASDAQ 100 ETF (QQQ)",
+    }
+    if symbol in stock_display_map:
+        return stock_display_map[symbol]
+
     if not symbol:
         return ""
     import re
