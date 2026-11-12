@@ -1068,19 +1068,32 @@ async def main_loop():
                         if raw_candidates:
                             from executor import executor
                             def _is_auto_trade_eligible(c):
+                                sym = c.get("symbol", "")
+                                # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
+                                is_us_stock = any(x in sym.upper() for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym.upper().endswith("B/USDT") or sym.upper().endswith("BUSDT")
+                                if is_us_stock:
+                                    return False
+
                                 stars = c.get("aligned_count", 0)
                                 # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
                                 if stars < 3:
                                     return False
                                 rsi = c.get("rsi")
                                 sig = c.get("signal", "BUY").upper()
+                                is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG"])
                                 if rsi is not None:
                                     try:
                                         f_rsi = float(rsi)
-                                        if sig == "BUY" and not (45.0 <= f_rsi <= 72.0):
-                                            return False
-                                        elif sig == "SELL" and not (28.0 <= f_rsi <= 55.0):
-                                            return False
+                                        if is_gold_or_commodity:
+                                            if sig == "BUY" and not (38.0 <= f_rsi <= 75.0):
+                                                return False
+                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 62.0):
+                                                return False
+                                        else:
+                                            if sig == "BUY" and not (42.0 <= f_rsi <= 75.0):
+                                                return False
+                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 58.0):
+                                                return False
                                     except (ValueError, TypeError):
                                         pass
                                 return True

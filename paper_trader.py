@@ -151,10 +151,16 @@ async def register_paper_trade(alert_data: dict):
 
     cross_type = str(alert_data.get('cross_type', ''))
 
-    # STRICT USER DIRECTIVE: Trade ONLY in Top 25 Coins in Volume, Commodities, and US Tokens ("thats it nothng else")
+    # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto coins and commodities)
+    is_us_stock = any(x in symbol.upper() for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or symbol.upper().endswith("B/USDT") or symbol.upper().endswith("BUSDT")
+    if is_us_stock:
+        logger.info(f"PAPER TRADER SKIPPED {symbol} — US stocks auto-trading disabled per user directive. Alert sent only.")
+        return
+
+    # STRICT USER DIRECTIVE: Trade ONLY in Top 25 Coins in Volume and Commodities ("thats it nothng else")
     from config import is_allowed_trading_asset
     if not is_allowed_trading_asset(symbol):
-        logger.info(f"PAPER TRADER BLOCKED {symbol} {signal} ({cross_type}) — Trade restricted: Asset not in Top 25 Volume, Commodities, or US Tokens.")
+        logger.info(f"PAPER TRADER BLOCKED {symbol} {signal} ({cross_type}) — Trade restricted: Asset not in Top 25 Volume or Commodities.")
         return
 
     # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case

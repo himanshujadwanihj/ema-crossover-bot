@@ -220,21 +220,15 @@ def is_allowed_trading_asset(symbol: str) -> bool:
     if any(c in clean for c in ["XAU", "XAUT", "GOLD", "XAG", "SILVER", "NATGAS", "CL", "OIL"]):
         return True
 
-    # 2. US Equities / Stocks
+    # 2. US Equities / Stocks: AUTO-TRADING STOPPED per User Directive
+    # Signals are still broadcast to Telegram, but automated trade execution is disabled.
     from config import US_STOCK_TOKENS
     us_stock_clean = {s.upper().replace("/", "").replace("_", "").replace("-", "") for s in US_STOCK_TOKENS}
-    us_stock_clean.update({
-        "NVDAUSDT", "TSLAUSDT", "MSTRUSDT", "MSFTUSDT", "GOOGLUSDT",
-        "QQQUSDT", "COINUSDT", "INTCUSDT", "AMDUSDT", "AAPLUSDT",
-        "AMZNUSDT", "METAUSDT", "NFLXUSDT", "SPYUSDT", "BABAUSDT",
-        "DISUSDT", "PYPLUSDT", "BAUSDT", "XOMUSDT", "SOXLUSDT",
-        "SNDKUSDT", "CRCLUSDT", "PLTRUSDT", "HOODUSDT"
-    })
     if clean in us_stock_clean or any(clean.startswith(s) for s in [
         "NVDA", "TSLA", "MSTR", "MSFT", "GOOGL", "QQQ", "COIN", "INTC",
         "AMD", "AAPL", "AMZN", "META", "NFLX", "SPY", "BABA", "PLTR", "HOOD"
-    ]):
-        return True
+    ]) or clean.endswith("BUSDT"):
+        return False
 
     # 3. Top 25 Crypto Coins by 24h Volume
     try:

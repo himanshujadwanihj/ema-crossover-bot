@@ -929,7 +929,7 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reports real-time Paper Trading Strategy Lookout or Closed Trades Ledger."""
+    """Reports real-time Paper Trading Strategy Lookout or Closed Trades Ledger + Shark Live Status."""
     msg = update.message
     if not msg:
         return
@@ -940,6 +940,36 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             card = await generate_trades_ledger_card()
         else:
             card = await generate_strategy_lookout_card()
+
+        # If Shark Live Auto-Trading is configured, prepend live exchange summary
+        try:
+            from executor import executor
+            if executor.is_configured():
+                import aiohttp
+                async with aiohttp.ClientSession() as s:
+                    shark_bal = await executor.get_wallet_balance_summary(s)
+                    shark_pos = await executor.get_open_positions(s)
+                    if shark_bal:
+                        pos_lines = []
+                        for p in shark_pos:
+                            sym = executor.clean_sym(p)
+                            side = p.get("side", p.get("direction", "LONG"))
+                            sz = p.get("positionAmt", p.get("size", 0))
+                            upnl = p.get("unrealizedProfit", p.get("pnl", 0))
+                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating PnL: ${float(upnl):.2f})")
+                        pos_str = "\n".join(pos_lines) if pos_lines else "  • No open exchange positions."
+                        shark_header = (
+                            f"🦈 <b>SHARK EXCHANGE LIVE AUTO-TRADING</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"{shark_bal}\n"
+                            f"🟢 <b>Active Positions ({len(shark_pos)}):</b>\n"
+                            f"{pos_str}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        )
+                        card = shark_header + card
+        except Exception as e_sh:
+            logger.warning(f"Could not append Shark balance in cmd_positions: {e_sh}")
+
         await msg.reply_text(card, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error in cmd_positions: {e}")

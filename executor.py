@@ -117,6 +117,8 @@ def round_price(symbol: str, price: float):
         rounded = round(p, 1)
     elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
         rounded = round(p, 2)
+    elif 'XAG' in clean:
+        rounded = round(p, 3)
     elif p >= 1000:
         rounded = round(p, 1)
     elif p >= 10:
@@ -231,6 +233,8 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
 
     if any(c in clean_sym for c in ('BTC', 'ETH', 'XAU', 'PAXG')):
         rounded = max(0.001, round(f_qty, 3))
+    elif 'XAG' in clean_sym:
+        rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('SOL', 'BNB')):
         rounded = max(0.01, round(f_qty, 2))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
@@ -750,7 +754,12 @@ class SharkExchangeExecutor:
                 logger.info(f"AUTO-TRADE EXCLUSION: {clean_sym} skipped for auto-trade ({reason}). Telegram alert only.")
                 return {"status": "skipped", "reason": f"{clean_sym} is skipped ({reason})"}
 
-        # 2. US Stock Tokens: Auto-mapped to Shark native contract (e.g. AAPLB -> AAPLUSDT) and allowed!
+        # 2. US Stock Tokens: AUTO-TRADING STOPPED per User Directive
+        # Signals continue to be broadcast to Telegram, but automatic execution is disabled.
+        is_us_stock = any(x in symbol.upper() for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or symbol.upper().endswith("B/USDT") or symbol.upper().endswith("BUSDT")
+        if is_us_stock:
+            logger.info(f"AUTO-TRADE EXCLUSION: {symbol} is a US Stock token. Skipping auto-trade per user directive. Telegram alert only.")
+            return {"status": "skipped", "reason": f"{symbol} is a US stock (auto-trade disabled per directive, alerts only)"}
 
         if not self.is_configured():
             logger.info(f"AUTO-TRADING NOT CONFIGURED: Keys or toggle not set. Skipping execution for {clean_sym}.")
