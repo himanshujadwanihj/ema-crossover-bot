@@ -185,25 +185,37 @@ async def register_paper_trade(alert_data: dict):
         return
 
     # 2. Strict RSI Momentum Gate: Must fulfill RSI condition for the RSI Boost Sign (✨)
-    # BUY: 45.0 <= RSI <= 72.0 (Healthy bullish momentum zone, avoids exhausted tops >72 and dumps <45)
-    # SELL: 28.0 <= RSI <= 55.0 (Healthy bearish momentum zone, avoids oversold bottoms <28 and weak sellers >55)
+    # Dynamic healthy momentum bounds:
+    # Crypto: BUY 42.0-75.0, SELL 25.0-58.0
+    # Gold/Commodities & Equities: BUY 38.0-75.0, SELL 25.0-62.0 (Accommodates macro pullback retests)
     rsi = alert_data.get('rsi')
     has_rsi_boost = False
     f_rsi = None
+    is_gold_or_stock = any(x in symbol.upper() for x in ["XAU", "GOLD", "XAUT", "XAG", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ"])
+
     if rsi is not None:
         try:
             f_rsi = float(rsi)
-            if signal == 'BUY' and (45.0 <= f_rsi <= 72.0):
-                has_rsi_boost = True
-            elif signal == 'SELL' and (28.0 <= f_rsi <= 55.0):
-                has_rsi_boost = True
+            if is_gold_or_stock:
+                if signal == 'BUY' and (38.0 <= f_rsi <= 75.0):
+                    has_rsi_boost = True
+                elif signal == 'SELL' and (25.0 <= f_rsi <= 62.0):
+                    has_rsi_boost = True
+            else:
+                if signal == 'BUY' and (42.0 <= f_rsi <= 75.0):
+                    has_rsi_boost = True
+                elif signal == 'SELL' and (25.0 <= f_rsi <= 58.0):
+                    has_rsi_boost = True
         except (ValueError, TypeError):
             pass
+    elif is_gold_or_stock:
+        has_rsi_boost = True
 
     if not has_rsi_boost:
+        bounds_label = "[BUY 38-75, SELL 25-62]" if is_gold_or_stock else "[BUY 42-75, SELL 25-58]"
         logger.info(
             f"PAPER TRADER BLOCKED {symbol} {signal} ({cross_type}) — "
-            f"RSI={f_rsi if f_rsi is not None else 'None'} outside required RSI Boost bounds [BUY 45-72, SELL 28-55]. "
+            f"RSI={f_rsi if f_rsi is not None else 'None'} outside required RSI Boost bounds {bounds_label}. "
             f"(Mandatory: 3-Star/4-Star WITH RSI Sign ✨ Required)."
         )
         return
