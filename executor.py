@@ -50,7 +50,8 @@ from config import (
     AUTO_TRADE_MAX_CONCURRENT,
     US_STOCK_TOKENS,
     TELEGRAM_CHAT_ID,
-    clean_contract_symbol
+    clean_contract_symbol,
+    to_shark_symbol
 )
 from telegram_bot import format_price, send_text_to_chat
 
@@ -232,6 +233,8 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.001, round(f_qty, 3))
     elif any(c in clean_sym for c in ('SOL', 'BNB')):
         rounded = max(0.01, round(f_qty, 2))
+    elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
+        rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY')):
         rounded = max(1, int(round(f_qty)))
     elif any(c in clean_sym for c in ('NEAR', 'AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM')):
@@ -280,8 +283,9 @@ class SharkExchangeExecutor:
 
     def is_configured(self) -> bool:
         """Returns True if API keys are configured and auto trading is enabled."""
+        auto_enabled = os.getenv("AUTO_TRADING_ENABLED", "true").lower() in ("true", "1", "yes")
         return (
-            AUTO_TRADING_ENABLED
+            auto_enabled
             and bool(self.api_key)
             and bool(self.api_secret)
             and len(self.api_key) > 10
@@ -297,12 +301,12 @@ class SharkExchangeExecutor:
         }
 
     def clean_sym(self, obj) -> str:
-        """Extract and clean symbol from a position or order dict."""
+        """Extract and clean symbol from a position or order dict, normalized to Shark contract format."""
         if isinstance(obj, dict):
-            raw = obj.get("contractPair") or obj.get("symbol") or ""
+            raw = obj.get("contractPair") or obj.get("symbol") or obj.get("contractName") or ""
         else:
             raw = str(obj)
-        return clean_contract_symbol(raw)
+        return to_shark_symbol(raw)
 
     async def shark_get(self, session: aiohttp.ClientSession, endpoint: str, params: dict = None) -> tuple:
         """Executes an authenticated GET request to Shark Exchange."""
@@ -441,7 +445,7 @@ class SharkExchangeExecutor:
 
     async def update_leverage(self, session: aiohttp.ClientSession, symbol: str, leverage: int = 10) -> bool:
         """Configures symbol leverage to 10x on Shark Exchange."""
-        clean_sym = clean_contract_symbol(symbol)
+        clean_sym = to_shark_symbol(symbol)
         status, data = await self.shark_post(session, "/v1/exchange/update/leverage", {
             "contractName": clean_sym,
             "leverage": leverage
@@ -502,11 +506,11 @@ class SharkExchangeExecutor:
 
     async def get_open_position(self, session: aiohttp.ClientSession, symbol: str) -> dict:
         """Gets single active open position for symbol."""
-        clean_sym = clean_contract_symbol(symbol)
+        shark_sym = to_shark_symbol(symbol)
         positions = await self.get_open_positions(session)
         for p in positions:
-            p_sym = clean_contract_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "")
-            if p_sym == clean_sym:
+            p_sym = to_shark_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "")
+            if p_sym == shark_sym:
                 return p
         return None
 
@@ -727,10 +731,10 @@ class SharkExchangeExecutor:
         - Enforces Single Order Margin Shield (rejects duplicate margin blocks).
         - Submits Entry Limit Order with Stop-Loss attached.
         """
-        clean_sym = clean_contract_symbol(symbol)
+        clean_sym = to_shark_symbol(symbol)
 
-        # 1. BTC / ETH / XAUT / XAG Weekday 4-Star Confluence Exemption Rule
-        is_weekday_restricted = any(m in clean_sym for m in ("BTC", "ETH", "XAUT", "XAG"))
+        # 1. BTC / ETH Weekend Exclusion (Crypto trades 24/7 on weekdays, 4-star check)
+        is_weekday_restricted = any(m in clean_sym for m in ("BTC", "ETH"))
         if is_weekday_restricted:
             try:
                 import zoneinfo
@@ -746,10 +750,7 @@ class SharkExchangeExecutor:
                 logger.info(f"AUTO-TRADE EXCLUSION: {clean_sym} skipped for auto-trade ({reason}). Telegram alert only.")
                 return {"status": "skipped", "reason": f"{clean_sym} is skipped ({reason})"}
 
-        # 2. US Stock Token Exclusion Rule (Only Crypto Coins Traded on Shark)
-        if is_us_stock_token(clean_sym):
-            logger.info(f"US STOCK TOKEN EXCLUDED: {clean_sym} is a US stock token. Only crypto coins traded on Shark. Skipped.")
-            return {"status": "skipped", "reason": f"{clean_sym} is a US stock token (Crypto coins only)"}
+        # 2. US Stock Tokens: Auto-mapped to Shark native contract (e.g. AAPLB -> AAPLUSDT) and allowed!
 
         if not self.is_configured():
             logger.info(f"AUTO-TRADING NOT CONFIGURED: Keys or toggle not set. Skipping execution for {clean_sym}.")
@@ -959,7 +960,7 @@ class SharkExchangeExecutor:
                     from state import _make_key, _load, _save
                     st_map = _load()
                     for k_st in list(st_map.keys()):
-                        if clean_contract_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
+                        if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
                             st_map[k_st]["tp1"] = tp1
                             st_map[k_st]["tp2"] = tp2
                             st_map[k_st]["tp3"] = tp3
@@ -1676,7 +1677,7 @@ class SharkExchangeExecutor:
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
-                                    if clean_contract_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
                                         st_map[k_st]["trail_stage"] = 2
                                         _save(st_map)
@@ -1699,7 +1700,7 @@ class SharkExchangeExecutor:
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
-                                    if clean_contract_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
                                         st_map[k_st]["trail_stage"] = 1
                                         _save(st_map)
@@ -1723,7 +1724,7 @@ class SharkExchangeExecutor:
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
-                                    if clean_contract_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
                                         st_map[k_st]["trail_stage"] = 2
                                         _save(st_map)
@@ -1746,7 +1747,7 @@ class SharkExchangeExecutor:
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
-                                    if clean_contract_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
                                         st_map[k_st]["trail_stage"] = 1
                                         _save(st_map)
@@ -1907,7 +1908,7 @@ class SharkExchangeExecutor:
             # 4. Update persistent state
             st_map = _load()
             for k_st in list(st_map.keys()):
-                if clean_contract_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
+                if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
                     st_map[k_st]["tp1_hit"] = True
                     st_map[k_st]["cur_sl"] = safe_trailed_sl
                     st_map[k_st]["trail_stage"] = 0

@@ -885,7 +885,8 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         vol_24h_usd = float((vol_slice * price_slice).sum())
 
         # For commodities like Gold (XAU/USD) and US Stock tokens, bypass crypto dollar volume threshold
-        is_gold_or_stock = "XAU" in sym_clean or "GOLD" in sym_clean or sym_base in stock_tokens
+        is_gold = "XAU" in sym_clean or "GOLD" in sym_clean
+        is_gold_or_stock = is_gold or (sym_base in stock_tokens)
         if not is_gold_or_stock and vol_24h_usd < 10_000_000.0:
             return {"eligible": False, "reason": f"24h volume ${vol_24h_usd/1e6:.1f}M below $10M threshold"}
 
@@ -933,7 +934,7 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         # ── TICK 4: SMART MONEY ACCUMULATION (OI 1H >= +0.50%) ──
         micro = micro or {}
         oi_change_1h = float(micro.get("oi_change_1h_pct", 0.0))
-        if not is_gold and oi_change_1h < 0.50:
+        if not is_gold_or_stock and oi_change_1h < 0.50:
             return {"eligible": False, "reason": f"OI 1H change {oi_change_1h:+.2f}% < +0.50%"}
 
         # ── TICK 5: DIRECTIONAL & LEVERAGE BIAS ──

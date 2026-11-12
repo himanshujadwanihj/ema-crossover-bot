@@ -430,9 +430,11 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
             if df is None or df.empty:
                 continue
 
-            live_price = None
+            live_price = float(df['close'].iloc[-1]) if (df is not None and not df.empty) else None
             try:
                 sym_clean = symbol.replace("/", "")
+                if "XAU" in sym_clean:
+                    sym_clean = "XAUTUSDT"
                 url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={sym_clean}"
                 async with session.get(url, timeout=4) as resp:
                     if resp.status == 200:
@@ -1388,6 +1390,8 @@ async def generate_strategy_lookout_card(session=None) -> str:
         try:
             for pos in active:
                 sym = pos["symbol"].replace("/", "")
+                if "XAU" in sym:
+                    sym = "XAUTUSDT"
                 url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={sym}"
                 async with session.get(url, timeout=5) as resp:
                     if resp.status == 200:

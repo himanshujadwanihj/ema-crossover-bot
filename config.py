@@ -22,7 +22,7 @@ TELEGRAM_TRADING_CHANNEL_ID: str = "771305593"        # Personal DM Chat ID for 
 FILTER_BOT_TOKEN: str = os.getenv("FILTER_BOT_TOKEN", "8990708294:AAHQAUYGrFSPs7Pi2bAYNvLexheJeqZeAMM")
 
 # ── Shark Exchange Auto-Trader Settings ────────────────────────────────────────
-AUTO_TRADING_ENABLED: bool = False
+AUTO_TRADING_ENABLED: bool = os.getenv("AUTO_TRADING_ENABLED", "true").lower() in ("true", "1", "yes")
 SHARK_API_KEY: str         = os.getenv("SHARK_API_KEY", "b962081fca5cf51e1ca2af7c7c367c5e")
 SHARK_API_SECRET: str      = os.getenv("SHARK_API_SECRET", "339ac6b825119a2e919847ff6bca7837")
 SHARK_BASE_URL: str        = os.getenv("SHARK_BASE_URL", "https://api.sharkexchange.in")
@@ -93,6 +93,58 @@ def clean_contract_symbol(symbol: str) -> str:
     """Standardizes any pair format (e.g. 'SOL/USDT', 'SOL/USDT:USDT', 'SOL-USDT') to 'SOLUSDT'."""
     s = str(symbol).split(':')[0]
     return s.replace('/', '').replace('-', '').upper()
+
+
+def to_shark_symbol(symbol: str) -> str:
+    """
+    Translates bot internal tickers / Binance symbols to Shark Exchange native contracts:
+    - XAU/USD, XAUUSD, XAUT/USDT -> XAUUSDT
+    - XAG/USD, XAGUSD, XAG/USDT -> XAGUSDT
+    - CL/USD -> CLUSDT
+    - NATGAS/USD -> NATGASUSDT
+    - AAPLB/USDT, AAPLBUSDT -> AAPLUSDT
+    - NVDAB/USDT, NVDABUSDT -> NVDAUSDT
+    - TSLAB/USDT, TSLABUSDT -> TSLAUSDT
+    - MSTRB/USDT, MSTRBUSDT -> MSTRUSDT
+    - AMZNB/USDT, AMZNBUSDT -> AMZNUSDT
+    - METAB/USDT, METABUSDT -> METAUSDT
+    - MSFTB/USDT, MSFTBUSDT -> MSFTUSDT
+    - GOOGLB/USDT, GOOGLBUSDT -> GOOGLUSDT
+    - SPYB/USDT, SPYBUSDT -> SPYUSDT
+    - QQQB/USDT, QQQBUSDT -> QQQUSDT
+    - Any other [TICKER]BUSDT -> [TICKER]USDT
+    - Standard crypto (e.g. SOL/USDT) -> SOLUSDT
+    """
+    clean = clean_contract_symbol(symbol)
+    
+    # 1. Commodities mapping to USDT pairs on Shark
+    if clean in ("XAUUSD", "XAUTUSDT", "XAU"):
+        return "XAUUSDT"
+    if clean in ("XAGUSD", "XAGUSDT", "XAG"):
+        return "XAGUSDT"
+    if clean in ("CLUSD", "CL"):
+        return "CLUSDT"
+    if clean in ("NATGASUSD", "NATGAS"):
+        return "NATGASUSDT"
+        
+    # 2. US Stock Tokens: strip synthetic 'B' before USDT for Shark Exchange
+    stock_b_map = {
+        "AAPLBUSDT": "AAPLUSDT", "NVDABUSDT": "NVDAUSDT", "TSLABUSDT": "TSLAUSDT",
+        "MSTRBUSDT": "MSTRUSDT", "AMZNBUSDT": "AMZNUSDT", "METABUSDT": "METAUSDT",
+        "MSFTBUSDT": "MSFTUSDT", "GOOGLBUSDT": "GOOGLUSDT", "SPYBUSDT": "SPYUSDT",
+        "QQQBUSDT": "QQQUSDT", "COINBUSDT": "COINUSDT", "AMDBUSDT": "AMDUSDT",
+        "SNDKBUSDT": "SNDKUSDT", "SOXLBUSDT": "SOXLUSDT", "BABABUSDT": "BABAUSDT",
+        "DISBUSDT": "DISUSDT", "PYPLBUSDT": "PYPLUSDT", "BABUSDT": "BAUSDT",
+        "XOMBUSDT": "XOMUSDT", "PLTRBUSDT": "PLTRUSDT"
+    }
+    if clean in stock_b_map:
+        return stock_b_map[clean]
+        
+    if clean.endswith("BUSDT") and len(clean) > 5:
+        base = clean[:-5]
+        return f"{base}USDT"
+        
+    return clean
 
 
 def validate_config() -> None:
