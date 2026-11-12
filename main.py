@@ -983,14 +983,12 @@ async def main_loop():
                             weekend_blocked_assets = set(COMMODITIES + US_EQUITIES + list(stock_symbols_set) + ["XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT"])
                         else:
                             METALS_LIST = ["XAU/USD"]  # Gold Spot only on weekdays
-                            # US Equity Tokens regular trading hours (19:00 to 01:30 IST, Mon-Fri):
-                            # Outside US market hours, tokenized US equities are closed/flatline in crypto, so skip scanning them
-                            is_us_open = (now_ist.weekday() < 5) and (now_ist.hour >= 19 or now_ist.hour == 0 or (now_ist.hour == 1 and now_ist.minute <= 30))
+                            # US Equity Tokens (Binance Spot 24/7 feeds + yfinance fallback): Active all weekdays
                             US_STOCKS_LIST = [
                                 "NVDAB/USDT", "TSLAB/USDT", "MSTRB/USDT", "AAPLB/USDT",
                                 "AMZNB/USDT", "METAB/USDT", "MSFTB/USDT", "GOOGLB/USDT",
                                 "SPYB/USDT", "QQQB/USDT", "COIN/USDT", "AMD/USDT"
-                            ] if is_us_open else []
+                            ]
                             weekend_blocked_assets = set()
                         
                         # ── USER-DEFINED WEEKDAY vs WEEKEND SCANNING RULES ──

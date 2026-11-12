@@ -874,12 +874,9 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         if sym_base in stock_tokens:
             tz_ist = zoneinfo.ZoneInfo("Asia/Kolkata")
             now_ist = datetime.now(timezone.utc).astimezone(tz_ist)
-            # US regular market hours: Mon-Fri 19:00 - 01:30 IST
+            # US stocks / tokens active on all weekdays (Mon-Fri)
             if now_ist.weekday() >= 5:
                 return {"eligible": False, "reason": "US stock closed on weekend"}
-            in_hours = (now_ist.hour >= 19) or (now_ist.hour == 0) or (now_ist.hour == 1 and now_ist.minute <= 30)
-            if not in_hours:
-                return {"eligible": False, "reason": "US stock closed outside market hours (19:00 - 01:30 IST)"}
 
         # Calculate 24h USD volume: 24 bars for 1H, 96 bars for 15M
         n_bars = 24 if tf_label.upper() == "1H" else 96
@@ -887,9 +884,9 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         price_slice = df_tf['close'].iloc[-n_bars:] if len(df_tf) >= n_bars else df_tf['close']
         vol_24h_usd = float((vol_slice * price_slice).sum())
 
-        # For commodities like Gold (XAU/USD), volume on CFD is tick-based, so bypass dollar threshold
-        is_gold = "XAU" in sym_clean or "GOLD" in sym_clean
-        if not is_gold and vol_24h_usd < 10_000_000.0:
+        # For commodities like Gold (XAU/USD) and US Stock tokens, bypass crypto dollar volume threshold
+        is_gold_or_stock = "XAU" in sym_clean or "GOLD" in sym_clean or sym_base in stock_tokens
+        if not is_gold_or_stock and vol_24h_usd < 10_000_000.0:
             return {"eligible": False, "reason": f"24h volume ${vol_24h_usd/1e6:.1f}M below $10M threshold"}
 
         # ── TICK 2: GENUINE RANGE COMPRESSION (Tailored for 1H TF: 0.60% <= comp <= 3.50%) ──
