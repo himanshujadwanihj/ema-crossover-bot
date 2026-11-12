@@ -1140,23 +1140,23 @@ async def main_loop():
                                         continue
 
                                     logger.info(f"⚡ BULK TRADE EXECUTE: {sym} [{sig}] ({stars}/4 Stars Priority)")
-                                        
-                                        shark_res = await executor.execute_signal_trade(
-                                            session, sym, sig, cand["entry"], cand["sl"], 
-                                            cand["tp1"], cand["tp2"], cand["tp3"],
-                                            aligned_count=stars,
-                                            adx=cand.get("adx")
-                                        )
-                                        
-                                        if shark_res and shark_res.get("status") == "success":
-                                            from state import update_trade_progress, _make_key
-                                            state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
-                                            t_qty = shark_res.get("total_qty", 0)
-                                            update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
-                                            logger.info(f"Marked shark_order_placed=True for {state_key}")
-                                        
-                                        # Mandatory 1.5-second sequential pause between bulk trade executions
-                                        await asyncio.sleep(1.5)
+                                    
+                                    shark_res = await executor.execute_signal_trade(
+                                        session, sym, sig, cand["entry"], cand["sl"], 
+                                        cand["tp1"], cand["tp2"], cand["tp3"],
+                                        aligned_count=stars,
+                                        adx=cand.get("adx")
+                                    )
+                                    
+                                    if shark_res and shark_res.get("status") == "success":
+                                        from state import update_trade_progress, _make_key
+                                        state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
+                                        t_qty = shark_res.get("total_qty", 0)
+                                        update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
+                                        logger.info(f"Marked shark_order_placed=True for {state_key}")
+                                    
+                                    # Mandatory 1.5-second sequential pause between bulk trade executions
+                                    await asyncio.sleep(1.5)
 
                         total_sent = len(raw_candidates)
                         elapsed = (datetime.now() - start_t).total_seconds()
