@@ -520,9 +520,9 @@ class SharkExchangeExecutor:
 
     async def has_active_trade_on_exchange(self, session: aiohttp.ClientSession, symbol: str) -> bool:
         """
-        STRICT HARD CAP & SINGLE ORDER MARGIN SHIELD:
-        Enforces a hard limit of max 3 concurrent slots on Shark Exchange (Positions + Pending Entries).
-        Uses both Exchange API state AND local in-memory active set to prevent zero-race-condition cap breaches.
+        SINGLE ORDER SHIELD (Portfolio Cap Removed):
+        Checks if symbol already has an active open position or pending entry order on Shark Exchange.
+        Prevents duplicate entries on the same symbol while allowing unlimited concurrent trades across different symbols.
         """
         if not self.is_configured():
             return False
@@ -570,16 +570,10 @@ class SharkExchangeExecutor:
 
         # Merge Exchange state with local in-memory active slots set (Zero Race Condition Shield)
         active_symbols = position_symbols | pending_entry_symbols | unexpired_local
-        logger.info(f"Cap check [{len(active_symbols)}/{self.max_concurrent_trades}]: positions={position_symbols} pending={pending_entry_symbols} local={unexpired_local}")
+        logger.info(f"Exchange active symbols check: positions={position_symbols} pending={pending_entry_symbols} local={unexpired_local}")
 
-        if self.max_concurrent_trades and self.max_concurrent_trades < 999 and len(active_symbols) >= self.max_concurrent_trades and clean_sym not in active_symbols:
-            logger.warning(
-                f"🚫 STRICT HARD CAP REACHED: {len(active_symbols)}/{self.max_concurrent_trades} slots full (Active: {active_symbols}). "
-                f"REJECTING new order for {clean_sym}."
-            )
-            return True
-
-        # 2. Check Active Position or Pending Order for exact Symbol
+        # USER DIRECTIVE: Portfolio cap removed completely from everywhere!
+        # Only check if active trade or pending order already exists for this exact symbol (duplicate guard)
         if clean_sym in active_symbols:
             logger.warning(f"SINGLE ORDER SHIELD: Active trade or order already exists for {clean_sym}. Skipping duplicate.")
             return True
@@ -610,90 +604,8 @@ class SharkExchangeExecutor:
         return ""
 
     async def cancel_over_limit_pending_orders(self, session: aiohttp.ClientSession) -> None:
-        """
-        SAFE CLEANUP: Cancels ONLY pending ENTRY limit orders (placeType=ORDER_FORM)
-        that push total active slots beyond max_concurrent_trades cap.
-        """
-        if not self.is_configured() or not session or (self.max_concurrent_trades and self.max_concurrent_trades >= 999):
-            return
-        try:
-            positions  = await self.get_open_positions(session)
-            all_orders = await self.get_open_orders(session)
-
-            position_syms = set()
-            for p in positions:
-                position_syms.add(clean_contract_symbol(p.get("contractPair") or p.get("symbol") or ""))
-
-            # Collect ONLY pending ENTRY orders — strict filtering
-            pending_entries = []
-            for o in all_orders:
-                order_type = o.get("type", "").upper()
-                place_type = o.get("placeType", "")
-
-                # Hard excludes
-                if o.get("reduceOnly"):            continue
-                if place_type == "POSITION":       continue  # TP/SL bracket
-                if order_type in ("STOP_MARKET", "STOP_LIMIT", "STOP"): continue
-                if o.get("linkType") in ("ORDER_SL", "ORDER_TP"): continue
-
-                # Must be LIMIT entry order
-                if order_type != "LIMIT":          continue
-
-                sym = clean_contract_symbol(o.get("symbol") or "")
-                if not sym or sym in position_syms: continue  # skip if already filled
-
-                # Skip if we already cancelled this in current session
-                cid = str(o.get("clientOrderId") or o.get("orderId") or "")
-                if cid in self._already_cancelled:  continue
-
-                pending_entries.append(o)
-
-            total_slots = len(position_syms) + len(pending_entries)
-            slots_available = max(0, self.max_concurrent_trades - len(position_syms))
-            excess = max(0, len(pending_entries) - slots_available)
-
-            if excess <= 0 or len(pending_entries) == 0:
-                return
-
-            logger.warning(f"⚠️ OVER-CAP: {total_slots} slots (cap={self.max_concurrent_trades}). Cancelling {excess} pending entry order(s). Positions safe.")
-
-            # Sort oldest first
-            pending_entries.sort(key=lambda o: str(o.get("time") or o.get("createdAt") or ""))
-
-            from telegram_bot import send_text_alert as _alert
-            cancelled = 0
-            for o in pending_entries[:excess]:
-                cid = str(o.get("clientOrderId") or "")
-                oid = str(o.get("orderId") or "")
-                sym = clean_contract_symbol(o.get("symbol") or "")
-                cancel_key = cid or oid
-
-                if not cancel_key:
-                    continue
-
-                # Try clientOrderId first, then orderId
-                st, res = await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": cid} if cid else {"orderId": oid})
-                if st in (200, 201):
-                    cancelled += 1
-                    self._already_cancelled.add(cancel_key)
-                    logger.info(f"Over-cap: ✅ Cancelled entry order {cancel_key} for {sym}")
-                    msg = (
-                        f"🚫 <b>OVER-CAP ENTRY ORDER CANCELLED</b>\n\n"
-                        f"<b>Asset:</b> {sym}\n"
-                        f"<b>Reason:</b> Portfolio cap ({self.max_concurrent_trades} max) exceeded.\n"
-                        f"<b>Action:</b> ✅ Pending entry cancelled. Active positions untouched."
-                    )
-                    await _alert(msg)
-                else:
-                    # Order may already be gone — add to cancelled set anyway to stop retrying
-                    logger.warning(f"Over-cap: Failed to cancel {cancel_key} for {sym}: {res} — marking as done.")
-                    self._already_cancelled.add(cancel_key)
-
-            if cancelled:
-                logger.info(f"Over-cap cleanup done: {cancelled} entry order(s) cancelled. Live positions untouched.")
-
-        except Exception as e:
-            logger.error(f"Error in cancel_over_limit_pending_orders: {e}")
+        """Disabled: Portfolio cap removed per user directive."""
+        return
 
     async def execute_signal_trade(
         self,

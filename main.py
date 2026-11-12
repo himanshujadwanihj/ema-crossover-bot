@@ -1126,42 +1126,20 @@ async def main_loop():
 
                                 eligible_candidates.sort(key=_coin_tier_rank, reverse=True)
                                 
-                                # Query available portfolio cap slots on exchange
-                                positions = await executor.get_open_positions(session)
-                                open_orders = await executor.get_open_orders(session)
-                                active_syms = {executor.clean_sym(p) for p in positions}
-                                for o in open_orders:
-                                    if not o.get("reduceOnly") and o.get("placeType") != "POSITION":
-                                        s = executor.clean_sym(o)
-                                        if s: active_syms.add(s)
+                                # USER DIRECTIVE: Portfolio cap removed completely — execute ALL eligible setups without limit
+                                top_candidates = eligible_candidates
+                                logger.info(f"🏆 ALL {len(top_candidates)} ELIGIBLE SETUP(S) SELECTED FOR SHARK EXECUTION (No portfolio cap).")
+                                for cand in top_candidates:
+                                    sym = cand["symbol"]
+                                    sig = cand["signal"]
+                                    stars = cand.get("aligned_count", 0)
 
-                                if executor.max_concurrent_trades and executor.max_concurrent_trades >= 999:
-                                    available_slots = len(eligible_candidates)
-                                else:
-                                    available_slots = max(0, executor.max_concurrent_trades - len(active_syms))
+                                    # Verify duplicate check before submitting order
+                                    if await executor.has_active_trade_on_exchange(session, sym):
+                                        logger.info(f"Skipping {sym} — active trade/order already exists on exchange for this symbol.")
+                                        continue
 
-                                if available_slots <= 0:
-                                    logger.info(f"🚫 PORTFOLIO FULL ({len(active_syms)}/{executor.max_concurrent_trades} slots occupied). Skipping auto-execution for all {len(eligible_candidates)} candidate(s).")
-                                else:
-                                    # Select ONLY the top N best crossovers matching available slots (Max 4 Total)
-                                    top_candidates = eligible_candidates[:available_slots]
-                                    skipped_candidates = eligible_candidates[available_slots:]
-                                    
-                                    logger.info(f"🏆 TOP {len(top_candidates)} BEST CROSSOVER(S) SELECTED FOR SHARK EXECUTION (out of {len(eligible_candidates)} candidate(s)).")
-                                    if skipped_candidates:
-                                        skipped_names = [c["symbol"] for c in skipped_candidates]
-                                        logger.info(f"ℹ️ Skipped {len(skipped_candidates)} lower-ranked candidate(s) for auto-trade: {skipped_names}")
-                                    for cand in top_candidates:
-                                        sym = cand["symbol"]
-                                        sig = cand["signal"]
-                                        stars = cand.get("aligned_count", 0)
-
-                                        # Re-verify slot availability and duplicate check before submitting order
-                                        if await executor.has_active_trade_on_exchange(session, sym):
-                                            logger.info(f"Skipping {sym} — active trade/order exists or portfolio cap full.")
-                                            continue
-
-                                        logger.info(f"⚡ BULK TRADE EXECUTE [Top Pick]: {sym} [{sig}] ({stars}/4 Stars Priority)")
+                                    logger.info(f"⚡ BULK TRADE EXECUTE: {sym} [{sig}] ({stars}/4 Stars Priority)")
                                         
                                         shark_res = await executor.execute_signal_trade(
                                             session, sym, sig, cand["entry"], cand["sl"], 
