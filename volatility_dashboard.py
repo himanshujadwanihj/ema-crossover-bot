@@ -21,6 +21,8 @@ from telegram_bot import format_display_symbol
 logger = logging.getLogger("volatility_dashboard")
 
 STATE_FILE = "/data/pinned_dashboard_state.json" if os.path.isdir("/data") else "pinned_dashboard_state.json"
+BACKUP_STATE_FILE = "pinned_dashboard_state.json"
+KNOWN_DASHBOARD_MSG_ID = 6697
 TARGET_CHANNELS = ["-1004332146822"]  # EMA Scanner Channel ONLY (Removed from EMA Cross Channel)
 
 # Coin Category Classification Rules
@@ -61,21 +63,26 @@ def get_coin_category(symbol: str) -> str:
 
 
 def load_pinned_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    for path in [STATE_FILE, BACKUP_STATE_FILE]:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if d and isinstance(d, dict):
+                        return d
+            except Exception:
+                pass
+    return {"-1004332146822": KNOWN_DASHBOARD_MSG_ID}
 
 
 def save_pinned_state(state: dict):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save pinned dashboard state: {e}")
+    for path in [STATE_FILE, BACKUP_STATE_FILE]:
+        try:
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save pinned dashboard state to {path}: {e}")
 
 
 async def analyze_coin_ema(session: aiohttp.ClientSession, symbol: str, semaphore: asyncio.Semaphore) -> dict:
@@ -374,8 +381,9 @@ def build_dashboard_html(gainers: list, losers: list) -> str:
 
 async def update_pinned_volatility_dashboard(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
     """
-    Maintains 1 single pinned card in EMA Scanner Channel (-1004332146822),
+    Maintains strictly 1 single pinned card in EMA Scanner Channel (-1004332146822),
     silently editing text in-place every 5 minutes.
+    NEVER dumps duplicate messages on network timeouts or transient errors.
     """
     try:
         gainers, losers = await fetch_4h_volatility_movers(session, semaphore)
@@ -391,7 +399,7 @@ async def update_pinned_volatility_dashboard(session: aiohttp.ClientSession, sem
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
         channel_id = "-1004332146822"  # EMA Scanner Channel ONLY
-        msg_id = state.get(channel_id)
+        msg_id = state.get(channel_id) or KNOWN_DASHBOARD_MSG_ID
 
         # Query Telegram API for existing pinned message if msg_id is missing from local state file
         if not msg_id:
@@ -415,16 +423,39 @@ async def update_pinned_volatility_dashboard(session: aiohttp.ClientSession, sem
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True
                 )
-                logger.info(f"Edited existing pinned message {msg_id} in channel {channel_id}")
+                logger.info(f"Silently edited existing pinned 4H volatility dashboard (msg_id={msg_id}) in {channel_id}")
                 return
             except Exception as edit_err:
                 err_str = str(edit_err)
                 if "Message is not modified" in err_str:
                     logger.debug(f"Pinned message {msg_id} text unchanged.")
                     return
-                elif "Message to edit not found" in err_str or "message can't be edited" in err_str:
-                    logger.warning(f"Message {msg_id} no longer editable in {channel_id}. Resetting...")
+                elif "Message to edit not found" in err_str:
+                    logger.warning(f"Message {msg_id} was deleted from {channel_id}. Checking for active pinned message...")
+                    # Try checking if another dashboard message was pinned before creating any new message
+                    try:
+                        chat = await bot.get_chat(chat_id=channel_id)
+                        if chat and chat.pinned_message and chat.pinned_message.message_id != msg_id:
+                            alt_id = chat.pinned_message.message_id
+                            await bot.edit_message_text(
+                                chat_id=channel_id,
+                                message_id=alt_id,
+                                text=html_text,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True
+                            )
+                            state[channel_id] = alt_id
+                            save_pinned_state(state)
+                            logger.info(f"Re-linked and edited pinned message {alt_id}")
+                            return
+                    except Exception as e_repin:
+                        logger.warning(f"Could not re-link pinned message: {e_repin}")
                     msg_id = None
+                else:
+                    # Transient error (network timeout, rate limit, etc.)
+                    # STRICT RULE: DO NOT send a new message! Just log and wait for next 5-min cycle.
+                    logger.warning(f"Transient error editing pinned dashboard {msg_id}: {edit_err}. Skipping to next cycle.")
+                    return
 
         # Only send a new message if NO pinned message exists AT ALL in the channel
         if not msg_id:
