@@ -19,8 +19,14 @@ logger = logging.getLogger(__name__)
 
 if os.path.isdir("/data"):
     PREFS_FILE = "/data/user_subscriptions.json"
+    BACKUP_PREFS_FILE = "/data/user_subscriptions_backup.json"
+    BANNED_FILE = "/data/banned_users.json"
+    BACKUP_BANNED_FILE = "/data/banned_users_backup.json"
 else:
     PREFS_FILE = "user_subscriptions.json"
+    BACKUP_PREFS_FILE = "user_subscriptions_backup.json"
+    BANNED_FILE = "banned_users.json"
+    BACKUP_BANNED_FILE = "banned_users_backup.json"
 
 DEFAULT_TIMEFRAMES = ["1h", "4h", "1d", "1w"]
 DEFAULT_COIN_GROUPS = ["core_10", "alts_25"]
@@ -28,10 +34,6 @@ DEFAULT_SIGNAL_TYPES = ["crossover", "retest"]
 DEFAULT_MIN_STARS = 3
 
 _prefs_cache = None
-
-BACKUP_PREFS_FILE = "user_subscriptions_backup.json"
-BANNED_FILE = "/data/banned_users.json" if os.path.isdir("/data") else "banned_users.json"
-BACKUP_BANNED_FILE = "banned_users_backup.json"
 
 def _load_banned() -> Dict[str, Any]:
     banned = {}
@@ -129,27 +131,19 @@ def _load_prefs() -> Dict[str, Any]:
             logger.error(f"Error loading {PREFS_FILE}: {e}")
             data = {}
 
-    # AUTO-RECOVERY & MERGE: Never lose any user subscription
-    backup_data = {}
-    if os.path.exists(BACKUP_PREFS_FILE):
+    if not data and os.path.exists(BACKUP_PREFS_FILE):
         try:
             with open(BACKUP_PREFS_FILE, "r", encoding="utf-8") as fb:
-                backup_data = json.load(fb)
+                data = json.load(fb)
         except Exception as eb:
             logger.error(f"Error loading {BACKUP_PREFS_FILE}: {eb}")
 
-    # Merge users from backup into live data if missing
-    merged = False
-    for uid, udata in backup_data.items():
-        if uid not in data:
-            data[uid] = udata
-            merged = True
-
-    # If data has users not in backup, update backup immediately
-    if len(data) > len(backup_data) or merged:
+    # Fallback seed only if persistent volume is brand new and empty on first boot
+    if not data and PREFS_FILE != "user_subscriptions.json" and os.path.exists("user_subscriptions.json"):
         try:
-            with open(BACKUP_PREFS_FILE, "w", encoding="utf-8") as fb:
-                json.dump(data, fb, indent=2)
+            with open("user_subscriptions.json", "r", encoding="utf-8") as f_seed:
+                data = json.load(f_seed)
+                logger.info("Seeded user_subscriptions from local file on first volume boot.")
         except Exception:
             pass
 
@@ -203,7 +197,7 @@ def get_user_prefs(chat_id: str, user_obj=None) -> Dict[str, Any]:
             _save_prefs(prefs)
         u = prefs[cid]
         modified = False
-        if "coin_groups" not in u or len(u.get("coin_groups", [])) == 0:
+        if "coin_groups" not in u:
             u["coin_groups"] = list(DEFAULT_COIN_GROUPS)
             modified = True
         if "signal_types" not in u:
@@ -226,10 +220,11 @@ def get_user_prefs(chat_id: str, user_obj=None) -> Dict[str, Any]:
     return prefs[cid]
 
 def update_user_pref(chat_id: str, key: str, value: Any) -> Dict[str, Any]:
-    prefs = _load_prefs()
     cid = str(chat_id)
+    prefs = _load_prefs()
     if cid not in prefs:
         get_user_prefs(cid)
+        prefs = _load_prefs()
     prefs[cid][key] = value
     _save_prefs(prefs)
     return prefs[cid]
