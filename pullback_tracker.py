@@ -383,7 +383,7 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     logger.info(f"FILTERED RETEST: {symbol} {sig_type} rejected by BTC Micro-Gate ({btc_reason}).")
                     continue
 
-                sl, (tp1, tp2, tp3), (rr1, rr2, rr3), (lbl1, lbl2, lbl3) = find_liquidity_pool_targets(df, sig_type, retest_price, def_sl, symbol=symbol, tf_data=tf_data)
+                sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df, sig_type, retest_price, def_sl, symbol=symbol, tf_data=tf_data)
                 
                 # Dynamic Retest Trailing Hook:
                 # If an active trade is already open on this coin, evaluate if this confirmed retest allows trailing SL
@@ -423,17 +423,17 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     cross_type=f"{ema_name} {action_name}",
                     candle_time=candle_time_ist,
                     macro_struct=macro_struct,
-                    tp1=tp1, tp2=tp2, tp3=tp3,
-                    rr1=rr1, rr2=rr2, rr3=rr3,
-                    lbl1=lbl1, lbl2=lbl2, lbl3=lbl3,
+                    tp1=tp1, tp2=tp2,
+                    rr1=rr1, rr2=rr2,
+                    lbl1=lbl1, lbl2=lbl2,
                     tf_data=tf_data,
                     is_special_list=is_special,
                     rsi=cur_rsi
                 )
                 if not is_ret_queued:
                     continue
-                mark_sent(symbol, unique_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
-                mark_sent(symbol, unified_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
+                mark_sent(symbol, unique_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2)
+                mark_sent(symbol, unified_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2)
                 logger.info(f"Sent {ema_name} {action_name} Alert for {symbol} {tf_label} {trend}")
                 set_coin_cooldown(symbol, tf_label)
                 if any(k in symbol.upper() for k in ["XAU", "XAUT"]) and tf_label not in ["5M", "15M"]:
@@ -455,7 +455,6 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         "sl": sl,
                         "tp1": tp1,
                         "tp2": tp2,
-                        "tp3": tp3,
                         "tp": tp1,
                         "aligned_count": aligned_count,
                         "is_3_htf_aligned": is_3_htf_aligned,
@@ -464,7 +463,7 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         "is_special": is_special,
                         "unique_key": unique_key,
                         "candle_ts": dedup_ts,
-                        "rr3": rr3 or 1.5,
+                        "rr2": rr2 or 1.5,
                         "rsi": cur_rsi,
                     }
         except Exception as e:

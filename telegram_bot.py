@@ -298,7 +298,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         "symbol": symbol, "tf_label": tf_label, "signal": signal, "entry": entry,
         "sl": sl, "tp": tp, "tf_states": tf_states, "cross_type": cross_type,
         "candle_time": candle_time, "macro_struct": macro_struct, "rr": rr,
-        "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr1": rr1, "rr2": rr2, "rr3": rr3,
+        "tp1": tp1, "tp2": tp2, "tp3": tp2, "rr1": rr1, "rr2": rr2, "rr3": rr2,
         "is_special_list": is_special_list, "tf_data": tf_data, "aligned_count": aligned_count,
         "rsi": rsi, "adx": adx,
         "microstructure": micro, "session_info": session_info, 
@@ -393,8 +393,10 @@ def _build_single_coin_block(data, index=None):
     cross_type = data["cross_type"]
     entry = data["entry"]
     sl = data["sl"]
-    tp1, tp2, tp3 = data.get("tp1"), data.get("tp2"), data.get("tp3")
-    rr1, rr2, rr3 = data.get("rr1"), data.get("rr2"), data.get("rr3")
+    tp1 = data.get("tp1")
+    tp2 = data.get("tp2") or data.get("tp3")
+    rr1 = data.get("rr1")
+    rr2 = data.get("rr2") or data.get("rr3")
     tf_states = data["tf_states"]
     
     target_trend = "bullish" if signal == "BUY" else "bearish"
@@ -513,11 +515,11 @@ def _build_single_coin_block(data, index=None):
     block += f"🎯 <b>ENTRY:</b> {format_price(entry, symbol)}\n"
     block += f"🔴 <b>STOP-LOSS:</b> {format_price(sl, symbol)}\n"
     
-    if tp1 and tp3 and (tp1 != tp3):
+    if tp1 and tp2 and (tp1 != tp2):
         f_rr1 = float(rr1) if rr1 is not None else 2.0
-        f_rr2 = float(rr3) if rr3 is not None else 3.5
+        f_rr2 = float(rr2) if rr2 is not None else 3.5
         block += f"🟢 <b>TP1:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"
-        block += f"🚀 <b>TP2:</b> {format_price(tp3, symbol)} (1:{f_rr2:.1f} R:R)\n"
+        block += f"🚀 <b>TP2:</b> {format_price(tp2, symbol)} (1:{f_rr2:.1f} R:R)\n"
     elif tp1:
         f_rr1 = float(rr1) if rr1 is not None else 2.0
         block += f"🎯 <b>TARGET:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"

@@ -150,10 +150,10 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         if signal == "BUY":
-            tp1, tp2, tp3 = entry + (2.0 * risk), entry + (3.0 * risk), entry + (4.0 * risk)
+            tp1, tp2 = entry + (2.0 * risk), entry + (3.5 * risk)
         else:
-            tp1, tp2, tp3 = entry - (2.0 * risk), entry - (3.0 * risk), entry - (4.0 * risk)
-        return sl, (tp1, tp2, tp3), (2.0, 3.0, 4.0), ("2.0 R:R Target 1", "3.0 R:R Target 2", "Extended Expansion Target")
+            tp1, tp2 = entry - (2.0 * risk), entry - (3.5 * risk)
+        return sl, (tp1, tp2), (2.0, 3.5), ("2.0 R:R Target 1 (70% Book)", "3.5 R:R Target 2 (30% Runner)")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -289,25 +289,16 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         higher_bsl = [p for p in all_bsl if p > tp1 * 1.005]
         if len(higher_bsl) >= 1:
             tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
-            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run)"
+            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run Runner)"
         else:
-            tp2 = max(tp1 * 1.005, entry + (3.0 * risk))
-            lbl2 = "3.0 R:R Expansion Target 2"
-
-        even_higher_bsl = [p for p in higher_bsl if p > tp2 * 1.005]
-        if len(even_higher_bsl) >= 1:
-            tp3 = round(even_higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
-            lbl3 = "Liquidity Pool Target 3"
-        else:
-            tp3 = max(tp2 * 1.005, entry + (4.0 * risk))
-            lbl3 = "4.0 R:R Expansion Target 3"
+            tp2 = max(tp1 * 1.005, entry + (3.5 * risk))
+            lbl2 = "3.5 R:R Expansion Target 2 (Runner)"
 
         rr1 = (tp1 - entry) / risk
         rr2 = (tp2 - entry) / risk
-        rr3 = (tp3 - entry) / risk
 
-        # 70/30 Rule: TP1 strictly locked at >= 1:2.0 RR partial profit target (No volume override)
-        return sl, (tp1, tp2, tp3), (round(rr1, 2), round(rr2, 2), round(rr3, 2)), (lbl1, lbl2, lbl3)
+        # 2-Tier Strategy (70% Book at TP1, 30% Free Runner to TP2)
+        return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
 
     else: # SELL
         # ATR-Based Dynamic Stop-Loss (1.5x ATR above entry)
@@ -382,25 +373,16 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         lower_ssl = [p for p in all_ssl if p < tp1 * 0.995]
         if len(lower_ssl) >= 1:
             tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
-            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run)"
+            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run Runner)"
         else:
-            tp2 = min(tp1 * 0.995, entry - (3.0 * risk))
-            lbl2 = "3.0 R:R Expansion Target 2"
-
-        even_lower_ssl = [p for p in lower_ssl if p < tp2 * 0.995]
-        if len(even_lower_ssl) >= 1:
-            tp3 = round(even_lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
-            lbl3 = "Liquidity Pool Target 3"
-        else:
-            tp3 = min(tp2 * 0.995, entry - (4.0 * risk))
-            lbl3 = "4.0 R:R Expansion Target 3"
+            tp2 = min(tp1 * 0.995, entry - (3.5 * risk))
+            lbl2 = "3.5 R:R Expansion Target 2 (Runner)"
 
         rr1 = (entry - tp1) / risk
         rr2 = (entry - tp2) / risk
-        rr3 = (entry - tp3) / risk
 
-        # 70/30 Rule: TP1 strictly locked at >= 1:2.0 RR partial profit target (No volume override)
-        return sl, (tp1, tp2, tp3), (round(rr1, 2), round(rr2, 2), round(rr3, 2)), (lbl1, lbl2, lbl3)
+        # 2-Tier Strategy (70% Book at TP1, 30% Free Runner to TP2)
+        return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
 
 def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict = None) -> list:
     """
@@ -498,7 +480,7 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
         opt_entry = float(ema9_px)
         def_sl = buy_sl if sig_type == "BUY" else sell_sl
 
-        dyn_sl, (tp1, tp2, tp3), (rr1, rr2, rr3), (lbl1, lbl2, lbl3) = find_liquidity_pool_targets(df, sig_type, opt_entry, def_sl, symbol=symbol, tf_data=tf_data)
+        dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df, sig_type, opt_entry, def_sl, symbol=symbol, tf_data=tf_data)
         signals.append({
             "type": cross_name,
             "signal": sig_type,
@@ -506,13 +488,10 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             "sl": dyn_sl,
             "tp1": tp1,
             "tp2": tp2,
-            "tp3": tp3,
             "rr1": rr1,
             "rr2": rr2,
-            "rr3": rr3,
             "lbl1": lbl1,
             "lbl2": lbl2,
-            "lbl3": lbl3,
             "rsi": float(rsi_val) if not pd.isna(rsi_val) else None,
             "adx": float(adx_val) if not pd.isna(adx_val) else 25.0,
             # Backward compatibility single fields

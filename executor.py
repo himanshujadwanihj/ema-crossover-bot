@@ -435,17 +435,16 @@ class SharkExchangeExecutor:
             # Choppy / Range Regime: 100% exit at TP1
             tp1_qty = total_qty
             tp2_qty = 0.0
-            tp3_qty = 0.0
         else:
-            # Trending Regime: 70% at TP1, 30% runner at TP3
+            # Trending Regime: 70% at TP1, 30% runner at TP2
             tp1_qty = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
-            tp3_qty = round_coin_qty(clean_sym, total_qty - tp1_qty, price=entry_price)
-            tp2_qty = 0.0
-            if tp3_qty <= 0:
+            tp2_qty = round_coin_qty(clean_sym, total_qty - tp1_qty, price=entry_price)
+            if tp2_qty <= 0:
                 tp1_qty = total_qty
-                tp3_qty = 0.0
+                tp2_qty = 0.0
+        tp3_qty = tp2_qty  # Backward compat alias
 
-        return total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt
+        return total_qty, tp1_qty, tp2_qty, tp2_qty, margin_usdt, notional_usdt
 
     async def update_leverage(self, session: aiohttp.ClientSession, symbol: str, leverage: int = 10) -> bool:
         """Configures symbol leverage to 10x on Shark Exchange."""
@@ -929,18 +928,18 @@ class SharkExchangeExecutor:
         clean_tp2 = round_price(clean_sym, tp2)
         clean_tp3 = round_price(clean_sym, tp3) if tp3 else clean_tp2
 
-        # Elite 70/30 Profit Booking Model: 70% at TP1, 30% runner at TP3
+        # Elite 70/30 2-TP Profit Booking Model: 70% at TP1, 30% runner at TP2
+        target_tp2 = clean_tp2 or clean_tp3
         if adx is not None and adx < 20.0:
             tp1_qty = actual_qty
             tp2_qty = 0.0
-            tp3_qty = 0.0
         else:
             tp1_qty = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
-            tp3_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=clean_tp3)
-            tp2_qty = 0.0
-            if tp3_qty <= 0:
+            tp2_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=target_tp2)
+            if tp2_qty <= 0:
                 tp1_qty = actual_qty
-                tp3_qty = 0.0
+                tp2_qty = 0.0
+        tp3_qty = 0.0
 
         # 1. Place Stop-Loss Order (Shark POSITION bracket SL)
         sl_payload = {
@@ -1020,33 +1019,7 @@ class SharkExchangeExecutor:
                 else:
                     logger.info(f"TP2 placed for {clean_sym} at {clean_tp2} qty={tp2_qty}")
 
-        # 4. Place TP3 Order (30%)
-        if tp3_qty > 0:
-            tp3_valid = (exit_side == "SELL" and clean_tp3 > clean_sl and clean_tp3 > clean_tp2) or \
-                        (exit_side == "BUY" and clean_tp3 < clean_sl and clean_tp3 < clean_tp2)
-            if not tp3_valid:
-                logger.warning(f"TP3 price {clean_tp3} appears invalid for {clean_sym} {exit_side} — skipping")
-            else:
-                tp3_payload = {
-                    "placeType": "POSITION",
-                    "positionId": pos_id,
-                    "reduceOnly": True,
-                    "type": "LIMIT",
-                    "side": exit_side,
-                    "symbol": clean_sym,
-                    "quantity": tp3_qty,
-                    "price": clean_tp3
-                }
-                st, res = await self.shark_post(session, "/v1/order/place-order", tp3_payload)
-                if st not in (200, 201):
-                    logger.warning(f"TP3 failed for {clean_sym}: {res}")
-                    if st == 400 and isinstance(res, dict) and res.get("error") == "3010":
-                        rem_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty - tp2_qty, price=clean_tp3)
-                        if rem_qty > 0:
-                            tp3_payload["quantity"] = rem_qty
-                            await self.shark_post(session, "/v1/order/place-order", tp3_payload)
-                else:
-                    logger.info(f"TP3 placed for {clean_sym} at {clean_tp3} qty={tp3_qty}")
+        # TP2 is the final target (30% runner). No TP3 exists.
 
         return True
 
@@ -1851,7 +1824,7 @@ class SharkExchangeExecutor:
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(msg)
 
-        elif tp_stage in ("TP3", "FULL_WIN"):
+        elif tp_stage in ("TP2", "TP3", "FULL_WIN"):
             pnl_tp3_usdt = calc_pnl(tp3_qty, target_tp3, real_entry, direction)
             pnl_tp1_usdt = calc_pnl(tp1_qty, tp1, real_entry, direction)
             total_pnl_usdt = pnl_tp1_usdt + pnl_tp3_usdt

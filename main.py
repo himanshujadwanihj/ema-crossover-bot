@@ -117,8 +117,8 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             initial_sl = data.get("initial_sl") or sl
             tp = data.get("tp")
             tp1 = data.get("tp1") or tp
-            tp2 = data.get("tp2")
-            tp3 = data.get("tp3") or tp
+            tp2 = data.get("tp2") or data.get("tp3") or tp
+            tp3 = tp2  # Backward compat alias
             if not entry or not sl or not tp1:
                 update_trade_outcome(key, "INVALID")
                 continue
@@ -167,17 +167,16 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             if risk == 0: risk = entry * 0.01
 
             raw_tp1 = float(data.get("tp1")) if data.get("tp1") is not None else None
-            raw_tp2 = float(data.get("tp2")) if data.get("tp2") is not None else None
-            raw_tp3 = float(data.get("tp3")) if data.get("tp3") is not None else None
+            raw_tp2 = float(data.get("tp2") or data.get("tp3")) if (data.get("tp2") is not None or data.get("tp3") is not None) else None
 
             if direction == "BUY":
                 tp1 = raw_tp1 if (raw_tp1 and raw_tp1 > entry) else (entry + 1.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 > tp1) else max(tp1 * 1.003, entry + 1.6 * risk)
-                tp3 = raw_tp3 if (raw_tp3 and raw_tp3 > tp2) else max(tp2 * 1.003, entry + 2.5 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 > tp1) else max(tp1 * 1.003, entry + 2.5 * risk)
+                tp3 = tp2
             else:
                 tp1 = raw_tp1 if (raw_tp1 and raw_tp1 < entry) else (entry - 1.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 < tp1) else min(tp1 * 0.997, entry - 1.6 * risk)
-                tp3 = raw_tp3 if (raw_tp3 and raw_tp3 < tp2) else min(tp2 * 0.997, entry - 2.5 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 < tp1) else min(tp1 * 0.997, entry - 2.5 * risk)
+                tp3 = tp2
 
             tp1_hit = data.get("tp1_hit", False)
             tp2_hit = data.get("tp2_hit", False)
@@ -203,9 +202,9 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         update_trade_progress(key, limit_filled=True, limit_filled_at=now_utc.isoformat())
                         # CRITICAL FIX: Place TPs immediately on restart-detected fill
                         # (candle loop will skip fill-check since limit_filled=True — TPs must be placed HERE)
-                        if tp1 and tp2 and tp3:
+                        if tp1 and tp2:
                             from executor import executor as _exec_tp
-                            await _exec_tp.place_tp_limits(session, symbol, direction, entry, tp1, tp2, tp3, initial_sl=initial_sl)
+                            await _exec_tp.place_tp_limits(session, symbol, direction, entry, tp1, tp2, initial_sl=initial_sl)
 
                 if not has_pos and now_utc > limit_cutoff:
                     outcome = "CANCELLED_UNFILLED"
@@ -236,7 +235,7 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         update_trade_progress(key, limit_filled=True, limit_filled_at=limit_filled_at_str)
                         if shark_order_placed:
                             from executor import executor
-                            await executor.place_tp_limits(session, symbol, direction, entry, tp1, tp2, tp3, initial_sl=initial_sl)
+                            await executor.place_tp_limits(session, symbol, direction, entry, tp1, tp2, initial_sl=initial_sl)
                     elif candle_dt > limit_cutoff:
                         outcome = "CANCELLED_UNFILLED"
                         if shark_order_placed:
@@ -315,18 +314,14 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
                         cur_sl = profit_lock_sl
 
-                    # 3. Check TP2 Hit (30% profit booked -> move SL to TP1)
+                    # 3. Check TP2 Hit (30% Remaining Runner -> FULL WIN)
                     if tp1_hit and not tp2_hit and row['high'] >= tp2:
                         tp2_hit = True
                         tp2_hit_at_dt = candle_dt
                         tp2_hit_at_str = tp2_hit_at_dt.isoformat()
                         update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
-                        cur_sl = tp1
-
-                    # 4. Check TP3 Hit (Final Moonbag)
-                    if tp2_hit and row['high'] >= tp3:
                         outcome = "WIN"
-                        final_price = tp3
+                        final_price = tp2
                         break
 
                 elif direction == "SELL":
@@ -344,18 +339,14 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
                         cur_sl = profit_lock_sl
 
-                    # 3. Check TP2 Hit
+                    # 3. Check TP2 Hit (30% Remaining Runner -> FULL WIN)
                     if tp1_hit and not tp2_hit and row['low'] <= tp2:
                         tp2_hit = True
                         tp2_hit_at_dt = candle_dt
                         tp2_hit_at_str = tp2_hit_at_dt.isoformat()
                         update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
-                        cur_sl = tp1
-
-                    # 4. Check TP3 Hit
-                    if tp2_hit and row['low'] <= tp3:
                         outcome = "WIN"
-                        final_price = tp3
+                        final_price = tp2
                         break
 
             if not limit_filled and now_utc > limit_cutoff:
@@ -499,7 +490,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         cross_type = "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
 
                                     from indicators import find_liquidity_pool_targets, _compute_indicators
-                                    dyn_sl, (tp1, tp2, tp3), (rr1, rr2, rr3), (lbl1, lbl2, lbl3) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
+                                    dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
                                     
                                     df_1h_ind = _compute_indicators(df_1h)
                                     sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
@@ -516,16 +507,16 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         cross_type=cross_type,
                                         candle_time=candle_ts,
                                         macro_struct=macro_struct,
-                                        tp1=tp1, tp2=tp2, tp3=tp3,
-                                        rr1=rr1, rr2=rr2, rr3=rr3,
-                                        lbl1=lbl1, lbl2=lbl2, lbl3=lbl3,
+                                        tp1=tp1, tp2=tp2,
+                                        rr1=rr1, rr2=rr2,
+                                        lbl1=lbl1, lbl2=lbl2,
                                         tf_data=tf_data,
                                         is_special_list=(symbol in SPECIAL_LIST),
                                         rsi=sq_rsi,
                                         is_dedicated_squeeze=True
                                     )
                                     if sq_queued:
-                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
+                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2)
                                         mark_radar_triggered(symbol)
                                         logger.info(f"💥 DEDICATED 1H SQUEEZE BREAKOUT TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
             except Exception as e_sq_eng:
@@ -663,13 +654,10 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 
                 tp1 = cross.get("tp1")
                 tp2 = cross.get("tp2")
-                tp3 = cross.get("tp3")
                 rr1 = cross.get("rr1")
                 rr2 = cross.get("rr2")
-                rr3 = cross.get("rr3")
                 lbl1 = cross.get("lbl1")
                 lbl2 = cross.get("lbl2")
-                lbl3 = cross.get("lbl3")
                 rsi = cross.get("rsi")
                 
                 last_1h_cross_time = None
@@ -684,7 +672,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     logger.info(f"FILTERED CROSSOVER: {symbol} {signal} rejected by BTC Micro-Gate ({btc_reason}).")
                     continue
 
-                logger.info(f"NEW SIGNAL: {signal} {symbol} {label} ({cross_type}) | entry={entry} sl={sl} tp1={tp1} tp2={tp2} tp3={tp3}")
+                logger.info(f"NEW SIGNAL: {signal} {symbol} {label} ({cross_type}) | entry={entry} sl={sl} tp1={tp1} tp2={tp2}")
                 from pullback_tracker import SPECIAL_LIST
                 is_special = symbol in SPECIAL_LIST
                 # Pass candle_time_utc (candle open time in UTC) to queue_alert so calculate_candle_close_time calculates the exact close time accurately
@@ -692,7 +680,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 
                 # Queue alert for Telegram (Bug #3 fix: only mark sent & append candidate if queue_alert accepted it)
                 from telegram_bot import queue_alert
-                is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, tp3=tp3, rr1=rr1, rr2=rr2, rr3=rr3, lbl1=lbl1, lbl2=lbl2, lbl3=lbl3, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
+                is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, rr1=rr1, rr2=rr2, lbl1=lbl1, lbl2=lbl2, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
                 if not is_queued:
                     continue
                 
@@ -704,7 +692,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 aligned_count = sum(1 for t in ["1H", "4H", "1D", "1W"] if tf_states.get(t, "neutral").lower() == target_trend)
                 is_30m_early = "30M Early Cross" in cross_type
 
-                mark_sent(symbol, unique_key, signal, candle_ts, entry=entry, sl=sl, tp=tp, tp1=tp1, tp2=tp2, tp3=tp3)
+                mark_sent(symbol, unique_key, signal, candle_ts, entry=entry, sl=sl, tp=tp, tp1=tp1, tp2=tp2)
                 from state import set_coin_cooldown
                 set_coin_cooldown(symbol, tf=label)
 
@@ -715,7 +703,6 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "sl": sl,
                     "tp1": tp1,
                     "tp2": tp2,
-                    "tp3": tp3,
                     "tp": tp,
                     "aligned_count": aligned_count,
                     "is_3_htf_aligned": is_3_htf_aligned,
@@ -723,7 +710,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "is_special": is_special,
                     "unique_key": unique_key,
                     "candle_ts": candle_ts,
-                    "rr3": rr3 or 1.5,
+                    "rr2": rr2 or 1.5,
                     "adx": cross.get("adx"),
                     "rsi": rsi,
                 }
@@ -1230,7 +1217,7 @@ async def main_loop():
                                     
                                     shark_res = await executor.execute_signal_trade(
                                         session, sym, sig, cand["entry"], cand["sl"], 
-                                        cand["tp1"], cand["tp2"], cand["tp3"],
+                                        cand["tp1"], cand["tp2"],
                                         aligned_count=stars,
                                         adx=cand.get("adx")
                                     )

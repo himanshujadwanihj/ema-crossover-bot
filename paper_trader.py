@@ -141,9 +141,8 @@ async def register_paper_trade(alert_data: dict):
     entry = float(alert_data.get("entry", 0.0))
     sl = float(alert_data.get("sl", 0.0))
     tp1 = float(alert_data.get("tp1") or alert_data.get("tp") or 0.0)
-    # 2-Tier Target System: TP2 is the final extended runner target (mapped from tp3 or tp2)
-    tp2 = float(alert_data.get("tp3") or alert_data.get("tp2") or 0.0)
-    tp3 = tp2
+    tp2 = float(alert_data.get("tp2") or alert_data.get("tp3") or 0.0)
+    tp3 = tp2  # Backward compat alias
     adx = float(alert_data.get("adx")) if alert_data.get("adx") is not None else None
 
     if not symbol or entry <= 0 or sl <= 0:
@@ -733,22 +732,24 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                     )
                     asyncio.create_task(notify_telegram(msg))
 
-        # TP3 (Remaining 30% Runner Booked - Full Win)
-        if pos["tp1_hit"] and not pos.get("tp3_hit") and p_high >= target_tp3:
+        # TP2 (Remaining 30% Runner Booked - Full Win)
+        if pos["tp1_hit"] and not (pos.get("tp2_hit") or pos.get("tp3_hit")) and p_high >= target_tp3:
+            pos["tp2_hit"] = True
             pos["tp3_hit"] = True
-            tp3_gross = (pos_notional * 0.30) * ((target_tp3 - entry) / entry)
+            tp2_gross = (pos_notional * 0.30) * ((target_tp3 - entry) / entry)
             taker_fee = (pos_notional * 0.30) * TAKER_FEE_RATE
-            tp3_net = tp3_gross - taker_fee
-            pos["tp3_realized_pnl"] = tp3_net
-            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp3_net
-            wallet["balance"] += tp3_net
-            wallet["realized_pnl"] += tp3_net
+            tp2_net = tp2_gross - taker_fee
+            pos["tp2_realized_pnl"] = tp2_net
+            pos["tp3_realized_pnl"] = tp2_net
+            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp2_net
+            wallet["balance"] += tp2_net
+            wallet["realized_pnl"] += tp2_net
             wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
             pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
             pos["remaining_qty"] = 0.0
             wallet["wins"] += 1
             wallet["total_trades"] += 1
-            pos["status"] = "FULL_WIN_TP3"
+            pos["status"] = "FULL_WIN_TP2"
             pos["closed_at"] = now_utc.isoformat()
             closed.append(pos)
 
@@ -989,22 +990,24 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                     )
                     asyncio.create_task(notify_telegram(msg))
 
-        # TP3 (Remaining 30% Runner Booked - Full Win)
-        if pos["tp1_hit"] and not pos.get("tp3_hit") and p_low <= target_tp3:
+        # TP2 (Remaining 30% Runner Booked - Full Win)
+        if pos["tp1_hit"] and not (pos.get("tp2_hit") or pos.get("tp3_hit")) and p_low <= target_tp3:
+            pos["tp2_hit"] = True
             pos["tp3_hit"] = True
-            tp3_gross = (pos_notional * 0.30) * ((entry - target_tp3) / entry)
+            tp2_gross = (pos_notional * 0.30) * ((entry - target_tp3) / entry)
             taker_fee = (pos_notional * 0.30) * TAKER_FEE_RATE
-            tp3_net = tp3_gross - taker_fee
-            pos["tp3_realized_pnl"] = tp3_net
-            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp3_net
-            wallet["balance"] += tp3_net
-            wallet["realized_pnl"] += tp3_net
+            tp2_net = tp2_gross - taker_fee
+            pos["tp2_realized_pnl"] = tp2_net
+            pos["tp3_realized_pnl"] = tp2_net
+            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp2_net
+            wallet["balance"] += tp2_net
+            wallet["realized_pnl"] += tp2_net
             wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
             pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
             pos["remaining_qty"] = 0.0
             wallet["wins"] += 1
             wallet["total_trades"] += 1
-            pos["status"] = "FULL_WIN_TP3"
+            pos["status"] = "FULL_WIN_TP2"
             pos["closed_at"] = now_utc.isoformat()
             closed.append(pos)
 
@@ -1607,8 +1610,8 @@ async def generate_trades_ledger_card() -> str:
             pnl_str = f"+₹{pnl:,.2f}" if pnl > 0 else f"-₹{abs(pnl):,.2f}"
 
             status_label = {
-                "FULL_WIN_TP3": "TP3 Full Win 🚀🚀",
-                "FULL_WIN_TP2": "TP2 Full Win 🚀",
+                "FULL_WIN_TP2": "TP2 Full Win 🚀🚀",
+                "FULL_WIN_TP3": "TP2 Full Win 🚀🚀",
                 "CLOSED_TP1_TRAIL_WIN": "TP2 + TP1 Trail ✅",
                 "CLOSED_CTC_BREAKEVEN": "TP1 + CTC Breakeven 🛡️",
                 "SL_HIT": "Stop-Loss Hit 🔴",
