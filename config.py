@@ -118,11 +118,11 @@ def to_shark_symbol(symbol: str) -> str:
     clean = clean_contract_symbol(symbol)
     
     # 1. Commodities mapping to USDT pairs on Shark
-    if clean in ("XAUUSD", "XAUTUSDT", "XAU"):
+    if clean in ("XAUUSD", "XAUTUSDT", "XAU", "GOLDUSDT", "GOLD"):
         return "XAUUSDT"
-    if clean in ("XAGUSD", "XAGUSDT", "XAG"):
+    if clean in ("XAGUSD", "XAGUSDT", "XAG", "SILVERUSDT", "SILVER"):
         return "XAGUSDT"
-    if clean in ("CLUSD", "CL"):
+    if clean in ("CLUSD", "CL", "CRUDEOILUSDT", "CRUDEOIL"):
         return "CLUSDT"
     if clean in ("NATGASUSD", "NATGAS"):
         return "NATGASUSDT"

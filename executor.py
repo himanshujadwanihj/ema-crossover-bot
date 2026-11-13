@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 executor.py — Automated Trade Execution & Order Bracket Engine for Shark Exchange (India).
 
@@ -111,8 +112,13 @@ def round_price(symbol: str, price: float):
     - Mid-value (>= 10): max 2 decimals
     - Low-cost altcoins: max 4 decimals
     """
+    if price is None:
+        return 0.0
     clean = clean_contract_symbol(symbol)
-    p = float(price)
+    try:
+        p = float(price)
+    except (ValueError, TypeError):
+        return 0.0
     if 'BTC' in clean:
         rounded = round(p, 1)
     elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
@@ -224,8 +230,13 @@ def enforce_sl_above_liquidation(
 
 def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
     """Helper to round quantity according to symbol lot sizes on Shark Exchange."""
+    if qty is None:
+        return 0.0
     clean_sym = clean_contract_symbol(symbol)
-    f_qty = float(qty)
+    try:
+        f_qty = float(qty)
+    except (ValueError, TypeError):
+        return 0.0
 
     # Zero / negative qty: always return 0.0 so upstream guards (if qty > 0) work correctly
     if f_qty <= 0:
@@ -526,7 +537,7 @@ class SharkExchangeExecutor:
         if not self.is_configured():
             return False
 
-        clean_sym = clean_contract_symbol(symbol)
+        clean_sym = to_shark_symbol(symbol)
 
         # 1. Fetch Exchange State
         positions = await self.get_open_positions(session)
@@ -535,7 +546,7 @@ class SharkExchangeExecutor:
         # Symbols with an active open position on exchange
         position_symbols = set()
         for p in positions:
-            s_clean = clean_contract_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "")
+            s_clean = to_shark_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "")
             if s_clean:
                 position_symbols.add(s_clean)
 
@@ -554,7 +565,7 @@ class SharkExchangeExecutor:
             if link_type in ("ORDER_SL", "ORDER_TP") or sub_type in ("STOP_LOSS", "TAKE_PROFIT"):
                 continue
             if order_type == "LIMIT" and place_type in ("ORDER_FORM", ""):
-                sym_raw = clean_contract_symbol(o.get("symbol") or o.get("contractPair") or "")
+                sym_raw = to_shark_symbol(o.get("symbol") or o.get("contractPair") or "")
                 if sym_raw:
                     pending_entry_symbols.add(sym_raw)
 
@@ -615,7 +626,7 @@ class SharkExchangeExecutor:
         sl: float,
         tp1: float,
         tp2: float,
-        tp3: float,
+        tp3: float = None,
         aligned_count: int = 4,
         adx: float = None
     ) -> dict:
@@ -634,7 +645,7 @@ class SharkExchangeExecutor:
         sl: float,
         tp1: float,
         tp2: float,
-        tp3: float,
+        tp3: float = None,
         aligned_count: int = 4,
         adx: float = None
     ) -> dict:
@@ -697,7 +708,7 @@ class SharkExchangeExecutor:
         clean_sl = round_price(clean_sym, sl)
         clean_tp1 = round_price(clean_sym, tp1)
         clean_tp2 = round_price(clean_sym, tp2)
-        clean_tp3 = round_price(clean_sym, tp3)
+        clean_tp3 = round_price(clean_sym, tp3) if tp3 is not None else clean_tp2
 
         side = "BUY" if signal.upper() in ("BUY", "LONG") else "SELL"
 
@@ -799,7 +810,7 @@ class SharkExchangeExecutor:
         entry: float,
         tp1: float,
         tp2: float,
-        tp3: float,
+        tp3: float = None,
         initial_sl: float = None,
         adx: float = None
     ) -> bool:
@@ -926,7 +937,7 @@ class SharkExchangeExecutor:
         clean_sl = round_price(clean_sym, sl)
         clean_tp1 = round_price(clean_sym, tp1)
         clean_tp2 = round_price(clean_sym, tp2)
-        clean_tp3 = round_price(clean_sym, tp3) if tp3 else clean_tp2
+        clean_tp3 = round_price(clean_sym, tp3) if tp3 is not None else clean_tp2
 
         # Elite 70/30 2-TP Profit Booking Model: 70% at TP1, 30% runner at TP2
         target_tp2 = clean_tp2 or clean_tp3
@@ -1320,7 +1331,21 @@ class SharkExchangeExecutor:
 
                 if order_time is not None:
                     elapsed_mins = (now_utc - order_time).total_seconds() / 60.0
-                    if elapsed_mins >= max_minutes:
+                    sym = clean_contract_symbol(o.get("symbol") or "")
+                    tf_limit_mins = max_minutes
+                    try:
+                        from state import get_latest_symbol_state
+                        st = get_latest_symbol_state(sym)
+                        if st:
+                            tf = str(st.get("timeframe") or st.get("tf") or "15m").lower()
+                            tf_map = {
+                                "5m": 15.0, "15m": 30.0, "30m": 90.0,
+                                "1h": 150.0, "4h": 480.0, "1d": 1440.0, "1w": 2880.0
+                            }
+                            tf_limit_mins = tf_map.get(tf, max_minutes)
+                    except Exception:
+                        pass
+                    if elapsed_mins >= tf_limit_mins:
                         sym = clean_contract_symbol(o.get("symbol") or "")
                         cid = o.get("clientOrderId")
                         oid = o.get("orderId") or o.get("id")
@@ -1536,7 +1561,7 @@ class SharkExchangeExecutor:
                         if pos_qty_abs == 0:
                             logger.info(f"  → FULL WIN: position closed on exchange, full trade complete")
                             await self.update_trailing_sl_on_tp_hit(
-                                session, sym, "TP3", entry_price, tp1, tp2, tp3)
+                                session, sym, "TP2", entry_price, tp1, tp2, tp2)
                         else:
                             logger.warning(f"⚠️ {sym}: 0 TPs while position is STILL OPEN (qty={pos_qty_abs}) — auto-healing TP limit order now!")
                             st_heal = get_latest_symbol_state(sym)

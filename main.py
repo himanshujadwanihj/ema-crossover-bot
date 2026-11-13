@@ -1136,12 +1136,14 @@ async def main_loop():
                             def _is_auto_trade_eligible(c):
                                 sym = c.get("symbol", "")
                                 sym_upper = sym.upper()
-                                # MINOR #2 FIX: Check AUTO_TRADE_EXCLUDED_SYMBOLS from config
+                                # MINOR #2 FIX: Check AUTO_TRADE_EXCLUDED_SYMBOLS from config (exact base asset match)
                                 from config import AUTO_TRADE_EXCLUDED_SYMBOLS
+                                sym_clean = sym_upper.replace("/", "").replace("_", "")
+                                sym_base = sym_clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
                                 for excl in AUTO_TRADE_EXCLUDED_SYMBOLS:
                                     excl_clean = excl.upper().replace("/", "").replace("_", "")
-                                    sym_clean = sym_upper.replace("/", "").replace("_", "")
-                                    if excl_clean in sym_clean or sym_clean == excl_clean:
+                                    excl_base = excl_clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
+                                    if sym_clean == excl_clean or sym_base == excl_base:
                                         return False
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
                                 is_us_stock = any(x in sym_upper for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym_upper.endswith("B/USDT") or sym_upper.endswith("BUSDT")
