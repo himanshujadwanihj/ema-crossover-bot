@@ -1331,21 +1331,8 @@ class SharkExchangeExecutor:
 
                 if order_time is not None:
                     elapsed_mins = (now_utc - order_time).total_seconds() / 60.0
-                    sym = clean_contract_symbol(o.get("symbol") or "")
-                    tf_limit_mins = max_minutes
-                    try:
-                        from state import get_latest_symbol_state
-                        st = get_latest_symbol_state(sym)
-                        if st:
-                            tf = str(st.get("timeframe") or st.get("tf") or "15m").lower()
-                            tf_map = {
-                                "5m": 15.0, "15m": 30.0, "30m": 90.0,
-                                "1h": 150.0, "4h": 480.0, "1d": 1440.0, "1w": 2880.0
-                            }
-                            tf_limit_mins = tf_map.get(tf, max_minutes)
-                    except Exception:
-                        pass
-                    if elapsed_mins >= tf_limit_mins:
+                    # USER DIRECTIVE: Strict 30-Minute Expiry on Shark Exchange
+                    if elapsed_mins >= 30.0:
                         sym = clean_contract_symbol(o.get("symbol") or "")
                         cid = o.get("clientOrderId")
                         oid = o.get("orderId") or o.get("id")

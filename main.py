@@ -135,25 +135,9 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             limit_placed_at_str = data.get("limit_placed_at") or sent_at_str
             limit_placed_at = _parse_iso_dt(limit_placed_at_str) or sent_at
 
-            # BUG #6 FIX: Timeframe-based limit expiry (30m for 5M/15M is fine, but 4H/1D need more time)
-            _uk = parts[1] if len(parts) > 1 else ""
-            if _uk.startswith("5M") or _uk.startswith("5m"):
-                _limit_mins = 15
-            elif _uk.startswith("15M") or _uk.startswith("15m"):
-                _limit_mins = 30
-            elif _uk.startswith("30M") or _uk.startswith("30m"):
-                _limit_mins = 90
-            elif _uk.startswith("1H") or _uk.startswith("1h"):
-                _limit_mins = 150   # 2.5 hours for 1H crossover pullback
-            elif _uk.startswith("4H") or _uk.startswith("4h"):
-                _limit_mins = 480   # 8 hours for 4H crossover pullback
-            elif _uk.startswith("1D") or _uk.startswith("1d"):
-                _limit_mins = 1440  # 24 hours for Daily crossover pullback
-            elif _uk.startswith("1W") or _uk.startswith("1w"):
-                _limit_mins = 2880  # 48 hours for Weekly crossover pullback
-            else:
-                _limit_mins = 90    # Default 90 minutes
-            limit_cutoff = limit_placed_at + timedelta(minutes=_limit_mins)
+            # USER DIRECTIVE: Strict 30-Minute Limit Order Expiry Everywhere!
+            # If entry limit order is not filled within 30 minutes, it is cancelled.
+            limit_cutoff = limit_placed_at + timedelta(minutes=30)
 
             limit_filled = data.get("limit_filled", False)
             limit_filled_at_str = data.get("limit_filled_at")

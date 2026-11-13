@@ -403,25 +403,8 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
                     try:
                         dt_c = datetime.fromisoformat(c_ts.replace("Z", "+00:00"))
                         if dt_c.tzinfo is None: dt_c = dt_c.replace(tzinfo=timezone.utc)
-                        # Determine expiry time based on trade's timeframe label
-                        tf_lbl = str(ro.get("tf_label", "1H")).upper()
-                        if tf_lbl in ("5M",):
-                            expiry_seconds = 15 * 60
-                        elif tf_lbl in ("15M",):
-                            expiry_seconds = 30 * 60
-                        elif tf_lbl in ("30M",):
-                            expiry_seconds = 90 * 60
-                        elif tf_lbl in ("1H",):
-                            expiry_seconds = 150 * 60   # 2.5 hours
-                        elif tf_lbl in ("4H",):
-                            expiry_seconds = 480 * 60   # 8 hours
-                        elif tf_lbl in ("1D",):
-                            expiry_seconds = 1440 * 60  # 24 hours
-                        elif tf_lbl in ("1W",):
-                            expiry_seconds = 2880 * 60  # 48 hours
-                        else:
-                            expiry_seconds = 1800       # Default 30m
-                        if (now_utc - dt_c).total_seconds() >= expiry_seconds:
+                        # USER DIRECTIVE: Strict 30-Minute Limit Expiry Everywhere
+                        if (now_utc - dt_c).total_seconds() >= (30 * 60):
                             is_expired = True
                     except Exception:
                         pass
@@ -1464,12 +1447,18 @@ async def generate_strategy_lookout_card(session=None) -> str:
             if need_session_close:
                 await session.close()
 
+    # Categorize cancelled trades for crystal-clear scorecard visibility
+    cancelled_30m_orders = [t for t in closed if "30MIN" in str(t.get("status", "")) or "20MIN" in str(t.get("status", "")) or t.get("status") == "CANCELLED_UNFILLED"]
+    cancelled_reversals = [t for t in closed if "REVERSAL" in str(t.get("status", ""))]
+    total_cancelled_30m = len(cancelled_30m_orders)
+
     msg = (
         f"💼 <b>PAPER TRADING — REAL-TIME STRATEGY LOOKOUT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Wallet Balance:</b> ₹{balance:,.2f} INR ({total_roi:+.2f}% ROI)\n"
         f"📊 <b>Scoreboard:</b> {wins}W - {losses}L ({win_rate:.1f}% WR | {total_trades} Executed Trades)\n"
-        f"⏳ <b>Live Open:</b> {len(active)} Active + {len(resting)} Resting | 📋 <b>Cancelled/Expired:</b> {len([t for t in closed if 'CANCEL' in str(t.get('status',''))])}\n"
+        f"⚡ <b>Active In-Trade:</b> {len(active)} Filled | ⏳ <b>Resting Limits:</b> {len(resting)} Waiting\n"
+        f"🚫 <b>Cancelled (30m Unfilled):</b> {total_cancelled_30m} (Limits never reached in 30 mins)\n"
     )
 
     if active:
@@ -1581,12 +1570,14 @@ async def generate_trades_ledger_card() -> str:
     gross_losses = sum(abs(t.get("cumulative_pnl", 0.0)) for t in exec_trades if t.get("cumulative_pnl", 0.0) < 0)
     profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
 
+    cancelled_30m_count = len([t for t in closed if "30MIN" in str(t.get("status", "")) or "20MIN" in str(t.get("status", "")) or t.get("status") == "CANCELLED_UNFILLED"])
     msg = (
         f"📖 <b>EXCHANGE TRADE LEDGER & HISTORY</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Wallet Balance:</b> ₹{balance:,.2f} INR ({total_roi:+.2f}% ROI)\n"
         f"📊 <b>Scoreboard:</b> {wins}W - {losses}L | Win Rate: {win_rate:.1f}%\n"
         f"⚖️ <b>Profit Factor:</b> {profit_factor:.2f} (Gross: +₹{gross_wins:,.2f} / -₹{gross_losses:,.2f})\n"
+        f"🚫 <b>Cancelled (30m Limit Unfilled):</b> {cancelled_30m_count}\n"
         f"💳 <b>Exchange Fees Paid:</b> ₹{fees_paid:,.2f} INR\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
@@ -1618,7 +1609,9 @@ async def generate_trades_ledger_card() -> str:
                 "LIQUIDATED": "Liquidated 💀",
                 "CLOSED_20HR_TIMEOUT_MARKET": "20H Timeout Market ⏱️",
                 "CLOSED_20HR_TIMEOUT_CTC": "20H Timeout Market ⏱️",
-                "CANCELLED_20MIN_EXPIRED": "20m Expired (Cancelled) ⏳",
+                "CANCELLED_30MIN_EXPIRED": "30m Expired (Cancelled Unfilled) ⏳",
+                "CANCELLED_20MIN_EXPIRED": "30m Expired (Cancelled Unfilled) ⏳",
+                "CANCELLED_UNFILLED": "30m Expired (Cancelled Unfilled) ⏳",
                 "CLOSED_SIGNAL_REVERSAL": "Reversal Close 🔄"
             }.get(status, status)
 

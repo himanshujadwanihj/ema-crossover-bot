@@ -863,7 +863,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Executed paper trades closed today (from paper wallet) ──
     wallet = load_wallet()
     closed = wallet.get("closed_trades", [])
-    CANCELLED_STATUSES = {"CANCELLED_30MIN_EXPIRED", "CANCELLED_20MIN_EXPIRED", "CANCELLED_SIGNAL_REVERSAL"}
+    CANCELLED_STATUSES = {"CANCELLED_30MIN_EXPIRED", "CANCELLED_20MIN_EXPIRED", "CANCELLED_SIGNAL_REVERSAL", "CANCELLED_UNFILLED"}
     today_exec = [
         t for t in closed
         if str(t.get("closed_at", "")).startswith(today_str)
