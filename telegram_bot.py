@@ -198,20 +198,20 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     # AIRTIGHT ANTI-DUPLICATE SHIELD: Prevent repeated notifications
     if _is_telegram_alert_in_cooldown(symbol, tf_label, signal, cross_type):
         logger.info(f"🚫 BLOCKED duplicate notification for {symbol} ({tf_label} {signal}) — already alerted recently.")
-        return
+        return False
 
     # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
     from config import is_weekend_trading_blocked
     if is_weekend_trading_blocked(symbol):
         logger.info(f"🚫 BLOCKED alert for {symbol} ({tf_label} {signal}) — No commodities, BTC, or ETH on Saturday/Sunday.")
-        return
+        return False
 
     # STRICT SQUEEZE TIMEFRAME RULE (User Directive: '1 hr squeze pr hi raho fir'):
     # Squeeze Breakouts are strictly restricted to 1H timeframe only. All lower timeframe squeezes (15M) are banned.
     is_sq_check = ("Squeeze" in cross_type) or kwargs.get("is_dedicated_squeeze", False) or ("Breakout" in cross_type and "Retest" not in cross_type)
     if is_sq_check and str(tf_label).upper() not in ["1H", "1HR", "60M"]:
         logger.info(f"🚫 BLOCKED Squeeze alert for {symbol} ({tf_label}) — Squeeze breakouts strictly restricted to 1H timeframe.")
-        return
+        return False
 
     is_retest = "Retest" in cross_type
     if is_retest:
@@ -226,11 +226,11 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
 
     if is_5m and not is_gold_scalp:
         logger.info(f"BLOCKED 5M signal for {symbol} — 5M strictly Gold only.")
-        return
+        return False
 
     if is_15m and (symbol not in ALLOWED_15M_COINS) and (not is_squeeze_type):
         logger.info(f"BLOCKED 15M signal for {symbol} — not in ALLOWED_15M_COINS.")
-        return
+        return False
 
     # USER DIRECTIVE & DUAL CHANNEL DISTRIBUTION:
     # 1. Retest alerts: Strictly minimum 3-Star (3/4 ⭐⭐⭐) and 4-Star (4/4 ⭐⭐⭐⭐) for HTF.
@@ -241,16 +241,16 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     if is_retest:
         if not is_gold_scalp and aligned_count < 3:
             logger.info(f"BLOCKED {signal} retest for {symbol} ({tf_label}) — only {aligned_count}/4 stars (minimum 3 required, ignoring 2 stars).")
-            return
+            return False
     else:
         if is_15m or is_5m:
             if (symbol not in ALLOWED_15M_COINS and "XAU" not in symbol.upper()) and (not is_squeeze_type):
                 logger.info(f"BLOCKED {tf_label} crossover for {symbol} — not in ALLOWED_15M_COINS.")
-                return
+                return False
         else:
             if aligned_count < 3:
                 logger.info(f"BLOCKED {signal} crossover for {symbol} ({tf_label}) — {aligned_count}/4 stars (minimum 3 required for HTF).")
-                return
+                return False
 
     # STRICT RSI MOMENTUM GATE:
     # All 3-Star and 4-Star signals (Crossovers & Retests) MUST strictly satisfy healthy RSI momentum range:
@@ -261,10 +261,10 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
             f_rsi = float(rsi)
             if signal == "BUY" and not (40.0 <= f_rsi <= 75.0):
                 logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [40, 75].")
-                return
+                return False
             elif signal == "SELL" and not (25.0 <= f_rsi <= 60.0):
                 logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [25, 60].")
-                return
+                return False
         except (ValueError, TypeError):
             pass
     
@@ -323,6 +323,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         BATCH_BREAKOUTS.append(alert_data)
     else:
         BATCH_CROSSOVERS.append(alert_data)
+    return True
 
 def calculate_candle_close_time(candle_time_str: str, tf_label: str) -> str:
     """Calculates the exact close time of the candle in IST."""

@@ -4,6 +4,10 @@ import aiohttp
 import logging
 import os
 import time
+import warnings
+# BUG #12 FIX: Suppress pandas/yfinance FutureWarning spam that clutters Railway logs
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning if hasattr(pd.errors, 'PerformanceWarning') else FutureWarning)
 BOT_START_TIME = time.time()
 import json
 import zoneinfo
@@ -95,13 +99,8 @@ async def run_startup_reconciliation(session: aiohttp.ClientSession, semaphore: 
 
 
 async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
-    # Always evaluate virtual paper trading positions (₹1,00,000 INR starting capital)
-    try:
-        from paper_trader import evaluate_paper_trades_async
-        await evaluate_paper_trades_async(session, semaphore)
-    except Exception as e:
-        logger.error(f"Error in evaluate_paper_trades_async: {e}")
-
+    # NOTE: evaluate_paper_trades_async is called by tp_monitor_worker every 5s.
+    # Do NOT call it here again to avoid double-evaluation race conditions (Bug #4 fix).
     pending = get_pending_trades()
     if not pending:
         return
@@ -135,7 +134,26 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             
             limit_placed_at_str = data.get("limit_placed_at") or sent_at_str
             limit_placed_at = _parse_iso_dt(limit_placed_at_str) or sent_at
-            limit_cutoff = limit_placed_at + timedelta(minutes=30)
+
+            # BUG #6 FIX: Timeframe-based limit expiry (30m for 5M/15M is fine, but 4H/1D need more time)
+            _uk = parts[1] if len(parts) > 1 else ""
+            if _uk.startswith("5M") or _uk.startswith("5m"):
+                _limit_mins = 15
+            elif _uk.startswith("15M") or _uk.startswith("15m"):
+                _limit_mins = 30
+            elif _uk.startswith("30M") or _uk.startswith("30m"):
+                _limit_mins = 90
+            elif _uk.startswith("1H") or _uk.startswith("1h"):
+                _limit_mins = 150   # 2.5 hours for 1H crossover pullback
+            elif _uk.startswith("4H") or _uk.startswith("4h"):
+                _limit_mins = 480   # 8 hours for 4H crossover pullback
+            elif _uk.startswith("1D") or _uk.startswith("1d"):
+                _limit_mins = 1440  # 24 hours for Daily crossover pullback
+            elif _uk.startswith("1W") or _uk.startswith("1w"):
+                _limit_mins = 2880  # 48 hours for Weekly crossover pullback
+            else:
+                _limit_mins = 90    # Default 90 minutes
+            limit_cutoff = limit_placed_at + timedelta(minutes=_limit_mins)
 
             limit_filled = data.get("limit_filled", False)
             limit_filled_at_str = data.get("limit_filled_at")
@@ -253,6 +271,21 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                     if elapsed_since_fill >= timedelta(hours=2):
                         time_shield_hit = True
                         update_trade_progress(key, be_hit_time_shield=True, new_sl=entry)
+                        # STRATEGY #6 FIX: Notify user when Time Shield activates (SL moved to breakeven)
+                        try:
+                            from telegram_bot import send_text_to_chat
+                            from config import TELEGRAM_TRADING_CHANNEL_ID
+                            ist_sym = symbol
+                            shield_msg = (
+                                f"🛡️ <b>2H TIME SHIELD ACTIVATED — SL MOVED TO BREAKEVEN</b>\n\n"
+                                f"<b>Asset:</b> {ist_sym} [{direction}]\n"
+                                f"<b>Entry:</b> {entry}\n"
+                                f"⏱️ Trade active for 2h without hitting TP1. SL auto-moved to <b>Entry (Breakeven)</b>.\n"
+                                f"<i>Position is now risk-free. If SL hits → reported as BREAKEVEN.</i>"
+                            )
+                            asyncio.create_task(send_text_to_chat(TELEGRAM_TRADING_CHANNEL_ID or "771305593", shield_msg))
+                        except Exception as _shield_err:
+                            logger.debug(f"Time shield notify error: {_shield_err}")
 
                 # Rule 3: Multi-Stage Partial Profit & Trailing SL Check (+0.4R Profit-Lock Engine)
                 risk_dist = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
@@ -472,7 +505,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
 
                                     from telegram_bot import queue_alert
-                                    await queue_alert(
+                                    sq_queued = await queue_alert(
                                         symbol=symbol,
                                         tf_label="1H",
                                         signal=sq_signal,
@@ -491,13 +524,18 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         rsi=sq_rsi,
                                         is_dedicated_squeeze=True
                                     )
-                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
-                                    mark_radar_triggered(symbol)
-                                    logger.info(f"💥 DEDICATED 1H SQUEEZE BREAKOUT TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
+                                    if sq_queued:
+                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
+                                        mark_radar_triggered(symbol)
+                                        logger.info(f"💥 DEDICATED 1H SQUEEZE BREAKOUT TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
             except Exception as e_sq_eng:
                 logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
 
         # -- 1. EMA CROSSOVER ENGINE --
+        # BUG #1 FIX: Collect ALL crossover candidates from ALL timeframes (not just the first one).
+        # Previously `return cand` was inside the loop causing all 4H/1D signals to be silently dropped.
+        all_crossover_candidates = []
+
         for label in ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]:
             is_gold = symbol in ["XAU/USD", "XAUT/USDT", "XAUTUSDT"] or "XAU" in symbol.upper()
 
@@ -652,9 +690,11 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 # Pass candle_time_utc (candle open time in UTC) to queue_alert so calculate_candle_close_time calculates the exact close time accurately
                 open_time_iso = candle_time_utc.isoformat()
                 
-                # Queue alert for Telegram
+                # Queue alert for Telegram (Bug #3 fix: only mark sent & append candidate if queue_alert accepted it)
                 from telegram_bot import queue_alert
-                await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, tp3=tp3, rr1=rr1, rr2=rr2, rr3=rr3, lbl1=lbl1, lbl2=lbl2, lbl3=lbl3, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
+                is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, tp3=tp3, rr1=rr1, rr2=rr2, rr3=rr3, lbl1=lbl1, lbl2=lbl2, lbl3=lbl3, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
+                if not is_queued:
+                    continue
                 
                 is_3_htf_aligned = (
                     tf_states.get("1H", "").lower() == target_trend and
@@ -687,9 +727,12 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "adx": cross.get("adx"),
                     "rsi": rsi,
                 }
-                return cand
-                
-        return None
+                # BUG #1 FIX: Append instead of returning immediately.
+                # Collects signals from ALL timeframes (1H + 4H + 1D all captured).
+                all_crossover_candidates.append(cand)
+                # Continue to scan next timeframe (do NOT return early)
+
+        return all_crossover_candidates if all_crossover_candidates else None
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
         return None
@@ -753,12 +796,20 @@ async def scan_single_symbol_async(session, symbol, semaphore):
             retest_cand = await check_symbol_pullbacks(symbol, tf_data, session=session)
 
         # 2. Run Multi-Crossover & Breakout Check (Fresh Crossovers)
-        crossover_cand = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data)
+        # BUG #1 FIX: process_symbol_async now returns a LIST of candidates (all TF crossovers)
+        crossover_cands = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data)
 
-        # Prioritize crossover candidate if both exist, else retest candidate
-        trade_cand = crossover_cand if isinstance(crossover_cand, dict) else (retest_cand if isinstance(retest_cand, dict) else None)
+        # Build unified trades list: crossovers (all TFs) + retest candidate
+        trade_cands = []
+        if isinstance(crossover_cands, list):
+            trade_cands.extend(crossover_cands)
+        elif isinstance(crossover_cands, dict):
+            trade_cands.append(crossover_cands)  # Backward compat
+        if isinstance(retest_cand, dict):
+            trade_cands.append(retest_cand)
+
         return {
-            "trade": trade_cand,
+            "trades": trade_cands,   # List of all candidates for this symbol
             "radar": radar_cand
         }
     except Exception as e:
@@ -886,7 +937,17 @@ async def main_loop():
             asyncio.create_task(start_deletion_sync_watcher())
 
             last_dashboard_update_time = 0
+            # MINOR #4 FIX: Load daily_digest_sent_today from daily_file to survive restarts
             daily_digest_sent_today = False
+            try:
+                if os.path.exists(daily_file):
+                    with open(daily_file, 'r') as _f:
+                        _d = json.load(_f)
+                        _digest_date = _d.get('digest')
+                        if _digest_date == now_ist_boot.strftime("%Y-%m-%d") and now_ist_boot.hour == 22:
+                            daily_digest_sent_today = True
+            except Exception:
+                pass
 
             # 1-Minute Startup Reconciliation & Offline Audit on Resume
             await run_startup_reconciliation(session, semaphore)
@@ -1058,19 +1119,45 @@ async def main_loop():
                                 from paper_trader import send_daily_paper_trading_digest
                                 await send_daily_paper_trading_digest()
                                 daily_digest_sent_today = True
+                                # MINOR #4 FIX: Persist digest sent date so restart doesn't re-send
+                                try:
+                                    with open(daily_file, 'r') as _f:
+                                        _d = json.load(_f)
+                                except Exception:
+                                    _d = {}
+                                _d['digest'] = today_str
+                                with open(daily_file, 'w') as _f:
+                                    json.dump(_d, _f)
                             except Exception as e_dig:
                                 logger.error(f"Error dispatching daily digest: {e_dig}")
                         if now_ist.hour != 22:
                             daily_digest_sent_today = False
 
                         # BULK SIGNAL BATCH PROCESSOR & PRIORITY SEQUENCER:
-                        raw_candidates = [r["trade"] for r in results if isinstance(r, dict) and isinstance(r.get("trade"), dict)]
+                        # BUG #1 FIX: Flatten the list-of-lists (each symbol returns a list of candidates now)
+                        raw_candidates = []
+                        for r in results:
+                            if isinstance(r, dict):
+                                for cand in r.get("trades", []):
+                                    if isinstance(cand, dict):
+                                        raw_candidates.append(cand)
+                                # Backward compat: handle old "trade" key if any
+                                if isinstance(r.get("trade"), dict):
+                                    raw_candidates.append(r["trade"])
                         if raw_candidates:
                             from executor import executor
                             def _is_auto_trade_eligible(c):
                                 sym = c.get("symbol", "")
+                                sym_upper = sym.upper()
+                                # MINOR #2 FIX: Check AUTO_TRADE_EXCLUDED_SYMBOLS from config
+                                from config import AUTO_TRADE_EXCLUDED_SYMBOLS
+                                for excl in AUTO_TRADE_EXCLUDED_SYMBOLS:
+                                    excl_clean = excl.upper().replace("/", "").replace("_", "")
+                                    sym_clean = sym_upper.replace("/", "").replace("_", "")
+                                    if excl_clean in sym_clean or sym_clean == excl_clean:
+                                        return False
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
-                                is_us_stock = any(x in sym.upper() for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym.upper().endswith("B/USDT") or sym.upper().endswith("BUSDT")
+                                is_us_stock = any(x in sym_upper for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym_upper.endswith("B/USDT") or sym_upper.endswith("BUSDT")
                                 if is_us_stock:
                                     return False
 

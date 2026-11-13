@@ -412,7 +412,7 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         continue
 
                 is_special = symbol in SPECIAL_LIST
-                await queue_alert(
+                is_ret_queued = await queue_alert(
                     symbol=symbol,
                     tf_label=tf_label,
                     signal=sig_type,
@@ -430,6 +430,8 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     is_special_list=is_special,
                     rsi=cur_rsi
                 )
+                if not is_ret_queued:
+                    continue
                 mark_sent(symbol, unique_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
                 mark_sent(symbol, unified_key, sig_type, dedup_ts, entry=retest_price, sl=sl, tp=tp1, tp1=tp1, tp2=tp2, tp3=tp3)
                 logger.info(f"Sent {ema_name} {action_name} Alert for {symbol} {tf_label} {trend}")

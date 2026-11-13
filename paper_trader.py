@@ -316,6 +316,7 @@ async def register_paper_trade(alert_data: dict):
             "id": trade_id,
             "symbol": symbol,
             "signal": signal,
+            "tf_label": tf_label,   # BUG #6 FIX: Store TF so expiry sweep uses correct timeout
             "entry_limit": entry,
             "sl": sl,
             "initial_sl": sl,
@@ -387,7 +388,7 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
     if not resting and not active:
         return
 
-    # ?? INDEPENDENT 30-MIN EXPIRY SWEEP (Never blocked by API glitches / timeouts) ??
+    # INDEPENDENT EXPIRY SWEEP — BUG #6 FIX: Timeframe-based expiry (not fixed 30m for all TFs)
     now_utc = datetime.now(timezone.utc)
     if resting:
         async with _wallet_lock:
@@ -403,7 +404,25 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
                     try:
                         dt_c = datetime.fromisoformat(c_ts.replace("Z", "+00:00"))
                         if dt_c.tzinfo is None: dt_c = dt_c.replace(tzinfo=timezone.utc)
-                        if (now_utc - dt_c).total_seconds() >= 1800:
+                        # Determine expiry time based on trade's timeframe label
+                        tf_lbl = str(ro.get("tf_label", "1H")).upper()
+                        if tf_lbl in ("5M",):
+                            expiry_seconds = 15 * 60
+                        elif tf_lbl in ("15M",):
+                            expiry_seconds = 30 * 60
+                        elif tf_lbl in ("30M",):
+                            expiry_seconds = 90 * 60
+                        elif tf_lbl in ("1H",):
+                            expiry_seconds = 150 * 60   # 2.5 hours
+                        elif tf_lbl in ("4H",):
+                            expiry_seconds = 480 * 60   # 8 hours
+                        elif tf_lbl in ("1D",):
+                            expiry_seconds = 1440 * 60  # 24 hours
+                        elif tf_lbl in ("1W",):
+                            expiry_seconds = 2880 * 60  # 48 hours
+                        else:
+                            expiry_seconds = 1800       # Default 30m
+                        if (now_utc - dt_c).total_seconds() >= expiry_seconds:
                             is_expired = True
                     except Exception:
                         pass
@@ -412,7 +431,7 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
                     ro["closed_at"] = now_utc.isoformat()
                     c_trades.append(ro)
                     r_updated = True
-                    logger.info(f"? Auto-cancelled 30m expired resting limit order for {ro['symbol']}")
+                    logger.info(f"Auto-cancelled expired resting limit order for {ro['symbol']} (TF: {ro.get('tf_label','?')})")
                 else:
                     r_remaining.append(ro)
             if r_updated:
@@ -1408,7 +1427,7 @@ async def generate_strategy_lookout_card(session=None) -> str:
     resting = wallet.get("resting_orders", [])
     now_utc = datetime.now(timezone.utc)
 
-    # Fetch live ticker prices for active positions
+    # Fetch live ticker prices for active positions — BUG #7 FIX: Parallel fetch with asyncio.gather
     live_prices = {}
     if active:
         need_session_close = False
@@ -1416,15 +1435,26 @@ async def generate_strategy_lookout_card(session=None) -> str:
             session = aiohttp.ClientSession()
             need_session_close = True
         try:
-            for pos in active:
-                sym = pos["symbol"].replace("/", "")
+            async def _fetch_price(pos):
+                sym_key = pos["symbol"]
+                sym = sym_key.replace("/", "")
                 if "XAU" in sym:
                     sym = "XAUTUSDT"
                 url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={sym}"
-                async with session.get(url, timeout=5) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        live_prices[pos["symbol"]] = float(data.get("price", 0.0))
+                try:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return sym_key, float(data.get("price", 0.0))
+                except Exception:
+                    pass
+                return sym_key, None
+
+            fetch_tasks = [_fetch_price(pos) for pos in active]
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for res in fetch_results:
+                if isinstance(res, tuple) and res[1] is not None:
+                    live_prices[res[0]] = res[1]
         except Exception as e:
             logger.error(f"Error fetching live prices for lookout: {e}")
         finally:
@@ -1562,7 +1592,10 @@ async def generate_trades_ledger_card() -> str:
         msg += "\n<i>No completed trades logged yet.</i>\n"
     else:
         msg += f"\n<b>Recent Closed Trades (Last 10):</b>\n"
-        recent_closed = closed[-10:][::-1]
+        # Minor #3 FIX: Filter out CANCELLED_SIGNAL_REVERSAL (auto-cancelled opposite trades) from display
+        # These are noise — not real trades, just housekeeping close events with zero PnL
+        display_closed = [t for t in closed if t.get("status") not in {"CANCELLED_SIGNAL_REVERSAL", "CLOSED_SIGNAL_REVERSAL"}]
+        recent_closed = display_closed[-10:][::-1]
         for i, t in enumerate(recent_closed, 1):
             sym = t.get("symbol", "UNKNOWN")
             sig = t.get("signal", "N/A")
@@ -1574,8 +1607,8 @@ async def generate_trades_ledger_card() -> str:
             pnl_str = f"+₹{pnl:,.2f}" if pnl > 0 else f"-₹{abs(pnl):,.2f}"
 
             status_label = {
-                "FULL_WIN_TP3": "TP2 Full Win 🚀",
-    "FULL_WIN_TP2": "TP2 Full Win 🚀",
+                "FULL_WIN_TP3": "TP3 Full Win 🚀🚀",
+                "FULL_WIN_TP2": "TP2 Full Win 🚀",
                 "CLOSED_TP1_TRAIL_WIN": "TP2 + TP1 Trail ✅",
                 "CLOSED_CTC_BREAKEVEN": "TP1 + CTC Breakeven 🛡️",
                 "SL_HIT": "Stop-Loss Hit 🔴",

@@ -4,6 +4,9 @@ from datetime import datetime, timezone, timedelta
 import asyncio
 import aiohttp
 import logging
+import warnings
+# Suppress pandas/yfinance FutureWarning spam in Railway logs (Bug #12 fix)
+warnings.filterwarnings("ignore", category=FutureWarning)
 from dynamic_config import get_dyn_config
 
 logger = logging.getLogger("indicators")
