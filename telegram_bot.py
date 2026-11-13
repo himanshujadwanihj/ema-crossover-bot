@@ -1199,6 +1199,11 @@ async def on_channel_member_callback(update: Update, context: ContextTypes.DEFAU
             await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
+        if data == "act_view_banned":
+            text, kb = admin_panel.build_banned_users_overview()
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
         if data.startswith("act_user_"):
             target_uid = data.replace("act_user_", "").strip()
             text, kb = admin_panel.build_user_action_menu(target_uid)

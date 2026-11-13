@@ -94,11 +94,17 @@ def remove_user(chat_id: str) -> bool:
 def ban_user(chat_id: str, reason: str = "") -> bool:
     """Permanently bans a user so they cannot receive alerts or re-subscribe."""
     cid = str(chat_id).strip()
+    prefs = _load_prefs()
+    user_info = prefs.get(cid, {})
+    uname = user_info.get("username", "")
+    fname = user_info.get("first_name", "")
     remove_user(cid)
     banned = _load_banned()
     banned[cid] = {
+        "username": uname,
+        "first_name": fname,
         "banned_at": datetime.now(timezone.utc).isoformat(),
-        "reason": reason
+        "reason": reason or "Manual Admin Ban"
     }
     _save_banned(banned)
     return True
@@ -108,8 +114,25 @@ def unban_user(chat_id: str) -> bool:
     cid = str(chat_id).strip()
     banned = _load_banned()
     if cid in banned:
-        del banned[cid]
+        b_info = banned.pop(cid)
         _save_banned(banned)
+        prefs = _load_prefs()
+        if cid not in prefs:
+            prefs[cid] = {
+                "enabled": True,
+                "coin_groups": list(DEFAULT_COIN_GROUPS),
+                "timeframes": list(DEFAULT_TIMEFRAMES),
+                "signal_types": list(DEFAULT_SIGNAL_TYPES),
+                "custom_coins": [],
+                "min_stars": DEFAULT_MIN_STARS,
+                "gold_scalp_5m_15m": False,
+                "squeeze_alerts": True,
+                "squeeze_only": False,
+                "username": b_info.get("username", "") if isinstance(b_info, dict) else "",
+                "first_name": b_info.get("first_name", "") if isinstance(b_info, dict) else "",
+                "joined_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            }
+            _save_prefs(prefs)
         return True
     return False
 
