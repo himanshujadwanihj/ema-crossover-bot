@@ -823,24 +823,20 @@ async def main_loop():
         logger.error(f"Failed to start filter_bot_service: {e_fbot}")
     
 
-    # Start Render Web Health-Check server if PORT environment variable is provided (Render Web Service compatibility)
+    # Start Live Web Dashboard & API server if PORT environment variable is provided
     port_env = os.getenv('PORT')
     if port_env:
         try:
+            from web_dashboard import setup_web_app
             from aiohttp import web
-            async def health_handler(request):
-                return web.Response(text="AlphaCryptoSignals EMA Bot is RUNNING 24/7 \u2705\n")
-            web_app = web.Application()
-            web_app.router.add_get("/", health_handler)
-            web_app.router.add_get("/health", health_handler)
+            web_app = setup_web_app()
             runner = web.AppRunner(web_app)
             await runner.setup()
-            site = web.TCPSite(runner, "0.0.0.0", int(port_env))
+            site = web.TCPSite(runner, '0.0.0.0', int(port_env))
             await site.start()
-            logger.info(f"Render Web Service health-check server started on port {port_env}!")
+            logger.info(f'AlphaSniper Live Web Dashboard & API server started on port {port_env}!')
         except Exception as e_port:
-            logger.warning(f"Could not bind to PORT {port_env}: {e_port}")
-
+            logger.warning(f'Could not bind Web Dashboard to PORT {port_env}: {e_port}')
     semaphore = asyncio.Semaphore(10)
     
     ist_tz = zoneinfo.ZoneInfo("Asia/Kolkata")
