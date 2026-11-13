@@ -1333,21 +1333,33 @@
     </div>
 
 
-    <!-- <div id="tab-calc" class="hidden space-y-6">
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         TAB 6: INTERACTIVE PNL CALCULATOR & COMPOUNDING SIMULATION
+    ══════════════════════════════════════════════════════════════════════════ -->
+    <div id="tab-calc" class="hidden space-y-6">
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div class="glass-card rounded-xl p-6 lg:col-span-1 space-y-6">
-          <h3 class="text-lg font-bold text-white">Simulation Controls</h3>
+          <h3 class="text-lg font-bold text-white flex items-center gap-2">
+            <span>🧮</span> Simulation Controls
+          </h3>
           
           <div>
             <div class="flex justify-between text-xs mb-2">
               <label class="font-semibold text-slate-300">Starting Portfolio Capital</label>
               <span id="display-capital" class="font-bold text-emerald-400 font-mono">₹1,00,000 INR</span>
             </div>
-            <input type="range" id="input-capital" min="25000" max="2500000" step="25000" value="100000" oninput="updateCalculator()" class="w-full accent-sky-500 cursor-pointer">
+            <input type="range" id="input-capital" min="25000" max="2500000" step="5000" value="100000" oninput="updateCalculator()" class="w-full accent-sky-500 cursor-pointer">
             <div class="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
               <span>₹25,000</span>
               <span>₹10,00,000</span>
               <span>₹25,00,000</span>
+            </div>
+            <div class="flex flex-wrap gap-1.5 mt-3">
+              <button type="button" onclick="setCapital(50000)" class="px-2.5 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">₹50K</button>
+              <button type="button" onclick="setCapital(100000)" class="px-2.5 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">₹1 Lakh</button>
+              <button type="button" onclick="setCapital(250000)" class="px-2.5 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">₹2.5 Lakh</button>
+              <button type="button" onclick="setCapital(500000)" class="px-2.5 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">₹5 Lakh</button>
+              <button type="button" onclick="setCapital(1000000)" class="px-2.5 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">₹10 Lakh</button>
             </div>
           </div>
 
@@ -1361,6 +1373,12 @@
               <span>30 Tr (~1 mo)</span>
               <span>150 Tr (~6 mos)</span>
               <span>340 Tr (~1 yr)</span>
+            </div>
+            <div class="flex flex-wrap gap-1.5 mt-3">
+              <button type="button" onclick="setTrades(30)" class="px-2 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">1 Month</button>
+              <button type="button" onclick="setTrades(75)" class="px-2 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">3 Months</button>
+              <button type="button" onclick="setTrades(150)" class="px-2 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">6 Months</button>
+              <button type="button" onclick="setTrades(300)" class="px-2 py-1 text-[11px] font-mono font-semibold rounded bg-slate-800 text-slate-300 hover:text-white hover:bg-sky-600 transition">1 Year</button>
             </div>
           </div>
 
@@ -1473,9 +1491,28 @@
       });
     }
 
+    function setCapital(amount) {
+      const capEl = document.getElementById('input-capital');
+      if (capEl) {
+        capEl.value = amount;
+        updateCalculator();
+      }
+    }
+
+    function setTrades(count) {
+      const trEl = document.getElementById('input-trades');
+      if (trEl) {
+        trEl.value = count;
+        updateCalculator();
+      }
+    }
+
     function updateCalculator() {
-      const capital = parseFloat(document.getElementById('input-capital').value);
-      const trades = parseInt(document.getElementById('input-trades').value);
+      const capEl = document.getElementById('input-capital');
+      const trEl = document.getElementById('input-trades');
+      if (!capEl || !trEl) return;
+      const capital = parseFloat(capEl.value) || 100000;
+      const trades = parseInt(trEl.value) || 150;
 
       document.getElementById('display-capital').innerText = '₹' + capital.toLocaleString('en-IN') + ' INR';
       const months = (trades / 25).toFixed(1);
