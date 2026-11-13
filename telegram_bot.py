@@ -846,41 +846,73 @@ async def cmd_setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from state import get_all_signals
+    from paper_trader import load_wallet, INITIAL_CAPITAL
     import zoneinfo
     tz = zoneinfo.ZoneInfo(TIMEZONE)
     now_ist = datetime.now(timezone.utc).astimezone(tz)
     today_str = now_ist.strftime("%Y-%m-%d")
     
+    # ── Signals sent today (from state) ──
     signals = get_all_signals()
     today_signals = [s for s in signals if today_str in str(s.get("sent_at", ""))]
-    
-    total = len(today_signals)
-    if total == 0:
-        await update.message.reply_text(f"📊 <b>TODAY'S SIGNALS REPORT</b>\n\nNo signals recorded yet for {today_str}.", parse_mode="HTML")
+    total_signals = len(today_signals)
+
+    # ── Executed paper trades closed today (from paper wallet) ──
+    wallet = load_wallet()
+    closed = wallet.get("closed_trades", [])
+    CANCELLED_STATUSES = {"CANCELLED_30MIN_EXPIRED", "CANCELLED_20MIN_EXPIRED", "CANCELLED_SIGNAL_REVERSAL"}
+    today_exec = [
+        t for t in closed
+        if str(t.get("closed_at", "")).startswith(today_str)
+        and t.get("status", "") not in CANCELLED_STATUSES
+        and "CANCEL" not in str(t.get("status", ""))
+        and t.get("symbol") != "PROFIT_INJECTION"
+        and float(t.get("cumulative_pnl", 0.0) or 0.0) != 0.0
+    ]
+    today_expired = [
+        t for t in closed
+        if str(t.get("closed_at", "")).startswith(today_str)
+        and t.get("status", "") in CANCELLED_STATUSES
+    ]
+    exec_wins = sum(1 for t in today_exec if float(t.get("cumulative_pnl", 0.0) or 0.0) > 0)
+    exec_losses = sum(1 for t in today_exec if float(t.get("cumulative_pnl", 0.0) or 0.0) < 0)
+    today_pnl = sum(float(t.get("cumulative_pnl", 0.0) or 0.0) for t in today_exec)
+
+    # Active positions open right now
+    active_now = len(wallet.get("active_positions", []))
+    resting_now = len(wallet.get("resting_orders", []))
+
+    if total_signals == 0 and not today_exec:
+        await update.message.reply_text(f"📊 <b>TODAY'S REPORT</b>\n\nNo signals or trades recorded yet for {today_str}.", parse_mode="HTML")
         return
-        
-    wins = sum(1 for s in today_signals if s.get("outcome") in ["WIN", "TP1_EXIT", "TP2_EXIT", "TP3_EXIT"])
-    losses = sum(1 for s in today_signals if s.get("outcome") in ["LOSS", "SL_HIT"])
-    pending = total - (wins + losses)
-    
+
+    pnl_sign = "+" if today_pnl >= 0 else ""
     msg = (
-        f"📊 <b>TODAY'S COMPLETE SIGNALS REPORT</b>\n"
-        f"<code>Date: {today_str} • Total Signals Sent: {total}</code>\n\n"
-        f"🎯 <b>Target Hit (Wins):</b> {wins}\n"
-        f"🔴 <b>Stop Loss Hit (Losses):</b> {losses}\n"
-        f"⏳ <b>Active / Pending:</b> {pending}\n\n"
-        f"<b>Recent Signals Log:</b>\n"
+        f"📊 <b>TODAY'S COMPLETE REPORT</b>\n"
+        f"<code>Date: {today_str}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📡 <b>Signals Sent Today:</b> {total_signals}\n"
+        f"⚡ <b>Executed Trades Today:</b> {len(today_exec)} ({exec_wins}W - {exec_losses}L)\n"
+        f"⏰ <b>Unfilled (Expired):</b> {len(today_expired)} limit orders\n"
+        f"🟢 <b>Still Active Right Now:</b> {active_now} positions + {resting_now} resting\n"
+        f"💰 <b>Today's Realized PnL:</b> <code>{pnl_sign}₹{today_pnl:,.2f} INR</code>\n\n"
     )
-    for idx, s in enumerate(today_signals[:25], 1):
-        sym = s.get("symbol", "")
-        sig = s.get("signal", "")
-        tf = s.get("tf", "")
-        out = s.get("outcome", "PENDING")
-        icon = "🎯" if "WIN" in out or "TP" in out else ("🔴" if "LOSS" in out or "SL" in out else "⏳")
-        msg += f"{idx}. {icon} <b>{sym}</b> {tf} [{sig}] — <i>{out}</i>\n"
-        
-    if total > 25:
-        msg += f"\n<i>...and {total - 25} more signals earlier today.</i>"
+
+    if today_signals:
+        msg += f"<b>Recent Signals Log (last 15):</b>\n"
+        wins = sum(1 for s in today_signals if s.get("outcome") in ["WIN", "TP1_EXIT", "TP2_EXIT", "TP3_EXIT"])
+        losses = sum(1 for s in today_signals if s.get("outcome") in ["LOSS", "SL_HIT"])
+        pending = total_signals - (wins + losses)
+        msg += f"🎯 Wins: {wins} | 🔴 Losses: {losses} | ⏳ Pending/Active: {pending}\n\n"
+        for idx, s in enumerate(today_signals[:15], 1):
+            sym = s.get("symbol", "")
+            sig = s.get("signal", "")
+            tf = s.get("tf", "")
+            out = s.get("outcome", "PENDING")
+            icon = "🎯" if "WIN" in out or "TP" in out else ("🔴" if "LOSS" in out or "SL" in out else "⏳")
+            msg += f"{idx}. {icon} <b>{sym}</b> {tf} [{sig}] — <i>{out}</i>\n"
+        if total_signals > 15:
+            msg += f"\n<i>...and {total_signals - 15} more signals earlier today.</i>"
         
     await update.message.reply_text(msg, parse_mode="HTML")
 

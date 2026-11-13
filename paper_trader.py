@@ -1389,9 +1389,19 @@ async def generate_strategy_lookout_card(session=None) -> str:
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
     closed = wallet.get("closed_trades", [])
-    exec_trades = [t for t in closed if "CANCEL" not in str(t.get("status", "")) and t.get("symbol") != "PROFIT_INJECTION"]
+    # BUG FIX: Count ONLY genuinely executed+closed trades (filled orders with TP/SL/Timeout outcome)
+    # Exclude: CANCEL statuses (unfilled expired orders), SIGNAL_REVERSAL (auto-cancelled), PROFIT_INJECTION
+    CANCELLED_STATUSES = {"CANCELLED_30MIN_EXPIRED", "CANCELLED_20MIN_EXPIRED", "CANCELLED_SIGNAL_REVERSAL", "PENDING_LIMIT"}
+    exec_trades = [
+        t for t in closed
+        if t.get("status", "") not in CANCELLED_STATUSES
+        and "CANCEL" not in str(t.get("status", ""))
+        and t.get("symbol") != "PROFIT_INJECTION"
+        and t.get("status", "") not in ("", "PENDING_LIMIT")
+        and float(t.get("cumulative_pnl", 0.0) or 0.0) != 0.0  # Must have realized PnL (truly executed)
+    ]
     wins = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) > 0)
-    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) <= 0)
+    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) < 0)
     total_trades = len(exec_trades)
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
     active = wallet.get("active_positions", [])
@@ -1425,7 +1435,8 @@ async def generate_strategy_lookout_card(session=None) -> str:
         f"💼 <b>PAPER TRADING — REAL-TIME STRATEGY LOOKOUT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Wallet Balance:</b> ₹{balance:,.2f} INR ({total_roi:+.2f}% ROI)\n"
-        f"📊 <b>Scoreboard:</b> {wins}W - {losses}L ({win_rate:.1f}% WR | {total_trades} Closed)\n"
+        f"📊 <b>Scoreboard:</b> {wins}W - {losses}L ({win_rate:.1f}% WR | {total_trades} Executed Trades)\n"
+        f"⏳ <b>Live Open:</b> {len(active)} Active + {len(resting)} Resting | 📋 <b>Cancelled/Expired:</b> {len([t for t in closed if 'CANCEL' in str(t.get('status',''))])}\n"
     )
 
     if active:
@@ -1519,14 +1530,22 @@ async def generate_trades_ledger_card() -> str:
     total_roi = ((balance - initial_cap) / initial_cap) * 100.0
     fees_paid = wallet.get("total_fees_paid", 0.0)
     closed = wallet.get("closed_trades", [])
-    exec_trades = [t for t in closed if "CANCEL" not in str(t.get("status", "")) and t.get("symbol") != "PROFIT_INJECTION"]
+    # BUG FIX: Count ONLY genuinely executed+closed trades (filled orders with TP/SL/Timeout outcome)
+    CANCELLED_STATUSES = {"CANCELLED_30MIN_EXPIRED", "CANCELLED_20MIN_EXPIRED", "CANCELLED_SIGNAL_REVERSAL", "PENDING_LIMIT"}
+    exec_trades = [
+        t for t in closed
+        if t.get("status", "") not in CANCELLED_STATUSES
+        and "CANCEL" not in str(t.get("status", ""))
+        and t.get("symbol") != "PROFIT_INJECTION"
+        and float(t.get("cumulative_pnl", 0.0) or 0.0) != 0.0
+    ]
     wins = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) > 0)
-    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) <= 0)
+    losses = sum(1 for t in exec_trades if float(t.get("cumulative_pnl", 0.0) or 0.0) < 0)
     total_trades = len(exec_trades)
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
 
-    gross_wins = sum(t.get("cumulative_pnl", 0.0) for t in closed if t.get("cumulative_pnl", 0.0) > 0)
-    gross_losses = sum(abs(t.get("cumulative_pnl", 0.0)) for t in closed if t.get("cumulative_pnl", 0.0) < 0)
+    gross_wins = sum(t.get("cumulative_pnl", 0.0) for t in exec_trades if t.get("cumulative_pnl", 0.0) > 0)
+    gross_losses = sum(abs(t.get("cumulative_pnl", 0.0)) for t in exec_trades if t.get("cumulative_pnl", 0.0) < 0)
     profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
 
     msg = (
