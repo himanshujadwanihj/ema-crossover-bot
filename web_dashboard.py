@@ -364,12 +364,26 @@ async def ip_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)})
 
 
+async def api_paper_history_handler(request: web.Request) -> web.Response:
+    """Returns persistent disk paper wallet history for audit verification."""
+    from paper_trader import WALLET_FILE
+    if os.path.exists(WALLET_FILE):
+        try:
+            with open(WALLET_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return web.json_response(data)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"error": "No wallet file found"}, status=404)
+
+
 def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/index.html", index_handler)
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
+    app.router.add_get("/api/paper-history", api_paper_history_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ip", ip_handler)
     app.router.add_get("/api/ip", ip_handler)
