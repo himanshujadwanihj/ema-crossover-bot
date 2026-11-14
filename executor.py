@@ -295,6 +295,7 @@ class SharkExchangeExecutor:
         self._tp_sl_heal_lock = {}
         self._already_cancelled = set()  # order IDs cancelled this session — prevents repeat cancel loops
         self._session_active_symbols = {}  # symbol -> added_timestamp (strict in-memory active slot shield)
+        self._pending_entry_orders = {}  # symbol -> {clientOrderId, placed_at, orderId, price, side, qty}
 
     def is_configured(self) -> bool:
         """Returns True if API keys are configured and auto trading is enabled."""
@@ -747,7 +748,8 @@ class SharkExchangeExecutor:
         # 4. Set Leverage on Shark Exchange to 10x
         await self.update_leverage(session, clean_sym, self.leverage)
 
-        # 5. Place Entry Limit Order with initial Stop-Loss & Take-Profit 1 attached
+        # 5. Place Entry Limit Order with Stop-Loss attached (2-TP 70/30 orders placed upon fill)
+        client_order_id = f"bot-{clean_sym}-{int(time.time()*1000)}"
         order_payload = {
             "placeType": "ORDER_FORM",
             "symbol": clean_sym,
@@ -757,7 +759,9 @@ class SharkExchangeExecutor:
             "quantity": total_qty,
             "reduceOnly": False,
             "stopLossPrice": clean_sl,
-            "takeProfitPrice": clean_tp1
+            "clientOrderId": client_order_id
+            # NOTE: takeProfitPrice omitted so Shark Exchange does NOT auto-create a 100% TP bracket!
+            # TP1 (70%) and TP2 (30%) are placed upon fill with exact 70/30 quantities as reduce-only limit orders.
         }
 
         logger.info(
@@ -769,9 +773,18 @@ class SharkExchangeExecutor:
 
         if status in (200, 201):
             order_id = data.get("orderId") or data.get("id") or "CONFIRMED"
-            client_order_id = data.get("clientOrderId") or ""
-            logger.info(f"SHARK ORDER PLACED SUCCESSFULLY: {clean_sym} OrderID={order_id} ClientID={client_order_id}")
+            actual_cid = data.get("clientOrderId") or client_order_id
+            logger.info(f"SHARK ORDER PLACED SUCCESSFULLY: {clean_sym} OrderID={order_id} ClientID={actual_cid}")
             self._session_active_symbols[clean_sym] = time.time()
+            self._pending_entry_orders[clean_sym] = {
+                "clientOrderId": actual_cid,
+                "orderId": order_id,
+                "placed_at": time.time(),
+                "symbol": clean_sym,
+                "price": clean_entry,
+                "side": side,
+                "qty": total_qty
+            }
             logger.info(f"STRICT SLOT RESERVED: {clean_sym} added to local active slots set (Total active: {len(self._session_active_symbols)})")
 
             # Send Telegram Execution Alert
@@ -1003,7 +1016,20 @@ class SharkExchangeExecutor:
         else:
             logger.info(f"Fill Protection SL for {clean_sym}: Status {status_sl} - {res_sl}")
 
-        # 2. Place Take-Profit Order (Shark POSITION bracket TP with takeProfitPrice for visual UI display)
+        # 0. Clean up any accidental single 100% TP bracket order on position to enforce 70/30 split
+        try:
+            cur_orders = await self.get_open_orders(session, symbol=clean_sym)
+            for o in cur_orders:
+                is_tp = o.get("subType") == "TAKE_PROFIT" or o.get("linkType") in ("ORDER_TP", "ORDER_TP_SL")
+                if is_tp and (o.get("placeType") == "POSITION" or o.get("reduceOnly")):
+                    cid_tp = o.get("clientOrderId")
+                    if cid_tp:
+                        logger.info(f"Purging old 100% TP bracket {cid_tp} for {clean_sym} to enforce exact 70/30 split")
+                        await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid_tp)})
+        except Exception as e_clean:
+            logger.debug(f"TP bracket cleanup check error for {clean_sym}: {e_clean}")
+
+        # 2. Place Take-Profit 1 Order (70% Book) as POSITION LIMIT Reduce-Only
         if tp1_qty > 0:
             tp1_valid = (exit_side == "SELL" and clean_tp1 > clean_sl) or (exit_side == "BUY" and clean_tp1 < clean_sl)
             if not tp1_valid:
@@ -1013,17 +1039,15 @@ class SharkExchangeExecutor:
                     "placeType": "POSITION",
                     "positionId": pos_id,
                     "reduceOnly": True,
-                    "type": "STOP_MARKET",
+                    "type": "LIMIT",
                     "side": exit_side,
                     "symbol": clean_sym,
                     "quantity": tp1_qty,
-                    "takeProfitPrice": clean_tp1
+                    "price": clean_tp1
                 }
                 st, res = await self.shark_post(session, "/v1/order/place-order", tp1_payload)
                 if st in (200, 201):
-                    logger.info(f"TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (Native Position TP Bracket)")
-                elif st == 400 and isinstance(res, dict) and res.get("error") in ("3023", "3025"):
-                    logger.info(f"Fill Protection: TP already exists for {clean_sym} (Skipped redundant placement).")
+                    logger.info(f"TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (70% Book LIMIT)")
                 else:
                     logger.warning(f"TP1 failed for {clean_sym}: {res}")
 
@@ -1133,13 +1157,7 @@ class SharkExchangeExecutor:
                 cid = o.get("clientOrderId")
                 deleted = False
 
-                if oid:
-                    del_status, del_res = await self.shark_delete(session, "/v1/order/delete-order", {"orderId": str(oid)})
-                    if del_status in (200, 201):
-                        deleted = True
-                        logger.info(f"Cancelled old SL orderId {oid} for {clean_sym} before placing new one.")
-
-                if not deleted and cid:
+                if cid:
                     del_status, del_res = await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
                     if del_status in (200, 201):
                         deleted = True
@@ -1221,9 +1239,11 @@ class SharkExchangeExecutor:
                     continue
                 
                 cid = o.get("clientOrderId")
-                oid = o.get("orderId") or o.get("id")
-                param = {"clientOrderId": str(cid)} if cid else ({"orderId": str(oid)} if oid else None)
-                if param:
+                if not cid:
+                    sym_c = clean_contract_symbol(o.get("symbol") or clean_sym)
+                    cid = self._pending_entry_orders.get(sym_c, {}).get("clientOrderId")
+                if cid:
+                    param = {"clientOrderId": str(cid)}
                     status, res = await self.shark_delete(session, "/v1/order/delete-order", param)
                     if status not in (200, 201):
                         logger.warning(f"Failed to cancel order {param} for {clean_sym}: {res}")
@@ -1378,20 +1398,25 @@ class SharkExchangeExecutor:
                     if elapsed_mins >= 30.0:
                         sym = clean_contract_symbol(o.get("symbol") or "")
                         cid = o.get("clientOrderId")
-                        oid = o.get("orderId") or o.get("id")
-                        param = {"clientOrderId": str(cid)} if cid else ({"orderId": str(oid)} if oid else None)
-                        if param:
-                            st, res = await self.shark_delete(session, "/v1/order/delete-order", param)
+                        if not cid and sym in self._pending_entry_orders:
+                            cid = self._pending_entry_orders[sym].get("clientOrderId")
+                        
+                        if cid:
+                            st, res = await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
                             if st in (200, 201):
-                                logger.info(f"EXCHANGE SWEEPER: Cancelled expired entry order {param} for {sym} (Age: {elapsed_mins:.1f} mins)")
+                                logger.info(f"EXCHANGE SWEEPER: Cancelled expired entry order {cid} for {sym} (Age: {elapsed_mins:.1f} mins)")
+                                self._pending_entry_orders.pop(sym, None)
+                                self._session_active_symbols.pop(sym, None)
                                 from telegram_bot import send_text_alert
                                 msg = (
-                                    f"⏳ <b>SHARK AUTO-ORDER EXPIRED & CANCELLED</b>\n\n"
+                                    f"⏳ <b>SHARK AUTO-ORDER EXPIRED & CANCELLED (30-MIN LIMIT EXPIRATION)</b>\n\n"
                                     f"<b>Asset:</b> {sym}\n"
                                     f"<b>Status:</b> Entry limit not filled within {int(max_minutes)} minutes.\n"
-                                    f"<b>Action:</b> ✅ Order cancelled directly on exchange."
+                                    f"<b>Action:</b> ✅ Order cancelled directly on exchange with ₹0 INR loss."
                                 )
                                 await send_text_alert(msg)
+                            else:
+                                logger.warning(f"EXCHANGE SWEEPER: Shark returned {st} when cancelling {cid} for {sym}: {res}")
         except Exception as e:
             logger.error(f"Error in sweep_expired_entry_orders: {e}")
 
