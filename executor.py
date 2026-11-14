@@ -405,10 +405,11 @@ class SharkExchangeExecutor:
         try:
             status, resp = await self.shark_get(session, "/v1/wallet/futures-wallet/details")
             if status == 200 and isinstance(resp, dict):
-                data = resp.get("data", {})
-                avail_bal = float(data.get("availableBalance") or 0.0)
-                if avail_bal > 0:
-                    return avail_bal * self.usd_inr_rate
+                data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+                is_inr = str(data.get("marginAsset", "")).upper() == "INR" or "inrBalance" in data
+                raw_avail = float(data.get("marginBalance") or data.get("withdrawableBalance") or data.get("availableBalance") or data.get("walletBalance") or data.get("inrBalance") or 0.0)
+                if raw_avail > 0:
+                    return raw_avail if is_inr else (raw_avail * self.usd_inr_rate)
         except Exception as e:
             logger.error(f"Error fetching available margin for dynamic sizing: {e}")
         return 0.0
@@ -598,16 +599,30 @@ class SharkExchangeExecutor:
             await asyncio.sleep(1.0)
             status, resp = await self.shark_get(session, "/v1/wallet/futures-wallet/details")
             if status == 200 and isinstance(resp, dict):
-                data = resp.get("data", {})
-                total_bal = float(data.get("totalBalance") or 0)
-                avail_bal = float(data.get("availableBalance") or 0)
-                locked_bal = max(0.0, total_bal - avail_bal)
-                usd_inr = self.usd_inr_rate
+                data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+                is_inr = str(data.get("marginAsset", "")).upper() == "INR" or "inrBalance" in data
+                raw_total = float(data.get("walletBalance") or data.get("inrBalance") or data.get("totalBalance") or 0.0)
+                raw_avail = float(data.get("marginBalance") or data.get("withdrawableBalance") or data.get("availableBalance") or raw_total)
+                raw_locked = float(data.get("lockedBalance") or data.get("lockedBalanceIsolated") or max(0.0, raw_total - raw_avail))
+                if is_inr:
+                    inr_total = raw_total
+                    inr_avail = raw_avail
+                    inr_locked = raw_locked
+                    usdt_total = inr_total / self.usd_inr_rate
+                    usdt_avail = inr_avail / self.usd_inr_rate
+                    usdt_locked = inr_locked / self.usd_inr_rate
+                else:
+                    usdt_total = raw_total
+                    usdt_avail = raw_avail
+                    usdt_locked = raw_locked
+                    inr_total = usdt_total * self.usd_inr_rate
+                    inr_avail = usdt_avail * self.usd_inr_rate
+                    inr_locked = usdt_locked * self.usd_inr_rate
                 return (
-                    f"💼 <b>Shark Exchange Wallet Balance:</b>\n"
-                    f"  • Total Balance:  <b>${total_bal:.2f} USDT</b>  (₹{total_bal*usd_inr:,.0f} INR)\n"
-                    f"  • Available Margin: <b>${avail_bal:.2f} USDT</b>  (₹{avail_bal*usd_inr:,.0f} INR)\n"
-                    f"  • Margin In-Use:   <b>${locked_bal:.2f} USDT</b>  (₹{locked_bal*usd_inr:,.0f} INR)"
+                    f"💼 <b>Shark Exchange Futures Wallet:</b>\n"
+                    f"  • Total Balance:    <b>₹{inr_total:,.2f} INR</b>  (${usdt_total:.2f} USDT)\n"
+                    f"  • Available Margin: <b>₹{inr_avail:,.2f} INR</b>  (${usdt_avail:.2f} USDT)\n"
+                    f"  • Margin In-Use:     <b>₹{inr_locked:,.2f} INR</b>  (${usdt_locked:.2f} USDT)"
                 )
         except Exception as e:
             logger.error(f"Error fetching Shark wallet balance summary: {e}")
