@@ -211,6 +211,23 @@ async def health_handler(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
 
 
+
+async def ip_handler(request: web.Request) -> web.Response:
+    """Queries public IP of the Railway container."""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.ipify.org?format=json", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return web.json_response({
+                    "ip": data.get("ip"),
+                    "provider": "Railway Cloud Outbound",
+                    "note": "Dynamic IP: changes upon container restart or redeploy"
+                })
+    except Exception as e:
+        return web.json_response({"error": str(e)})
+
+
 def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
@@ -218,4 +235,6 @@ def setup_web_app() -> web.Application:
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
     app.router.add_get("/health", health_handler)
+    app.router.add_get("/ip", ip_handler)
+    app.router.add_get("/api/ip", ip_handler)
     return app
