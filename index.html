@@ -235,6 +235,8 @@
                   <th class="py-2 px-2">Asset</th>
                   <th class="py-2 px-2">Side</th>
                   <th class="py-2 px-2">Entry</th>
+                  <th class="py-2 px-2">Live Price</th>
+                  <th class="py-2 px-2">Live PnL</th>
                   <th class="py-2 px-2">TP1 (70%)</th>
                   <th class="py-2 px-2">TP2 (30%)</th>
                   <th class="py-2 px-2">Trailing SL</th>
@@ -242,7 +244,7 @@
               </thead>
               <tbody id="table-active-positions" class="divide-y divide-slate-800 text-slate-300">
                 <tr>
-                  <td colspan="6" class="py-4 text-center text-slate-500 italic">No active positions open right now. Scanner is active 24/7.</td>
+                  <td colspan="8" class="py-4 text-center text-slate-500 italic">No active positions open right now. Scanner is active 24/7.</td>
                 </tr>
               </tbody>
             </table>
@@ -1675,7 +1677,14 @@
       if (wrEl) wrEl.innerText = (sc.win_rate_pct || 0) + '%';
 
       const scEl = document.getElementById('live-score-counts');
-      if (scEl) scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
+      if (scEl) {
+        if (sc.active_unrealized_pnl_inr !== undefined && sc.active_unrealized_pnl_inr !== 0) {
+          const isP = sc.active_unrealized_pnl_inr >= 0;
+          scEl.innerText = (isP ? '+' : '') + '₹' + sc.active_unrealized_pnl_inr.toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Live';
+        } else {
+          scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
+        }
+      }
 
       const totEl = document.getElementById('live-total-exec');
       if (totEl) totEl.innerText = (sc.total_executed || 0) + ' Trades';
@@ -1685,8 +1694,14 @@
 
       const roiEl = document.getElementById('live-roi-pct');
       if (roiEl) {
-        const roi = wal.total_roi_pct || 0;
-        roiEl.innerText = (roi >= 0 ? '+' : '') + roi + '% ROI';
+        if (wal.unrealized_pnl_inr !== undefined && wal.unrealized_pnl_inr !== 0) {
+          const isProf = wal.unrealized_pnl_inr >= 0;
+          roiEl.className = 'text-xs font-bold ' + (isProf ? 'text-emerald-400' : 'text-rose-400');
+          roiEl.innerText = (isProf ? '+' : '') + '₹' + Number(wal.unrealized_pnl_inr).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Live PnL';
+        } else {
+          const roi = wal.total_roi_pct || 0;
+          roiEl.innerText = (roi >= 0 ? '+' : '') + roi + '% ROI';
+        }
       }
 
       const actEl = document.getElementById('live-active-count');
@@ -1712,18 +1727,28 @@
       if (actTbody) {
         const positions = data.active_positions || [];
         if (positions.length === 0) {
-          actTbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500 italic">No active positions open right now. Scanner is active 24/7.</td></tr>';
+          actTbody.innerHTML = '<tr><td colspan="8" class="py-4 text-center text-slate-500 italic">No active positions open right now. Scanner is active 24/7.</td></tr>';
         } else {
-          actTbody.innerHTML = positions.map(p => `
-            <tr class="hover:bg-slate-800/40">
-              <td class="py-2.5 px-2 font-bold text-white">${p.symbol}</td>
-              <td class="py-2.5 px-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${p.signal === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${p.signal}</span></td>
-              <td class="py-2.5 px-2 font-mono text-slate-200">${p.entry}</td>
-              <td class="py-2.5 px-2 font-mono text-emerald-400">${p.tp1}</td>
-              <td class="py-2.5 px-2 font-mono text-sky-400">${p.tp2}</td>
-              <td class="py-2.5 px-2 font-mono text-amber-400">${p.current_sl}</td>
-            </tr>
-          `).join('');
+          actTbody.innerHTML = positions.map(p => {
+            const isProfit = (p.unrealized_pnl_inr || 0) >= 0;
+            const pnlSign = isProfit ? '+' : '';
+            return `
+              <tr class="hover:bg-slate-800/40">
+                <td class="py-2.5 px-2 font-bold text-white">${p.symbol}</td>
+                <td class="py-2.5 px-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${p.signal === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${p.signal}</span></td>
+                <td class="py-2.5 px-2 font-mono text-slate-200">${p.entry}</td>
+                <td class="py-2.5 px-2 font-mono font-bold text-sky-400">${p.mark_price || p.entry}</td>
+                <td class="py-2.5 px-2 font-mono font-bold">
+                  <span class="px-2 py-0.5 rounded text-[11px] font-bold ${isProfit ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}">
+                    ${pnlSign}₹${Number(p.unrealized_pnl_inr || 0).toLocaleString('en-IN', {minimumFractionDigits: 2})} (${pnlSign}${p.pnl_pct || 0}%)
+                  </span>
+                </td>
+                <td class="py-2.5 px-2 font-mono text-emerald-400">${p.tp1}</td>
+                <td class="py-2.5 px-2 font-mono text-sky-400">${p.tp2}</td>
+                <td class="py-2.5 px-2 font-mono text-amber-400">${p.current_sl}</td>
+              </tr>
+            `;
+          }).join('');
         }
       }
 
