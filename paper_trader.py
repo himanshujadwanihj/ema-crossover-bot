@@ -78,7 +78,22 @@ def load_wallet() -> dict:
     data["initial_capital"] = INITIAL_CAPITAL
     data["balance"] = round(INITIAL_CAPITAL + float(data.get("realized_pnl", 0.0)), 2)
 
-
+    # USER DIRECTIVE KILL-SWITCH: When paper trading is stopped, permanently purge active & resting orders from disk!
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        if data.get("active_positions") or data.get("resting_orders"):
+            logger.info("REAL TRADING ACTIVE: Purging legacy paper active_positions and resting_orders from persistent disk.")
+            for p in data.get("active_positions", []):
+                p["status"] = "CLOSED_PAPER_TERMINATED"
+                p["closed_at"] = datetime.now(timezone.utc).isoformat()
+                data.setdefault("closed_trades", []).append(p)
+            data["active_positions"] = []
+            data["resting_orders"] = []
+            try:
+                with open(WALLET_FILE, "w", encoding="utf-8") as _wf:
+                    json.dump(data, _wf, indent=2)
+            except Exception as _we:
+                logger.warning(f"Error purging paper wallet on disk: {_we}")
 
     return data
 
@@ -121,6 +136,10 @@ def format_inr(amount: float) -> str:
 
 
 async def notify_telegram(message: str):
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        logger.debug("Paper trading disabled: Suppressed notify_telegram alert.")
+        return
     from telegram_bot import send_text_to_chat, format_display_symbol
     # STRICT DIRECTIVE: Trading activity ONLY to 771305593 nowhere else!
     personal_dm = "771305593"
@@ -136,6 +155,9 @@ async def register_paper_trade(alert_data: dict):
     Registers a new virtual Limit Entry order at entry price.
     Fired when a 3-star or 4-star trade signal is shared.
     """
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        return
     symbol = alert_data.get("symbol")
     signal = alert_data.get("signal", "BUY").upper()
     entry = float(alert_data.get("entry", 0.0))

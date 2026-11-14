@@ -48,45 +48,68 @@ async def run_startup_reconciliation(session: aiohttp.ClientSession, semaphore: 
     logger.info("🔄 BOT RESUMED: Starting 60-Second Offline Audit & Reconciliation...")
     logger.info("=" * 65)
     
-    # 1. Resolve pending trades & paper wallet
+    # 1. Resolve pending trades & paper wallet (ONLY if paper trading is enabled)
+    from config import PAPER_TRADING_ENABLED
     from paper_trader import evaluate_paper_trades_async, load_wallet
-    w_before = load_wallet()
-    active_before = len(w_before.get("active_positions", []))
-    resting_before = len(w_before.get("resting_orders", []))
-    closed_before = len(w_before.get("closed_trades", []))
     
-    await resolve_pending_trades_async(session, semaphore)
-    await evaluate_paper_trades_async(session, semaphore)
-    
-    w_after = load_wallet()
-    active_after = len(w_after.get("active_positions", []))
-    resting_after = len(w_after.get("resting_orders", []))
-    closed_after = len(w_after.get("closed_trades", []))
-    
-    newly_closed = closed_after - closed_before
-    
-    logger.info(f"📊 RECONCILIATION AUDIT:")
-    logger.info(f"   • Active Positions: {active_before} -> {active_after}")
-    logger.info(f"   • Resting Orders:   {resting_before} -> {resting_after}")
-    logger.info(f"   • Offline Resolved: {newly_closed} closed trades updated")
-    logger.info(f"   • Current Balance:  ₹{w_after.get('balance', 0):,.2f} INR")
+    if PAPER_TRADING_ENABLED:
+        w_before = load_wallet()
+        active_before = len(w_before.get("active_positions", []))
+        resting_before = len(w_before.get("resting_orders", []))
+        closed_before = len(w_before.get("closed_trades", []))
+        
+        await resolve_pending_trades_async(session, semaphore)
+        await evaluate_paper_trades_async(session, semaphore)
+        
+        w_after = load_wallet()
+        active_after = len(w_after.get("active_positions", []))
+        resting_after = len(w_after.get("resting_orders", []))
+        closed_after = len(w_after.get("closed_trades", []))
+        newly_closed = closed_after - closed_before
+        
+        logger.info(f"📊 RECONCILIATION AUDIT (PAPER):")
+        logger.info(f"   • Active Positions: {active_before} -> {active_after}")
+        logger.info(f"   • Current Balance:  ₹{w_after.get('balance', 0):,.2f} INR")
+    else:
+        # Hard purge any leftover paper state from persistent disk
+        load_wallet()
+        active_after = 0
+        newly_closed = 0
     
     # Send one clean Telegram admin notification about the reconciliation
     try:
         from telegram_bot import send_text_to_chat
         from config import TELEGRAM_CHAT_ID
+        import zoneinfo
         admin_chat = TELEGRAM_CHAT_ID or "771305593"
-        recon_msg = (
-            "🔄 <b>BOT RE-ACTIVATED & RECONCILED</b>\n\n"
-            f"<b>Offline Audit Results:</b>\n"
-            f"• Active Positions: <b>{active_after}</b>\n"
-            f"• Closed/Expired while offline: <b>{newly_closed}</b>\n"
-            f"• Live Paper Balance: <b>₹{w_after.get('balance', 0):,.2f} INR</b>\n\n"
-            "⏳ <i>Warming up feeds... Fresh live market scan starting in a few seconds (Deduplication Guard active).</i>"
-        )
+        time_str_recon = datetime.now(zoneinfo.ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y, %I:%M %p IST')
+        
+        if PAPER_TRADING_ENABLED:
+            recon_msg = (
+                "🔄 <b>BOT RE-ACTIVATED & RECONCILED</b>\n\n"
+                f"• Time: <b>{time_str_recon}</b>\n"
+                f"• Mode: <b>PAPER TRADING (SIMULATION)</b>\n"
+                f"• Active Positions: <b>{active_after}</b>\n"
+                f"• Closed/Expired while offline: <b>{newly_closed}</b>\n"
+                f"• Live Paper Balance: <b>₹{w_after.get('balance', 0):,.2f} INR</b>\n\n"
+                "⏳ <i>Warming up feeds... Fresh live market scan starting in a few seconds.</i>"
+            )
+        else:
+            from executor import executor
+            shark_bal = await executor.get_wallet_balance_summary(session) if executor.is_configured() else ""
+            pos_list = await executor.get_open_positions(session) if executor.is_configured() else []
+            recon_msg = (
+                "🔄 <b>BOT RE-ACTIVATED & RECONCILED</b>\n\n"
+                f"• Time: <b>{time_str_recon}</b>\n"
+                f"• Mode: 🟢 <b>REAL LIVE TRADING (SHARK EXCHANGE)</b>\n"
+                f"• Live Broker Positions: <b>{len(pos_list)}</b>\n"
+                f"{shark_bal}\n\n"
+                "⏳ <i>70/30 Engine Online. Zero paper simulation active.</i>"
+            )
         await send_text_to_chat(admin_chat, recon_msg)
     except Exception as e_tg:
         logger.warning(f"Could not dispatch reconciliation Telegram alert: {e_tg}")
+
 
     # Ensure full 60 seconds warm-up before kicking off the first scan
     elapsed = time.time() - start_recon
