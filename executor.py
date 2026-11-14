@@ -1435,6 +1435,18 @@ class SharkExchangeExecutor:
                     orders_by_sym[s] = []
                 orders_by_sym[s].append(o)
 
+            # SAFETY SHIELD: Clean up any orphan position-bound orders if position is already closed
+            for s_ord, ord_list in orders_by_sym.items():
+                if s_ord and s_ord not in live_syms:
+                    for o_orph in ord_list:
+                        if o_orph.get("placeType") == "POSITION" or o_orph.get("reduceOnly"):
+                            cid = o_orph.get("clientOrderId")
+                            oid = o_orph.get("orderId") or o_orph.get("id")
+                            param = {"clientOrderId": str(cid)} if cid else ({"orderId": str(oid)} if oid else None)
+                            if param:
+                                logger.info(f"Purging orphan position-bound order for closed symbol {s_ord}: {param}")
+                                await self.shark_delete(session, "/v1/order/delete-order", param)
+
             for pos in positions:
                 sym = clean_contract_symbol(self.clean_sym(pos))
                 if not sym:
