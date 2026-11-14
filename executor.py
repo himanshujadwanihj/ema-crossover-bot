@@ -674,22 +674,21 @@ class SharkExchangeExecutor:
         """
         clean_sym = to_shark_symbol(symbol)
 
-        # 1. BTC / ETH Weekend Exclusion (Crypto trades 24/7 on weekdays, 4-star check)
-        is_weekday_restricted = any(m in clean_sym for m in ("BTC", "ETH"))
-        if is_weekday_restricted:
+        # 1. BTC / ETH / Gold Weekend Rule (Weekdays Mon-Fri Allowed; Sat-Sun No Trade)
+        is_weekend_restricted = any(m in clean_sym.upper() for m in ("BTC", "ETH", "XAU", "GOLD", "XAUT", "XAG"))
+        if is_weekend_restricted:
             try:
                 import zoneinfo
                 now_ist = datetime.now(timezone.utc).astimezone(zoneinfo.ZoneInfo("Asia/Kolkata"))
-                is_weekday = now_ist.weekday() < 5
+                is_weekday = now_ist.weekday() < 5  # 0-4 = Mon-Fri, 5-6 = Sat-Sun
             except Exception:
                 is_weekday = True
 
-            if is_weekday and aligned_count >= 4:
-                logger.info(f"⚡ WEEKDAY 4-STAR EXEMPTION: {clean_sym} [{signal}] has 4/4 Stars Confluence on Weekday. Allowing Shark execution!")
+            if not is_weekday:
+                logger.info(f"WEEKEND EXCLUSION: {clean_sym} [{signal}] skipped on Saturday/Sunday per user directive. Telegram alert only.")
+                return {"status": "skipped", "reason": f"{clean_sym} trading is paused on weekends (Sat/Sun). Weekdays only."}
             else:
-                reason = "Weekend" if not is_weekday else f"Less than 4-star confluence ({aligned_count}/4 stars)"
-                logger.info(f"AUTO-TRADE EXCLUSION: {clean_sym} skipped for auto-trade ({reason}). Telegram alert only.")
-                return {"status": "skipped", "reason": f"{clean_sym} is skipped ({reason})"}
+                logger.info(f"⚡ WEEKDAY EXECUTION: {clean_sym} [{signal}] active for Shark execution on Weekdays (Mon-Fri).")
 
         # 2. US Stock Tokens: AUTO-TRADING STOPPED per User Directive
         # Signals continue to be broadcast to Telegram, but automatic execution is disabled.

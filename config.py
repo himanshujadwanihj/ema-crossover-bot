@@ -33,7 +33,7 @@ AUTO_TRADE_RISK_PER_TRADE_PCT: float = float(os.getenv("AUTO_TRADE_RISK_PER_TRAD
 AUTO_TRADE_MIN_MARGIN_INR: float     = float(os.getenv("AUTO_TRADE_MIN_MARGIN_INR", "500.0"))       # Min Margin per Trade
 AUTO_TRADE_MAX_MARGIN_PCT: float     = float(os.getenv("AUTO_TRADE_MAX_MARGIN_PCT", "0.20"))       # Max 20% Account Margin Cap per Slot
 AUTO_TRADE_MAX_CONCURRENT: int = 999999  # User Directive: Portfolio cap completely removed from everywhere
-AUTO_TRADE_EXCLUDED_SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "ASTER/USDT", "ASTR/USDT", "AST/USDT", "ASTER", "ASTR", "AST"]
+AUTO_TRADE_EXCLUDED_SYMBOLS: list = ["ASTER/USDT", "ASTR/USDT", "AST/USDT", "ASTER", "ASTR", "AST"]
 
 # ── US Stock Tokens Exclusion (Crypto Only) ───────────────────────────────────
 # IMPORTANT: Only include tokens that are UNAMBIGUOUSLY US stock synthetics.

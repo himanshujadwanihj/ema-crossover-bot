@@ -899,6 +899,63 @@ async def main_loop():
                                 last_lookout_time = now_t
                             except Exception as e_look:
                                 logger.error(f"Error sending regular paper lookout update: {e_look}")
+                    else:
+                        # REAL LIVE TRADING: Regular Automated Hourly Position Tracking Lookout Update
+                        now_t = time.time()
+                        if now_t - last_lookout_time >= 3600:
+                            try:
+                                if executor.is_configured():
+                                    import zoneinfo
+                                    ist_h = zoneinfo.ZoneInfo("Asia/Kolkata")
+                                    time_str_h = datetime.now(ist_h).strftime("%d %b %Y, %I:%M %p IST")
+                                    shark_bal = await executor.get_wallet_balance_summary(session)
+                                    shark_pos = await executor.get_open_positions(session)
+                                    open_orders = await executor.get_open_orders(session)
+
+                                    pos_lines = []
+                                    for p in shark_pos:
+                                        p_sym = executor.clean_sym(p)
+                                        p_side = p.get("side", p.get("direction", p.get("positionType", "LONG")))
+                                        p_sz = p.get("positionAmount", p.get("quantity", p.get("size", 0)))
+                                        p_entry = float(p.get("entryPrice", 0) or 0)
+                                        p_mark = float(p.get("markPrice", 0) or p.get("lastPrice", 0) or p_entry)
+                                        p_upnl = float(p.get("unrealizedPnl", 0) or p.get("unrealizedProfit", 0) or 0)
+                                        p_upnl_inr = p_upnl * executor.usd_inr_rate
+                                        p_badge = f"+₹{p_upnl_inr:,.2f}" if p_upnl_inr >= 0 else f"-₹{abs(p_upnl_inr):,.2f}"
+                                        pos_lines.append(f"  • <b>{p_sym}</b> [{p_side}] Qty: {p_sz} | Entry: ${p_entry} | Floating: <b>{p_badge}</b>")
+
+                                    pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
+
+                                    ord_lines = []
+                                    for o in open_orders:
+                                        if not o.get("reduceOnly") and o.get("placeType") != "POSITION":
+                                            o_sym = executor.clean_sym(o)
+                                            o_side = str(o.get("side", "BUY")).upper()
+                                            o_px = o.get("price", 0)
+                                            o_qty = o.get("quantity", 0)
+                                            ord_lines.append(f"  • <b>{o_sym}</b> [{o_side}] Limit @ ${o_px} (Qty: {o_qty})")
+
+                                    ord_str = "\n".join(ord_lines[:8]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
+
+                                    live_lookout_card = (
+                                        f"🦈 <b>REAL LIVE TRADING: HOURLY POSITION LOOKOUT</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"⏰ <b>Time:</b> {time_str_h}\n"
+                                        f"💼 <b>Status:</b> 🟢 <b>Real Live Trading Active</b> (Shark Exchange)\n\n"
+                                        f"{shark_bal}\n\n"
+                                        f"🟢 <b>Active Positions ({len(shark_pos)}):</b>\n"
+                                        f"{pos_str}\n\n"
+                                        f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
+                                        f"{ord_str}\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"<i>Automated Hourly Position Tracker • 70/30 Engine Active</i>"
+                                    )
+                                    from telegram_bot import send_text_alert
+                                    await send_text_alert(live_lookout_card)
+                                    logger.info("Dispatched regular hourly real live trading lookout update to Telegram.")
+                                last_lookout_time = now_t
+                            except Exception as e_live_look:
+                                logger.error(f"Error sending regular live lookout update: {e_live_look}")
 
                     await asyncio.sleep(5)
 
@@ -1128,6 +1185,20 @@ async def main_loop():
                                     excl_base = excl_clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
                                     if sym_clean == excl_clean or sym_base == excl_base:
                                         return False
+                                # USER DIRECTIVE: Weekdays (Mon-Fri) BTC & ETH can be traded!
+                                # Weekend (Saturday & Sunday): Strictly NO trades on BTC, ETH, and Gold!
+                                import zoneinfo
+                                ist_tz_elig = zoneinfo.ZoneInfo("Asia/Kolkata")
+                                now_ist_elig = datetime.now(ist_tz_elig)
+                                is_weekend_elig = now_ist_elig.weekday() in (5, 6) # 5 = Saturday, 6 = Sunday
+
+                                sym_u_check = sym_upper.replace("/", "").replace("_", "")
+                                is_btc_eth_check = any(x in sym_u_check for x in ["BTC", "ETH"])
+                                is_gold_check = any(x in sym_u_check for x in ["XAU", "GOLD", "XAUT", "XAG"])
+
+                                if is_weekend_elig and (is_btc_eth_check or is_gold_check):
+                                    return False
+
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
                                 is_us_stock = any(x in sym_upper for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym_upper.endswith("B/USDT") or sym_upper.endswith("BUSDT")
                                 if is_us_stock:
