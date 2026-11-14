@@ -941,7 +941,7 @@ class SharkExchangeExecutor:
                     logger.info(f"place_tp_limits: Placing SL={actual_sl} + 3 TPs ({tp1}/{tp2}/{tp3}) for {clean_sym} fill@{fill_price} qty={actual_qty}")
                     return await self.execute_fill_protection(
                         session, clean_sym, pos_direction, pos_id, actual_qty,
-                        sl=actual_sl, tp1=tp1, tp2=tp2, tp3=tp3, adx=adx
+                        sl=actual_sl, tp1=tp1, tp2=tp2, tp3=tp3, adx=adx, fill_price=fill_price
                     )
             logger.info(f"place_tp_limits: No live position on Shark for {clean_sym} (paper/pending fill).")
         except Exception as e:
@@ -959,15 +959,15 @@ class SharkExchangeExecutor:
         tp1: float,
         tp2: float,
         tp3: float = None,
-        adx: float = None
+        adx: float = None,
+        fill_price: float = None
     ) -> bool:
         """
-        Attaches 3 TP limit orders and 1 Stop-Loss order directly to the open position
+        Attaches TP1 (70%), TP2 (30%), and 1 Stop-Loss order directly to the open position
         using placeType: 'POSITION' (requires ₹0 additional margin!).
-        - TP1: 40% Qty @ tp1
-        - TP2: 30% Qty @ tp2
-        - TP3: 30% Qty @ tp3 (100% trade closed)
-        - SL:  100% Qty @ sl (STOP_MARKET)
+        - TP1: 70% Qty @ tp1 (LIMIT reduce-only)
+        - TP2: 30% Qty @ target_tp2 (LIMIT reduce-only)
+        - SL:  100% Qty @ sl (STOP_MARKET reduce-only)
         """
         clean_sym = clean_contract_symbol(symbol)
         exit_side = "SELL" if direction.upper() in ("BUY", "LONG") else "BUY"
@@ -1051,30 +1051,12 @@ class SharkExchangeExecutor:
                 else:
                     logger.warning(f"TP1 failed for {clean_sym}: {res}")
 
-        # Send Telegram Fill Alert for Real Live Trade
-        bal_summary = await self.get_wallet_balance_summary(session)
-        bal_block = f"\n\n{bal_summary}" if bal_summary else ""
-        fill_msg = (
-            f"🟢 <b>REAL LIVE TRADE: LIMIT ORDER FILLED (SHARK EXCHANGE)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Asset:</b> {clean_sym} [{pos_direction}] 10x Isolated\n"
-            f"🎯 <b>Fill Price:</b> {format_price(fill_price)}\n"
-            f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
-            f"🛡️ <b>Stop-Loss Armed:</b> {format_price(clean_sl)}\n"
-            f"🎯 <b>Targets:</b> TP1: {format_price(clean_tp1)} (70% Book) | TP2: {format_price(target_tp2)} (30% Runner)"
-            f"{bal_block}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
-        )
-        from telegram_bot import send_text_alert as _send_alert
-        await _send_alert(fill_msg)
-
-        # 3. Place TP2 Order (30%)
+        # 3. Place Take-Profit 2 Order (30% Runner) as POSITION LIMIT Reduce-Only
         if tp2_qty > 0:
-            tp2_valid = (exit_side == "SELL" and clean_tp2 > clean_sl and clean_tp2 > clean_tp1) or \
-                        (exit_side == "BUY" and clean_tp2 < clean_sl and clean_tp2 < clean_tp1)
+            tp2_valid = (exit_side == "SELL" and target_tp2 > clean_sl and target_tp2 > clean_tp1) or \
+                        (exit_side == "BUY" and target_tp2 < clean_sl and target_tp2 < clean_tp1)
             if not tp2_valid:
-                logger.warning(f"TP2 price {clean_tp2} appears invalid for {clean_sym} {exit_side} — skipping")
+                logger.warning(f"TP2 price {target_tp2} appears invalid for {clean_sym} {exit_side} — skipping")
             else:
                 tp2_payload = {
                     "placeType": "POSITION",
@@ -1084,20 +1066,41 @@ class SharkExchangeExecutor:
                     "side": exit_side,
                     "symbol": clean_sym,
                     "quantity": tp2_qty,
-                    "price": clean_tp2
+                    "price": target_tp2
                 }
                 st, res = await self.shark_post(session, "/v1/order/place-order", tp2_payload)
                 if st not in (200, 201):
                     logger.warning(f"TP2 failed for {clean_sym}: {res}")
                     if st == 400 and isinstance(res, dict) and res.get("error") == "3010":
-                        rem_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=clean_tp2)
+                        rem_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=target_tp2)
                         if rem_qty > 0:
                             tp2_payload["quantity"] = rem_qty
                             await self.shark_post(session, "/v1/order/place-order", tp2_payload)
                 else:
-                    logger.info(f"TP2 placed for {clean_sym} at {clean_tp2} qty={tp2_qty}")
+                    logger.info(f"TP2 placed for {clean_sym} at {target_tp2} qty={tp2_qty} (30% Runner LIMIT)")
 
-        # TP2 is the final target (30% runner). No TP3 exists.
+        # 4. Safe Telegram Fill Alert (Fires only after orders are safely placed on broker)
+        try:
+            bal_summary = await self.get_wallet_balance_summary(session)
+            bal_block = f"\n\n{bal_summary}" if bal_summary else ""
+            px_disp = f"{fill_price:,.4f}" if fill_price else "Limit Entry"
+            pos_dir_disp = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
+            fill_msg = (
+                f"🟢 <b>REAL LIVE TRADE: LIMIT ORDER FILLED (SHARK EXCHANGE)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Asset:</b> {clean_sym} [{pos_dir_disp}] 10x Isolated\n"
+                f"🎯 <b>Fill Price:</b> {px_disp}\n"
+                f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
+                f"🛡️ <b>Stop-Loss Armed:</b> {clean_sl}\n"
+                f"🎯 <b>Targets:</b> TP1: {clean_tp1} (70% Book) | TP2: {target_tp2} (30% Runner)"
+                f"{bal_block}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
+            )
+            from telegram_bot import send_text_alert as _send_alert
+            await _send_alert(fill_msg)
+        except Exception as e_alert:
+            logger.warning(f"Failed to send fill alert for {clean_sym}: {e_alert}")
 
         return True
 
