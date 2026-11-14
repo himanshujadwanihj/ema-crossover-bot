@@ -286,7 +286,7 @@ class SharkExchangeExecutor:
         self.api_key = os.getenv("SHARK_API_KEY", SHARK_API_KEY)
         self.api_secret = os.getenv("SHARK_API_SECRET", SHARK_API_SECRET)
         self.base_url = os.getenv("SHARK_BASE_URL", SHARK_BASE_URL)
-        self.margin_inr = AUTO_TRADE_MARGIN_INR
+        self.margin_inr = 1000.0
         self.leverage = AUTO_TRADE_LEVERAGE
         self.max_concurrent_trades = AUTO_TRADE_MAX_CONCURRENT
         self.excluded_symbols = AUTO_TRADE_EXCLUDED_SYMBOLS
@@ -710,9 +710,20 @@ class SharkExchangeExecutor:
 
         # 3. Position Sizing (Exact 2.0% Dynamic sizing on AVAILABLE Free Margin on Broker)
         avail_margin_inr = await self.get_available_margin_inr(session)
-        if avail_margin_inr and avail_margin_inr < 500.0:
+        if avail_margin_inr is not None and avail_margin_inr < 500.0:
             logger.warning(f"INSUFFICIENT AVAILABLE MARGIN ON BROKER: Only ₹{avail_margin_inr:,.2f} INR free (Min ₹500 required). Skipping {clean_sym}.")
-            return {"status": "skipped", "reason": f"Insufficient available margin on broker (₹{avail_margin_inr:,.0f} INR)"}
+            bal_summary = await self.get_wallet_balance_summary(session)
+            bal_block = f"\n\n{bal_summary}" if bal_summary else ""
+            msg = (
+                f"⚠️ <b>SHARK AUTO-ORDER MARGIN ALERT</b>\n\n"
+                f"Signal for <b>{clean_sym}</b> [{signal}] could not be executed.\n"
+                f"<b>Reason:</b> Insufficient Free Margin in Shark Futures Wallet (Current: ₹{avail_margin_inr:,.2f} INR).\n"
+                f"<b>Minimum Required:</b> ₹500 INR (or 2.0% of capital).\n"
+                f"<i>Please deposit/transfer funds into your Shark Exchange Futures Wallet.</i>{bal_block}"
+            )
+            from telegram_bot import send_text_alert as _send_alert
+            await _send_alert(msg)
+            return {"status": "skipped", "reason": f"Insufficient available margin on broker (₹{avail_margin_inr:,.2f} INR)"}
         total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt = self.calculate_position_size(clean_sym, entry, sl_price=sl, available_margin_inr=avail_margin_inr, adx=adx)
         if total_qty <= 0:
             logger.error(f"Position size calculation resulted in 0 quantity for {clean_sym}.")
