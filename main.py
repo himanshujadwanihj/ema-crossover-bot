@@ -879,23 +879,26 @@ async def main_loop():
                         await executor.sync_and_manage_live_orders(session)
                     except Exception as tp_err:
                         logger.error(f"TP Monitor Worker error: {tp_err}")
-                    try:
-                        await evaluate_paper_trades_async(session, semaphore)
-                    except Exception as paper_err:
-                        logger.error(f"Paper Trade Monitor error: {paper_err}")
 
-                    # Regular Automated Strategy Lookout Update (Every 1 hour when trades are active)
-                    now_t = time.time()
-                    if now_t - last_lookout_time >= 3600:
+                    from config import PAPER_TRADING_ENABLED
+                    if PAPER_TRADING_ENABLED:
                         try:
-                            wallet = load_wallet()
-                            if wallet.get("active_positions") or wallet.get("resting_orders"):
-                                card = await generate_strategy_lookout_card(session)
-                                await notify_telegram(card)
-                                logger.info("Dispatched regular hourly paper trading strategy lookout update.")
-                            last_lookout_time = now_t
-                        except Exception as e_look:
-                            logger.error(f"Error sending regular paper lookout update: {e_look}")
+                            await evaluate_paper_trades_async(session, semaphore)
+                        except Exception as paper_err:
+                            logger.error(f"Paper Trade Monitor error: {paper_err}")
+
+                        # Regular Automated Strategy Lookout Update (Every 1 hour when trades are active)
+                        now_t = time.time()
+                        if now_t - last_lookout_time >= 3600:
+                            try:
+                                wallet = load_wallet()
+                                if wallet.get("active_positions") or wallet.get("resting_orders"):
+                                    card = await generate_strategy_lookout_card(session)
+                                    await notify_telegram(card)
+                                    logger.info("Dispatched regular hourly paper trading strategy lookout update.")
+                                last_lookout_time = now_t
+                            except Exception as e_look:
+                                logger.error(f"Error sending regular paper lookout update: {e_look}")
 
                     await asyncio.sleep(5)
 

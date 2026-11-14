@@ -23,6 +23,7 @@ FILTER_BOT_TOKEN: str = os.getenv("FILTER_BOT_TOKEN", "8990708294:AAHQAUYGrFSPs7
 
 # ── Shark Exchange Auto-Trader Settings ────────────────────────────────────────
 AUTO_TRADING_ENABLED: bool = os.getenv("AUTO_TRADING_ENABLED", "true").lower() in ("true", "1", "yes")
+PAPER_TRADING_ENABLED: bool = os.getenv("PAPER_TRADING_ENABLED", "true").lower() in ("true", "1", "yes")
 SHARK_API_KEY: str         = os.getenv("SHARK_API_KEY", "b962081fca5cf51e1ca2af7c7c367c5e")
 SHARK_API_SECRET: str      = os.getenv("SHARK_API_SECRET", "339ac6b825119a2e919847ff6bca7837")
 SHARK_BASE_URL: str        = os.getenv("SHARK_BASE_URL", "https://api.sharkexchange.in")

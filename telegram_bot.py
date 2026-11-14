@@ -964,11 +964,55 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reports real-time Paper Trading Strategy Lookout or Closed Trades Ledger + Shark Live Status."""
+    """Reports real-time Paper Trading Strategy Lookout or Shark Live Status."""
     msg = update.message
     if not msg:
         return
     try:
+        from config import PAPER_TRADING_ENABLED
+        from executor import executor
+        import aiohttp
+
+        # If Paper Trading is DISABLED and Shark is Configured -> Show strictly Live Exchange
+        if not PAPER_TRADING_ENABLED and executor.is_configured():
+            async with aiohttp.ClientSession() as s:
+                shark_bal = await executor.get_wallet_balance_summary(s)
+                shark_pos = await executor.get_open_positions(s)
+                open_orders = await executor.get_open_orders(s)
+                pos_lines = []
+                for p in shark_pos:
+                    sym = executor.clean_sym(p)
+                    side = p.get("side", p.get("direction", "LONG"))
+                    sz = p.get("positionAmt", p.get("quantity", p.get("size", 0)))
+                    upnl = p.get("unrealizedProfit", p.get("pnl", 0))
+                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating PnL: ${float(upnl):.2f})")
+                pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
+
+                ord_lines = []
+                for o in open_orders:
+                    if not o.get("reduceOnly", False):
+                        osym = executor.clean_sym(o)
+                        oside = o.get("side", "BUY")
+                        opx = o.get("price", 0)
+                        oqty = o.get("quantity", 0)
+                        ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ {opx} (Qty: {oqty})")
+                ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
+
+                card = (
+                    f"🦈 <b>SHARK EXCHANGE REAL LIVE AUTO-TRADING</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{shark_bal}\n\n"
+                    f"🟢 <b>Live Active Positions ({len(shark_pos)}):</b>\n"
+                    f"{pos_str}\n\n"
+                    f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
+                    f"{ord_str}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Mode: 🟢 REAL LIVE TRADING (Paper Trading Disabled)</i>"
+                )
+                await msg.reply_text(card, parse_mode="HTML")
+                return
+
+        # Default: Paper Trading or Combined View
         from paper_trader import generate_strategy_lookout_card, generate_trades_ledger_card
         cmd_text = (msg.text or "").strip().lower()
         if "trade" in cmd_text:
@@ -976,11 +1020,8 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             card = await generate_strategy_lookout_card()
 
-        # If Shark Live Auto-Trading is configured, prepend live exchange summary
-        try:
-            from executor import executor
-            if executor.is_configured():
-                import aiohttp
+        if executor.is_configured():
+            try:
                 async with aiohttp.ClientSession() as s:
                     shark_bal = await executor.get_wallet_balance_summary(s)
                     shark_pos = await executor.get_open_positions(s)
@@ -1002,13 +1043,13 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                         )
                         card = shark_header + card
-        except Exception as e_sh:
-            logger.warning(f"Could not append Shark balance in cmd_positions: {e_sh}")
+            except Exception as e_sh:
+                logger.warning(f"Could not append Shark balance in cmd_positions: {e_sh}")
 
         await msg.reply_text(card, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error in cmd_positions: {e}")
-        await msg.reply_text(f"⚠️ Error fetching paper trading details: {e}")
+        await msg.reply_text(f"⚠️ Error fetching trading details: {e}")
 
 
 async def on_any_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
