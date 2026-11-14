@@ -1166,8 +1166,10 @@ async def main_loop():
                         # DAILY PNL & PERFORMANCE DIGEST CARD (10:00 PM IST)
                         if now_ist.hour == 22 and now_ist.minute <= 2 and not daily_digest_sent_today:
                             try:
-                                from paper_trader import send_daily_paper_trading_digest
-                                await send_daily_paper_trading_digest()
+                                from config import PAPER_TRADING_ENABLED
+                                if PAPER_TRADING_ENABLED:
+                                    from paper_trader import send_daily_paper_trading_digest
+                                    await send_daily_paper_trading_digest()
                                 daily_digest_sent_today = True
                                 # MINOR #4 FIX: Persist digest sent date so restart doesn't re-send
                                 try:
