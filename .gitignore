@@ -37,6 +37,8 @@ scratch/
 signal_state.json
 signal_state_v3.json
 daily_msgs.json
+banned_users*.json
+user_subscriptions*.json
 bot.log
 
 *.zip
