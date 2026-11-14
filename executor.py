@@ -769,7 +769,7 @@ class SharkExchangeExecutor:
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
 
             exec_card = (
-                f"🦈 <b>SHARK EXCHANGE: AUTO-ORDER PLACED</b>\n\n"
+                f"🦈 <b>REAL LIVE TRADE: LIMIT ORDER PLACED (SHARK EXCHANGE)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{side}]\n"
                 f"<b>Entry Limit:</b> {format_price(clean_entry)}\n"
                 f"<b>Position Qty:</b> {total_qty}\n"
@@ -1016,6 +1016,24 @@ class SharkExchangeExecutor:
                     logger.info(f"Fill Protection: TP already exists for {clean_sym} (Skipped redundant placement).")
                 else:
                     logger.warning(f"TP1 failed for {clean_sym}: {res}")
+
+        # Send Telegram Fill Alert for Real Live Trade
+        bal_summary = await self.get_wallet_balance_summary(session)
+        bal_block = f"\n\n{bal_summary}" if bal_summary else ""
+        fill_msg = (
+            f"🟢 <b>REAL LIVE TRADE: LIMIT ORDER FILLED (SHARK EXCHANGE)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Asset:</b> {clean_sym} [{pos_direction}] 10x Isolated\n"
+            f"🎯 <b>Fill Price:</b> {format_price(fill_price)}\n"
+            f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
+            f"🛡️ <b>Stop-Loss Armed:</b> {format_price(clean_sl)}\n"
+            f"🎯 <b>Targets:</b> TP1: {format_price(clean_tp1)} (70% Book) | TP2: {format_price(target_tp2)} (30% Runner)"
+            f"{bal_block}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
+        )
+        from telegram_bot import send_text_alert as _send_alert
+        await _send_alert(fill_msg)
 
         # 3. Place TP2 Order (30%)
         if tp2_qty > 0:
@@ -1840,7 +1858,7 @@ class SharkExchangeExecutor:
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             msg = (
-                f"🎯 <b>SHARK AUTO-TRADER: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n\n"
+                f"🎯 <b>REAL LIVE TRADE: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                 f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
                 f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR) 💰\n"
@@ -1860,7 +1878,7 @@ class SharkExchangeExecutor:
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             msg = (
-                f"🚀 <b>SHARK AUTO-TRADER: TP2 RUNNER HIT — FULL WIN! 🏆</b>\n\n"
+                f"🏆 <b>REAL LIVE TRADE: TP2 RUNNER HIT — FULL WIN! 🚀</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                 f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(target_tp3)}\n"
                 f"<b>Total Trade Realized Profit:</b> +${total_pnl_usdt:.2f} USDT (+₹{total_pnl_inr:,.0f} INR) 💰🚀\n"

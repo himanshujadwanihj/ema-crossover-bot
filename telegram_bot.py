@@ -792,12 +792,14 @@ async def flush_alerts():
                 logger.error(f"Error processing squeeze breakout item for {item.get('symbol')}: {e_item}")
 
     # 5. Register signals into Virtual Paper Trading Engine (Crossovers, Retests, and Squeeze Breakouts with 4-Star confluence)
-    from paper_trader import register_paper_trade
-    for item in (BATCH_CROSSOVERS + BATCH_RETESTS + BATCH_BREAKOUTS):
-        try:
-            await register_paper_trade(item)
-        except Exception as e:
-            logger.error(f"Error registering paper trade: {e}")
+    from config import PAPER_TRADING_ENABLED
+    if PAPER_TRADING_ENABLED:
+        from paper_trader import register_paper_trade
+        for item in (BATCH_CROSSOVERS + BATCH_RETESTS + BATCH_BREAKOUTS):
+            try:
+                await register_paper_trade(item)
+            except Exception as e:
+                logger.error(f"Error registering paper trade: {e}")
 
     # Clear all queues
     BATCH_CROSSOVERS.clear()
