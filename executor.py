@@ -1192,10 +1192,9 @@ class SharkExchangeExecutor:
                 all_ops = await self.get_open_orders(session, symbol=clean_sym)
                 for o in all_ops:
                     if o.get("linkType") == "ORDER_SL" or o.get("subType") == "STOP_LOSS" or o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP"):
-                        o_id = o.get("orderId") or o.get("id") or o.get("clientOrderId")
-                        if o_id:
-                            param = {"orderId": str(o_id)} if str(o_id).isdigit() else {"clientOrderId": str(o_id)}
-                            await self.shark_delete(session, "/v1/order/delete-order", param)
+                        cid_sl = o.get("clientOrderId")
+                        if cid_sl:
+                            await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid_sl)})
                 # Retry placing new SL
                 status, res = await self.shark_post(session, "/v1/order/place-order", sl_payload)
 
@@ -1263,6 +1262,8 @@ class SharkExchangeExecutor:
             logger.error(f"Error cancelling open orders for {clean_sym}: {e}")
             return False
 
+    cancel_open_orders_for_symbol = cancel_all_open_orders
+
     async def close_position_market(self, session: aiohttp.ClientSession, symbol: str, reason: str = "TIMEOUT") -> bool:
         """
         Closes an open position at market price on Shark Exchange and cancels all attached open orders.
@@ -1298,7 +1299,7 @@ class SharkExchangeExecutor:
             st, res = await self.shark_post(session, "/v1/order/place-order", payload)
             if st in (200, 201):
                 logger.info(f"Position for {clean_sym} closed at MARKET on Shark Exchange ({reason}).")
-                await self.cancel_open_orders_for_symbol(session, clean_sym)
+                await self.cancel_all_open_orders(session, clean_sym)
                 
                 exit_p = float(pos.get("markPrice") or pos.get("lastPrice") or pos.get("entryPrice") or 0)
                 entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
@@ -1484,11 +1485,9 @@ class SharkExchangeExecutor:
                     for o_orph in ord_list:
                         if o_orph.get("placeType") == "POSITION" or o_orph.get("reduceOnly"):
                             cid = o_orph.get("clientOrderId")
-                            oid = o_orph.get("orderId") or o_orph.get("id")
-                            param = {"clientOrderId": str(cid)} if cid else ({"orderId": str(oid)} if oid else None)
-                            if param:
-                                logger.info(f"Purging orphan position-bound order for closed symbol {s_ord}: {param}")
-                                await self.shark_delete(session, "/v1/order/delete-order", param)
+                            if cid:
+                                logger.info(f"Purging orphan position-bound order for closed symbol {s_ord}: {cid}")
+                                await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
 
             for pos in positions:
                 sym = clean_contract_symbol(self.clean_sym(pos))
