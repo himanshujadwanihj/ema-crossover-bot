@@ -753,7 +753,8 @@ class SharkExchangeExecutor:
         await self.update_leverage(session, clean_sym, self.leverage)
 
         # 5. Place Entry Limit Order with Stop-Loss attached (2-TP 70/30 orders placed upon fill)
-        client_order_id = f"bot-{clean_sym}-{int(time.time()*1000)}"
+        # NOTE: Shark Exchange forbids clientOrderId in place-order payloads ('property clientOrderId should not exist')
+        # Shark generates its own clientOrderId upon placement and returns it in response.
         order_payload = {
             "placeType": "ORDER_FORM",
             "symbol": clean_sym,
@@ -762,10 +763,7 @@ class SharkExchangeExecutor:
             "price": clean_entry,
             "quantity": total_qty,
             "reduceOnly": False,
-            "stopLossPrice": clean_sl,
-            "clientOrderId": client_order_id
-            # NOTE: takeProfitPrice omitted so Shark Exchange does NOT auto-create a 100% TP bracket!
-            # TP1 (70%) and TP2 (30%) are placed upon fill with exact 70/30 quantities as reduce-only limit orders.
+            "stopLossPrice": clean_sl
         }
 
         logger.info(
@@ -777,7 +775,7 @@ class SharkExchangeExecutor:
 
         if status in (200, 201):
             order_id = data.get("orderId") or data.get("id") or "CONFIRMED"
-            actual_cid = data.get("clientOrderId") or client_order_id
+            actual_cid = data.get("clientOrderId") or ""
             logger.info(f"SHARK ORDER PLACED SUCCESSFULLY: {clean_sym} OrderID={order_id} ClientID={actual_cid}")
             self._session_active_symbols[clean_sym] = time.time()
             self._pending_entry_orders[clean_sym] = {
@@ -815,7 +813,7 @@ class SharkExchangeExecutor:
                 "status": "success",
                 "symbol": clean_sym,
                 "order_id": order_id,
-                "client_order_id": client_order_id,
+                "client_order_id": actual_cid,
                 "total_qty": total_qty,
                 "tp1_qty": tp1_qty,
                 "tp2_qty": tp2_qty,
