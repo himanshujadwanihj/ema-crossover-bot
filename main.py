@@ -1226,7 +1226,9 @@ async def main_loop():
                                     return False
 
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
-                                is_us_stock = any(x in sym_upper for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or sym_upper.endswith("B/USDT") or sym_upper.endswith("BUSDT")
+                                # NOTE: exact base-asset matching only — no substring (prevents METAM/SHIB/ARB/BNB/TRB false blocks)
+                                from executor import is_us_stock_token
+                                is_us_stock = is_us_stock_token(sym)
                                 if is_us_stock:
                                     return False
 

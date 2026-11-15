@@ -62,9 +62,16 @@ USD_INR_RATE = 102.0  # Shark Exchange native USDT/INR conversion rate
 
 
 def is_us_stock_token(symbol: str) -> bool:
-    """Identifies US stock tokens / synthetic equities (e.g. GOOGLB, SPCXB, TSLA, AAPL)."""
-    clean = clean_contract_symbol(symbol).replace("USDT", "").replace("USD", "").upper()
-    if clean in US_STOCK_TOKENS or clean.rstrip("B") in US_STOCK_TOKENS:
+    """Identifies US stock tokens / synthetic equities using exact base-asset matching.
+    Avoids substring collisions: SHIB≠SHI, ARB≠AR, METAM≠META, TRB≠TR, BNB≠BN etc.
+    """
+    clean = clean_contract_symbol(symbol).replace("USDT", "").replace("USD", "").replace("FDUSD", "").upper()
+    us_set = set(US_STOCK_TOKENS)
+    # Exact match (e.g. META, NVDA, MSTR, SPYB)
+    if clean in us_set:
+        return True
+    # B-suffix synthetic strip: NVDAB→NVDA, TSLABUSDT already cleaned to TSLAB→TSLA
+    if len(clean) > 2 and clean.endswith("B") and clean[:-1] in us_set:
         return True
     return False
 
@@ -700,7 +707,9 @@ class SharkExchangeExecutor:
 
         # 2. US Stock Tokens: AUTO-TRADING STOPPED per User Directive
         # Signals continue to be broadcast to Telegram, but automatic execution is disabled.
-        is_us_stock = any(x in symbol.upper() for x in ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "SPY", "QQQ", "COIN", "AMD", "MSTR"]) or symbol.upper().endswith("B/USDT") or symbol.upper().endswith("BUSDT")
+        # NOTE: Use exact base-asset match (not substring startswith/endswith) to prevent collision with real crypto:
+        #       e.g. METAM is a real crypto NOT Meta stock, ARB is NOT AMRB, BNB is NOT blank etc.
+        is_us_stock = is_us_stock_token(symbol)
         if is_us_stock:
             logger.info(f"AUTO-TRADE EXCLUSION: {symbol} is a US Stock token. Skipping auto-trade per user directive. Telegram alert only.")
             return {"status": "skipped", "reason": f"{symbol} is a US stock (auto-trade disabled per directive, alerts only)"}
@@ -1283,7 +1292,14 @@ class SharkExchangeExecutor:
                 return False
 
             pos_dir_raw = str(pos.get("positionType") or pos.get("positionSide") or pos.get("side") or "").upper()
-            exit_side = "SELL" if pos_dir_raw in ("LONG", "BUY") else "BUY"
+            if pos_dir_raw in ("LONG", "BUY"):
+                exit_side = "SELL"
+            elif pos_dir_raw in ("SHORT", "SELL"):
+                exit_side = "BUY"
+            else:
+                # Fallback: use quantity sign (negative = SHORT, positive = LONG)
+                raw_qty_signed = float(pos.get("quantity") or pos.get("positionAmount") or pos.get("amount") or 0)
+                exit_side = "SELL" if raw_qty_signed > 0 else "BUY"
 
             clean_qty = round_coin_qty(clean_sym, qty)
 
@@ -1914,7 +1930,6 @@ class SharkExchangeExecutor:
         Uses REAL Shark Exchange position data for accurate PnL reporting.
         """
         clean_sym = clean_contract_symbol(symbol)
-        direction = "BUY" if tp1 > entry else "SELL"
 
         # --- Fetch REAL position data from Shark Exchange ---
         real_qty        = 0.0
@@ -1928,8 +1943,19 @@ class SharkExchangeExecutor:
                 real_entry      = float(pos.get("entryPrice") or pos.get("avgPrice") or entry)
                 real_unreal_pnl = float(pos.get("unrealizedPnl") or pos.get("unrealizedProfit") or 0)
                 live_liq        = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
+                # Authoritative direction from LIVE position (not from tp1/entry comparison which is fragile)
+                pos_dir_raw = str(pos.get("positionType") or pos.get("positionSide") or pos.get("side") or pos.get("type") or "").upper()
+                if pos_dir_raw in ("LONG", "BUY"):
+                    direction = "BUY"
+                elif pos_dir_raw in ("SHORT", "SELL"):
+                    direction = "SELL"
+                else:
+                    # Fallback: quantity sign or tp1/entry comparison
+                    raw_qty_signed = float(pos.get("quantity") or pos.get("positionAmount") or 0)
+                    direction = "BUY" if raw_qty_signed > 0 else ("SELL" if raw_qty_signed < 0 else ("BUY" if tp1 > entry else "SELL"))
         except Exception as e:
             logger.warning(f"Could not fetch live position for {clean_sym}: {e}")
+            direction = "BUY" if tp1 > entry else "SELL"
 
         from state import get_latest_symbol_state, _load, _save
         state_entry = get_latest_symbol_state(clean_sym)
@@ -2020,15 +2046,15 @@ class SharkExchangeExecutor:
             )
             logger.info(f"FULL WIN {clean_sym}: TP2 runner hit. Total PnL +${total_pnl_usdt:.2f}")
 
-            # Cancel remaining open orders (SL)
+            # Cancel remaining open orders (SL) — Shark DELETE only accepts clientOrderId, never orderId
             try:
                 open_orders = await self.get_open_orders(session, symbol=clean_sym)
                 for o in open_orders:
                     cid = o.get("clientOrderId")
-                    oid = o.get("orderId") or o.get("id")
-                    param = {"clientOrderId": str(cid)} if cid else ({"orderId": str(oid)} if oid else None)
-                    if param:
-                        await self.shark_delete(session, "/v1/order/delete-order", param)
+                    if cid:
+                        await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
+                    else:
+                        logger.warning(f"TP2 cleanup: skipping order with no clientOrderId for {clean_sym}: {o.get('orderId')}")
             except Exception as ce:
                 logger.warning(f"Error cleaning up orders for {clean_sym} after TP3: {ce}")
 

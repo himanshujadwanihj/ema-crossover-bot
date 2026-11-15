@@ -57,6 +57,8 @@ US_STOCK_TOKENS: list = [
     "PLTR", "PLTRB", "CRCL", "CRCLB",
     # DIS/BA/XOM/INTC/PYPL — ambiguous short names, keep only B-suffix synthetics
     "DISB", "PYPLB", "INTCB", "BAB", "XOMB",
+    # SPY/QQQ/SOXL/SNDK — ETF tokens (no crypto equivalent at current market)
+    "SPY", "SPYB", "QQQ", "QQQB", "SOXL", "SOXLB", "SNDK", "SNDKB",
 ]
 
 # ── 15-Minute Allowed Coins ───────────────────────────────────────────────────
@@ -143,7 +145,11 @@ def to_shark_symbol(symbol: str) -> str:
         
     if clean.endswith("BUSDT") and len(clean) > 5:
         base = clean[:-5]
-        return f"{base}USDT"
+        # Only strip the synthetic 'B' suffix for known US stock tokens, never for crypto (e.g. BNB→BN, ARB→AR, SHIB→SHI)
+        us_tokens_set = {s.upper().replace("B", "", 1) if s.endswith("B") else s.upper() for s in US_STOCK_TOKENS}
+        us_tokens_set |= {s.upper() for s in US_STOCK_TOKENS}
+        if base in us_tokens_set or (base + "B") in {s.upper() for s in US_STOCK_TOKENS}:
+            return f"{base}USDT"
         
     return clean
 
@@ -229,12 +235,14 @@ def is_allowed_trading_asset(symbol: str) -> bool:
 
     # 2. US Equities / Stocks: AUTO-TRADING STOPPED per User Directive
     # Signals are still broadcast to Telegram, but automated trade execution is disabled.
-    from config import US_STOCK_TOKENS
-    us_stock_clean = {s.upper().replace("/", "").replace("_", "").replace("-", "") for s in US_STOCK_TOKENS}
-    if clean in us_stock_clean or any(clean.startswith(s) for s in [
-        "NVDA", "TSLA", "MSTR", "MSFT", "GOOGL", "QQQ", "COIN", "INTC",
-        "AMD", "AAPL", "AMZN", "META", "NFLX", "SPY", "BABA", "PLTR", "HOOD"
-    ]) or clean.endswith("BUSDT"):
+    # NOTE: Use exact base-asset matching (not substring) to avoid false positives like
+    #       SHIB→SHI, ARB→AR, BNB→BN, TRB→TR, METAM→META collision etc.
+    us_stock_set = {s.upper() for s in US_STOCK_TOKENS}
+    base = clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
+    if base in us_stock_set:
+        return False
+    # Also block B-suffix synthetics (e.g. NVDABUSDT → base=NVDAB → base[:-1]=NVDA in set)
+    if len(base) > 3 and base.endswith("B") and base[:-1] in us_stock_set:
         return False
 
     # 3. Top 25 Crypto Coins by 24h Volume
