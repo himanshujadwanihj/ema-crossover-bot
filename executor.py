@@ -567,15 +567,11 @@ class SharkExchangeExecutor:
         pending_entry_symbols = set()
         for o in open_orders:
             is_reduce_only = o.get("reduceOnly", False)
-            order_type     = o.get("type", "").upper()
-            place_type     = o.get("placeType", "")
-            link_type      = o.get("linkType", "")
-            sub_type       = o.get("subType", "")
-            if is_reduce_only:
-                continue
-            if place_type == "POSITION":
-                continue
-            if link_type in ("ORDER_SL", "ORDER_TP") or sub_type in ("STOP_LOSS", "TAKE_PROFIT"):
+            order_type     = str(o.get("type") or "").upper()
+            place_type     = str(o.get("placeType") or "").upper()
+            sub_type       = str(o.get("subType") or "").upper()
+            # Position-bound bracket orders (SL/TP) should not count as entry orders
+            if is_reduce_only or place_type == "POSITION" or sub_type in ("STOP_LOSS", "TAKE_PROFIT") or order_type in ("STOP_MARKET", "STOP_LIMIT", "STOP"):
                 continue
             if order_type == "LIMIT" and place_type in ("ORDER_FORM", ""):
                 sym_raw = to_shark_symbol(o.get("symbol") or o.get("contractPair") or "")
@@ -1145,9 +1141,15 @@ class SharkExchangeExecutor:
             open_orders = await self.get_open_orders(session, symbol=clean_sym)
             sl_orders = [
                 o for o in open_orders
-                if o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
-                or o.get("linkType") == "ORDER_SL"
-                or o.get("subType") == "STOP_LOSS"
+                if (
+                    o.get("placeType") == "POSITION"
+                    or o.get("reduceOnly")
+                    or o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                    or o.get("subType") == "STOP_LOSS"
+                ) and not (
+                    str(o.get("placeType") or "").upper() == "ORDER_FORM"
+                    and str(o.get("type") or "").upper() == "LIMIT"
+                )
             ]
 
             # 2. Get active position for positionId and actual qty
@@ -1378,13 +1380,15 @@ class SharkExchangeExecutor:
 
             now_utc = datetime.now(timezone.utc)
             for o in all_orders:
-                # Skip POSITION bracket orders (SL/TP)
-                place_type = o.get("placeType", "")
+                # Skip POSITION bracket orders (SL/TP) — we ONLY sweep un-filled ENTRY orders
+                place_type = str(o.get("placeType") or "").upper()
                 is_reduce_only = o.get("reduceOnly", False)
-                sub_type = o.get("subType", "")
-                link_type = o.get("linkType", "")
+                sub_type = str(o.get("subType") or "").upper()
+                order_type = str(o.get("type") or "").upper()
 
-                if place_type == "POSITION" or is_reduce_only or sub_type in ("STOP_LOSS", "TAKE_PROFIT") or link_type in ("ORDER_SL", "ORDER_TP"):
+                # NOTE: Never check linkType in ('ORDER_SL', 'ORDER_TP') here! Primary ENTRY limit orders submitted
+                # with an attached SL carry linkType='ORDER_SL'. Checking linkType caused sweeper to skip all entry orders!
+                if place_type == "POSITION" or is_reduce_only or sub_type in ("STOP_LOSS", "TAKE_PROFIT") or order_type in ("STOP_MARKET", "STOP_LIMIT", "STOP"):
                     continue
 
                 # Parse order creation time (handles numeric ms/s timestamps, ISO strings, and state fallback)
@@ -1586,19 +1590,24 @@ class SharkExchangeExecutor:
                 # Count TP orders (Native position TP brackets & reduceOnly position limit orders)
                 tp_orders = [
                     o for o in sym_orders
-                    if o.get("linkType") == "ORDER_TP"
-                    or o.get("subType") == "TAKE_PROFIT"
-                    or o.get("takeProfitPrice")
-                    or (o.get("type", "").upper() == "LIMIT" and o.get("placeType") == "POSITION")
+                    if (
+                        (o.get("type", "").upper() == "LIMIT" and o.get("placeType") == "POSITION")
+                        or o.get("subType") == "TAKE_PROFIT"
+                        or (o.get("reduceOnly") and o.get("type", "").upper() == "LIMIT")
+                    ) and str(o.get("placeType") or "").upper() != "ORDER_FORM"
                 ]
 
-                # Count SL orders
+                # Count SL orders (Native position SL brackets)
                 sl_orders = [
                     o for o in sym_orders
-                    if o.get("linkType") == "ORDER_SL"
-                    or o.get("subType") == "STOP_LOSS"
-                    or o.get("stopLossPrice")
-                    or o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                    if (
+                        o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                        or o.get("subType") == "STOP_LOSS"
+                        or (o.get("placeType") == "POSITION" and o.get("stopLossPrice"))
+                    ) and not (
+                        str(o.get("placeType") or "").upper() == "ORDER_FORM"
+                        and str(o.get("type") or "").upper() == "LIMIT"
+                    )
                 ]
                 tp_qty_field = float(pos.get("takeProfitOrdersQty") or 0)
                 current_tp_count = len(tp_orders)
