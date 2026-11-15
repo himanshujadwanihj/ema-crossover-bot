@@ -1654,6 +1654,17 @@ class SharkExchangeExecutor:
                                 if state_entry:
                                     state_entry["be_hit_time_shield"] = True
                                     state_entry["cur_sl"] = entry_price
+                                    try:
+                                        from state import _load, _save
+                                        st_map = _load()
+                                        for k_st in list(st_map.keys()):
+                                            if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                                st_map[k_st]["be_hit_time_shield"] = True
+                                                st_map[k_st]["cur_sl"] = entry_price
+                                                _save(st_map)
+                                                break
+                                    except Exception as e_save:
+                                        logger.debug(f"Failed to save state on 2h shield: {e_save}")
                                 shield_msg = (
                                     f"🛡️ <b>2-HOUR TIME SHIELD ACTIVATED — SL MOVED TO BREAKEVEN</b>\n\n"
                                     f"<b>Asset:</b> {sym} [{direction}]\n"
