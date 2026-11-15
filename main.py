@@ -1230,6 +1230,11 @@ async def main_loop():
                                 if is_us_stock:
                                     return False
 
+                                # STRICT USER DIRECTIVE: Execute ONLY assets in approved execution list (Top 25 volume crypto & commodities)
+                                from config import is_allowed_trading_asset
+                                if not is_allowed_trading_asset(sym):
+                                    return False
+
                                 stars = c.get("aligned_count", 0)
                                 # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
                                 if stars < 3:
