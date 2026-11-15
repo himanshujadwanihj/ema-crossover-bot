@@ -290,7 +290,10 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             sym = executor.clean_sym(p)
             pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
             sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
-            qty = abs(float(p.get("positionAmount") or p.get("quantity") or p.get("size") or 0))
+            # NOTE: On Shark Exchange, 'quantity' is the genuine coin/contract quantity (e.g. 0.5 TAO, 98 XRP).
+            # 'positionAmount' and 'positionSize' represent the notional USDT value (~$94 USDT).
+            # Always prioritize 'quantity' first to avoid multiplying price diff by notional USDT!
+            qty = abs(float(p.get("quantity") or p.get("positionAmount") or p.get("size") or 0))
             pos_size = float(p.get("positionSize") or 0)
 
             # Determine Entry Price accurately (fallback to positionSize / qty or state)

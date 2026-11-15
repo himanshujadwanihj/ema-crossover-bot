@@ -516,7 +516,7 @@ class SharkExchangeExecutor:
                     if not isinstance(p, dict): continue
                     # Parse all possible position quantity keys used by Shark Exchange
                     qty = 0.0
-                    for k in ("positionAmount", "quantity", "amount", "holdQty", "size", "volume", "openQty", "posQty"):
+                    for k in ("quantity", "holdQty", "positionAmount", "amount", "size", "volume", "openQty", "posQty"):
                         val = p.get(k)
                         if val is not None:
                             try:
