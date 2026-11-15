@@ -936,27 +936,104 @@ async def main_loop():
                                     open_orders = await executor.get_open_orders(session)
 
                                     pos_lines = []
+                                    from web_dashboard import fetch_live_market_price
                                     for p in shark_pos:
                                         p_sym = executor.clean_sym(p)
-                                        p_side = p.get("side", p.get("direction", p.get("positionType", "LONG")))
-                                        p_sz = p.get("positionAmount", p.get("quantity", p.get("size", 0)))
-                                        p_entry = float(p.get("entryPrice", 0) or 0)
-                                        p_mark = float(p.get("markPrice", 0) or p.get("lastPrice", 0) or p_entry)
-                                        p_upnl = float(p.get("unrealizedPnl", 0) or p.get("unrealizedProfit", 0) or 0)
-                                        p_upnl_inr = p_upnl * executor.usd_inr_rate
-                                        p_badge = f"+₹{p_upnl_inr:,.2f}" if p_upnl_inr >= 0 else f"-₹{abs(p_upnl_inr):,.2f}"
-                                        pos_lines.append(f"  • <b>{p_sym}</b> [{p_side}] Qty: {p_sz} | Entry: ${p_entry} | Floating: <b>{p_badge}</b>")
+                                        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+                                        p_side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+                                        p_sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+                                        p_entry = float(p.get("entryPrice", 0) or p.get("avgPrice", 0) or 0)
+                                        
+                                        # Live sub-second market price with multi-exchange fallback
+                                        p_mark = await fetch_live_market_price(session, p_sym)
+                                        if p_mark <= 0:
+                                            p_mark = float(p.get("markPrice", 0) or p.get("lastPrice", 0) or p_entry)
 
-                                    pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
+                                        # Real-time Mathematical Floating PnL
+                                        if p_side == "SHORT":
+                                          p_upnl_usd = (
+                                              (p_entry - p_mark) * p_sz
+                                              if p_entry > 0
+                                              else 0.0
+                                          )
+                                          p_pct = (
+                                              (
+                                                  (p_entry - p_mark)
+                                                  / p_entry
+                                                  * 100.0
+                                                  * 10
+                                              )
+                                              if p_entry > 0
+                                              else 0.0
+                                          )
+                                        else:
+                                          p_upnl_usd = (
+                                              (p_mark - p_entry) * p_sz
+                                              if p_entry > 0
+                                              else 0.0
+                                          )
+                                          p_pct = (
+                                              (
+                                                  (p_mark - p_entry)
+                                                  / p_entry
+                                                  * 100.0
+                                                  * 10
+                                              )
+                                              if p_entry > 0
+                                              else 0.0
+                                          )
+
+                                        p_upnl_inr = (
+                                            p_upnl_usd * executor.usd_inr_rate
+                                        )
+                                        pnl_sign = (
+                                            "+" if p_upnl_inr >= 0 else ""
+                                        )
+                                        pct_sign = "+" if p_pct >= 0 else ""
+                                        p_entry_disp = format_price(
+                                            p_entry, p_sym
+                                        )
+                                        p_mark_disp = format_price(
+                                            p_mark, p_sym
+                                        )
+                                        pos_lines.append(
+                                            f"  • <b>{p_sym}</b> [{p_side}] Qty:"
+                                            f" {p_sz} | Entry: {p_entry_disp} |"
+                                            f" Mark: {p_mark_disp} | Floating:"
+                                            f" <b>{pnl_sign}₹{p_upnl_inr:,.2f}</b>"
+                                            f" ({pct_sign}{p_pct:.2f}%)"
+                                        )
+
+                                    pos_str = (
+                                        "\n".join(pos_lines)
+                                        if pos_lines
+                                        else (
+                                            "  • <i>No open exchange positions"
+                                            " currently.</i>"
+                                        )
+                                    )
 
                                     ord_lines = []
                                     for o in open_orders:
-                                        if not o.get("reduceOnly") and o.get("placeType") != "POSITION":
-                                            o_sym = executor.clean_sym(o)
-                                            o_side = str(o.get("side", "BUY")).upper()
-                                            o_px = o.get("price", 0)
-                                            o_qty = o.get("quantity", 0)
-                                            ord_lines.append(f"  • <b>{o_sym}</b> [{o_side}] Limit @ ${o_px} (Qty: {o_qty})")
+                                      if (
+                                          not o.get("reduceOnly")
+                                          and o.get("placeType") != "POSITION"
+                                      ):
+                                        o_sym = executor.clean_sym(o)
+                                        o_side = str(
+                                            o.get("side", "BUY")
+                                        ).upper()
+                                        o_px = float(o.get("price", 0) or 0)
+                                        o_qty = float(
+                                            o.get("orderAmount")
+                                            or o.get("quantity")
+                                            or o.get("origQty")
+                                            or 0
+                                        )
+                                        ord_lines.append(
+                                            f"  • <b>{o_sym}</b> [{o_side}]"
+                                            f" Limit @ {format_price(o_px, o_sym)} (Qty: {o_qty})"
+                                        )
 
                                     ord_str = "\n".join(ord_lines[:8]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
 

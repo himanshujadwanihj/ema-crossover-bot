@@ -1010,6 +1010,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 shark_bal = await executor.get_wallet_balance_summary(s)
                 shark_pos = await executor.get_open_positions(s)
                 open_orders = await executor.get_open_orders(s)
+                from web_dashboard import fetch_live_market_price
                 pos_lines = []
                 for p in shark_pos:
                     sym = executor.clean_sym(p)
@@ -1017,23 +1018,28 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
                     sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
                     entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-                    mark_p = float(p.get("markPrice") or entry_p)
+                    mark_p = await fetch_live_market_price(s, sym)
+                    if mark_p <= 0:
+                        mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
                     if side == "SHORT":
                         upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+                        pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
                     else:
                         upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+                        pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
                     upnl_inr = upnl_usd * 102.0
                     pnl_sign = "+" if upnl_inr >= 0 else ""
-                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating PnL: {pnl_sign}₹{upnl_inr:,.2f} / {pnl_sign}${upnl_usd:.2f})")
+                    pct_sign = "+" if pct >= 0 else ""
+                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%))")
                 pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
 
                 ord_lines = []
                 for o in open_orders:
-                    if not o.get("reduceOnly", False):
+                    if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
                         osym = executor.clean_sym(o)
                         oside = o.get("side", "BUY")
                         opx = o.get("price", 0)
-                        oqty = o.get("quantity", 0)
+                        oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
                         ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ {opx} (Qty: {oqty})")
                 ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
 
@@ -1065,6 +1071,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     shark_bal = await executor.get_wallet_balance_summary(s)
                     shark_pos = await executor.get_open_positions(s)
                     if shark_bal:
+                        from web_dashboard import fetch_live_market_price
                         pos_lines = []
                         for p in shark_pos:
                             sym = executor.clean_sym(p)
@@ -1072,14 +1079,19 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
                             sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
                             entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-                            mark_p = float(p.get("markPrice") or entry_p)
+                            mark_p = await fetch_live_market_price(s, sym)
+                            if mark_p <= 0:
+                                mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
                             if side == "SHORT":
                                 upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+                                pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
                             else:
                                 upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+                                pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
                             upnl_inr = upnl_usd * 102.0
                             pnl_sign = "+" if upnl_inr >= 0 else ""
-                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating PnL: {pnl_sign}₹{upnl_inr:,.2f} / {pnl_sign}${upnl_usd:.2f})")
+                            pct_sign = "+" if pct >= 0 else ""
+                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating: {pnl_sign}₹{upnl_inr:,.2f} ({pct_sign}{pct:.2f}%))")
                         pos_str = "\n".join(pos_lines) if pos_lines else "  • No open exchange positions."
                         shark_header = (
                             f"🦈 <b>SHARK EXCHANGE LIVE AUTO-TRADING</b>\n"
