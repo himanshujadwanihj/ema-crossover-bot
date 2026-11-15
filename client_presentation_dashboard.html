@@ -199,8 +199,9 @@
             <span id="live-active-count">0</span>
             <span class="text-xs font-normal text-slate-400">In-Trade</span>
           </div>
-          <div class="text-xs text-slate-400 mt-2">
-            Resting Limits: <span class="text-white font-semibold" id="live-resting-count">0 Waiting</span>
+          <div class="text-xs font-mono font-bold mt-2 flex items-center justify-between">
+            <span class="text-slate-400 font-sans font-normal">Floating PnL:</span>
+            <span id="live-floating-pnl" class="text-slate-300">₹0.00</span>
           </div>
         </div>
 
@@ -1709,6 +1710,14 @@
 
       const actBadge = document.getElementById('live-active-badge');
       if (actBadge) actBadge.innerText = fun.active_in_trade_count || 0;
+
+      const floatEl = document.getElementById('live-floating-pnl');
+      if (floatEl) {
+        const uPnl = Number(wal.unrealized_pnl_inr || 0);
+        const isP = uPnl >= 0;
+        floatEl.className = 'font-mono font-bold ' + (isP ? 'text-emerald-400' : 'text-rose-400');
+        floatEl.innerText = (isP ? '+' : '') + '₹' + uPnl.toLocaleString('en-IN', {minimumFractionDigits: 2});
+      }
 
       const restEl = document.getElementById('live-resting-count');
       if (restEl) restEl.innerText = (fun.resting_limits_waiting_count || 0) + ' Waiting';

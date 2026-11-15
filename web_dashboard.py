@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timezone
 import zoneinfo
+import aiohttp
 from aiohttp import web
 
 logger = logging.getLogger("web_dashboard")
@@ -189,6 +190,70 @@ import time
 _last_real_stats_cache = {}
 _last_real_stats_time = 0
 
+async def fetch_live_market_price(session, symbol: str) -> float:
+    """Fetches real-time market price across multiple exchanges (Bybit, Binance Vision, Gate, MEXC) with rapid fallback."""
+    clean = symbol.replace("/", "").replace(":", "").upper()
+    if "XAU" in clean:
+        clean = "XAUTUSDT"
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    timeout = aiohttp.ClientTimeout(total=2.5)
+
+    # 1. Bybit Linear (Fastest, zero cloud datacenter IP blocks)
+    try:
+        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={clean}"
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                items = data.get("result", {}).get("list", [])
+                if items:
+                    px = float(items[0].get("lastPrice") or items[0].get("markPrice") or 0)
+                    if px > 0:
+                        return px
+    except Exception:
+        pass
+
+    # 2. Binance Vision API (with User-Agent)
+    try:
+        url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={clean}"
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                px = float(data.get("price") or 0)
+                if px > 0:
+                    return px
+    except Exception:
+        pass
+
+    # 3. MEXC Futures API
+    try:
+        base_clean = clean[:-4] + "_USDT" if clean.endswith("USDT") else clean
+        url = f"https://contract.mexc.com/api/v1/contract/ticker?symbol={base_clean}"
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                px = float(data.get("data", {}).get("lastPrice") or 0)
+                if px > 0:
+                    return px
+    except Exception:
+        pass
+
+    # 4. Gate.io Futures API
+    try:
+        base_clean = clean[:-4] + "_USDT" if clean.endswith("USDT") else clean
+        url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={base_clean}"
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    px = float(data[0].get("last") or data[0].get("mark_price") or 0)
+                    if px > 0:
+                        return px
+    except Exception:
+        pass
+
+    return 0.0
+
 async def get_real_live_dashboard_payload_async(session) -> dict:
     """Extracts 100% genuine real-time data from Shark Exchange Native API."""
     global _last_real_stats_cache, _last_real_stats_time
@@ -236,22 +301,10 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             tp1_p = float(st_sym.get("tp1") or 0)
             tp2_p = float(st_sym.get("tp2") or st_sym.get("tp3") or 0)
 
-            # Real-time Live Price via Binance Public API
-            mark_p = float(p.get("markPrice") or p.get("lastPrice") or 0)
-            try:
-                sym_clean = sym.replace("/", "")
-                if "XAU" in sym_clean:
-                    sym_clean = "XAUTUSDT"
-                url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={sym_clean}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as p_resp:
-                    if p_resp.status == 200:
-                        p_data = await p_resp.json()
-                        mark_p = float(p_data.get("price") or mark_p)
-            except Exception as e_px:
-                logger.debug(f"Could not fetch real-time live price for {sym}: {e_px}")
-
+            # Sub-second Real-Time Mark Price with Multi-Exchange Fallback
+            mark_p = await fetch_live_market_price(session, sym)
             if mark_p <= 0:
-                mark_p = entry_p
+                mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
 
             # Calculate Exact Real-Time Unrealized PnL (USD & INR)
             if sig == "SELL":
