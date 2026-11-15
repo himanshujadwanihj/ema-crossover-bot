@@ -1521,8 +1521,12 @@ class SharkExchangeExecutor:
                             pos_dir = str(matched.get("positionType") or "SHORT").upper()
                             entry_p = float(matched.get("entryPrice") or 0.0)
                             qty = abs(float(matched.get("quantity") or matched.get("positionAmount") or 0.0))
-                            is_win = pnl_inr > 0
-                            status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>" if is_win else ("🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC)</b>" if pnl_inr == 0 else "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>")
+                            if abs(pnl_inr) <= 15.0:
+                                status_txt = "🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC) 🤝</b>"
+                            elif pnl_inr > 15.0:
+                                status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
+                            else:
+                                status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
                             sign = "+" if pnl_inr >= 0 else ""
                             alert_msg = (
                                 f"{status_txt}\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

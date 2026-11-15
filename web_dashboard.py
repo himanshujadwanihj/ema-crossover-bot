@@ -402,6 +402,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         formatted_closed = []
         c_wins = 0
         c_losses = 0
+        c_be = 0
         gross_wins_inr = 0.0
         gross_losses_inr = 0.0
         if st_cl == 200 and isinstance(closed_raw, list):
@@ -417,16 +418,18 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 qty_c = abs(float(cp.get("quantity") or cp.get("positionAmount") or 0.0))
                 up_at = str(cp.get("updatedAt") or "")
 
-                if pnl_inr > 0:
+                # User explicit directive: Trades exiting near cost-to-cost / fee buffer (<= ₹15 INR) are BREAKEVEN (BE / CTC)
+                if abs(pnl_inr) <= 15.0:
+                    c_be += 1
+                    status_c = "BREAKEVEN (CTC)"
+                elif pnl_inr > 15.0:
                     c_wins += 1
                     gross_wins_inr += pnl_inr
                     status_c = "TAKE PROFIT (WIN)"
-                elif pnl_inr < 0:
+                else:
                     c_losses += 1
                     gross_losses_inr += abs(pnl_inr)
                     status_c = "STOP LOSS HIT"
-                else:
-                    status_c = "BREAKEVEN (CTC)"
 
                 formatted_closed.append({
                     "symbol": sym_c,
@@ -439,8 +442,9 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                     "closed_at": up_at
                 })
 
-        total_exec = c_wins + c_losses
-        win_rate = (c_wins / total_exec * 100.0) if total_exec > 0 else 0.0
+        total_exec = c_wins + c_losses + c_be
+        decisive_exec = c_wins + c_losses
+        win_rate = (c_wins / decisive_exec * 100.0) if decisive_exec > 0 else 0.0
         profit_factor = round(gross_wins_inr / gross_losses_inr, 2) if gross_losses_inr > 0 else (99.0 if gross_wins_inr > 0 else 0.0)
 
         # Calculate live real-time equity
@@ -465,6 +469,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             "scorecard": {
                 "wins": c_wins,
                 "losses": c_losses,
+                "breakevens": c_be,
                 "total_executed": total_exec,
                 "win_rate_pct": round(win_rate, 1),
                 "gross_wins_inr": round(gross_wins_inr, 2),

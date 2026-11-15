@@ -885,8 +885,10 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         resting_entries = [o for o in open_orders if not o.get("reduceOnly") and o.get("placeType") != "POSITION"]
 
-        wins = sum(1 for p in today_closed if float(p.get("realizedProfitInMarginAsset") or 0) > 0)
-        losses = sum(1 for p in today_closed if float(p.get("realizedProfitInMarginAsset") or 0) < 0)
+        # User Explicit Directive: Trades exiting <= ₹15 INR are classified as BREAKEVEN (BE / CTC)
+        wins = sum(1 for p in today_closed if float(p.get("realizedProfitInMarginAsset") or 0) > 15.0)
+        losses = sum(1 for p in today_closed if float(p.get("realizedProfitInMarginAsset") or 0) < -15.0)
+        breakevens = sum(1 for p in today_closed if abs(float(p.get("realizedProfitInMarginAsset") or 0)) <= 15.0)
         realized_pnl = sum(float(p.get("realizedProfitInMarginAsset") or 0) for p in today_closed)
         pnl_sign = "+" if realized_pnl >= 0 else ""
 
@@ -897,7 +899,12 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sig_c = "SHORT" if pos_t in ("SHORT", "SELL") else "LONG"
             pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
             sign = "+" if pnl_inr >= 0 else ""
-            status_txt = "TP WIN" if pnl_inr > 0 else ("SL HIT" if pnl_inr < 0 else "CTC")
+            if abs(pnl_inr) <= 15.0:
+                status_txt = "BREAKEVEN (CTC)"
+            elif pnl_inr > 15.0:
+                status_txt = "TP WIN"
+            else:
+                status_txt = "SL HIT"
             closed_lines.append(f"  • {sym_c} [{sig_c}] — <b>{status_txt}</b>: {sign}₹{pnl_inr:,.2f}")
         closed_str = "\n".join(closed_lines) if closed_lines else "  • <i>No closed trades today.</i>"
 
@@ -908,7 +915,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💼 <b>Status:</b> 🟢 <b>Real Live Trading Active (Shark Exchange)</b>\n"
             f"{shark_bal}\n\n"
             f"📡 <b>Signals Sent Today:</b> {total_signals}\n"
-            f"⚡ <b>Executed Trades Today:</b> {len(today_closed)} ({wins}W - {losses}L)\n"
+            f"⚡ <b>Executed Trades Today:</b> {len(today_closed)} ({wins}W - {losses}L - {breakevens}BE)\n"
             f"💰 <b>Realized PnL Today:</b> <b>{pnl_sign}₹{realized_pnl:,.2f} INR</b>\n\n"
             f"📜 <b>Closed Trades Summary:</b>\n{closed_str}\n\n"
             f"🟢 <b>Active Broker Positions:</b> {len(shark_pos)}\n"

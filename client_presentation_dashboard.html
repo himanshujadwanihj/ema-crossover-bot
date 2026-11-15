@@ -1679,7 +1679,11 @@
 
       const scEl = document.getElementById('live-score-counts');
       if (scEl) {
-        scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
+        if (sc.breakevens !== undefined && sc.breakevens > 0) {
+          scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L - ' + sc.breakevens + 'BE';
+        } else {
+          scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
+        }
       }
 
       const totEl = document.getElementById('live-total-exec');
@@ -1783,13 +1787,16 @@
           execTbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-500 italic">No completed trades logged yet in this session.</td></tr>';
         } else {
           execTbody.innerHTML = trades.map(t => {
-            const isWin = (t.pnl_inr || 0) > 0;
+            const isBE = (t.status || '').includes('BREAKEVEN') || (t.status || '').includes('CTC');
+            const isWin = !isBE && (t.pnl_inr || 0) > 0;
+            const pnlColor = isBE ? 'text-amber-400' : (isWin ? 'text-emerald-400' : 'text-rose-400');
+            const statusBadge = isBE ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : (isWin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400');
             return `
               <tr class="hover:bg-slate-800/40">
                 <td class="py-2.5 px-2 font-bold text-white">${t.symbol}</td>
                 <td class="py-2.5 px-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${t.signal === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${t.signal}</span></td>
-                <td class="py-2.5 px-2 text-slate-300">${t.status}</td>
-                <td class="py-2.5 px-2 font-mono font-bold text-right ${isWin ? 'text-emerald-400' : 'text-rose-400'}">${isWin ? '+' : ''}₹${Number(t.pnl_inr || 0).toLocaleString('en-IN', {minimumFractionDigits: 2})}</td>
+                <td class="py-2.5 px-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${statusBadge}">${t.status}</span></td>
+                <td class="py-2.5 px-2 font-mono font-bold text-right ${pnlColor}">${(t.pnl_inr || 0) > 0 ? '+' : ''}₹${Number(t.pnl_inr || 0).toLocaleString('en-IN', {minimumFractionDigits: 2})}</td>
               </tr>
             `;
           }).join('');
