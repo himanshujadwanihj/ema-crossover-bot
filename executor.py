@@ -184,9 +184,11 @@ def enforce_sl_above_liquidation(
         max_adverse_pct = max(0.02, (1.0 / lev) - 0.025)
 
         if is_buy:
-            # If SL is trailed into profit, ensure strictly above entry
+            # If SL is trailed into profit or breakeven, ensure strictly above or at entry
             if is_trailed:
-                return round_price(symbol, max(sl, entry * 1.002))
+                if liq_price > 0:
+                    sl = max(sl, liq_price * 1.025)
+                return round_price(symbol, max(sl, entry))
 
             # For BUY initial SL: SL must be strictly ABOVE liquidation price and strictly BELOW entry!
             safe_floor_from_liq = liq_price * 1.025
@@ -203,9 +205,11 @@ def enforce_sl_above_liquidation(
             if sl >= entry:
                 sl = entry * 0.990
         else:
-            # If SL is trailed into profit for SELL, ensure strictly below entry
+            # If SL is trailed into profit or breakeven for SELL, ensure strictly below or at entry
             if is_trailed:
-                return round_price(symbol, min(sl, entry * 0.998))
+                if liq_price > 0:
+                    sl = min(sl, liq_price * 0.975)
+                return round_price(symbol, min(sl, entry))
 
             # For SELL initial SL: SL must be strictly BELOW liquidation price and strictly ABOVE entry!
             safe_ceil_from_liq = liq_price * 0.975
@@ -1151,7 +1155,7 @@ class SharkExchangeExecutor:
             # Enforce Liquidation Shield on modified SL
             live_liq = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
             entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or clean_new_sl)
-            clean_new_sl = enforce_sl_above_liquidation(clean_sym, entry_p, clean_new_sl, direction, self.leverage, live_liq)
+            clean_new_sl = enforce_sl_above_liquidation(clean_sym, entry_p, clean_new_sl, direction, self.leverage, live_liq, is_trailed=True)
             clean_qty  = round_coin_qty(clean_sym, actual_qty, price=clean_new_sl)
 
             # ── KEY FIX: Cancel OLD SL FIRST by orderId or clientOrderId to avoid error 3023 ──
@@ -1492,6 +1496,17 @@ class SharkExchangeExecutor:
 
                 entry_price = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
                 pos_qty     = float(pos.get("quantity")   or pos.get("positionAmount") or pos.get("amount") or 0)
+
+                # Load state entry early for fallback entry price and metadata
+                state_entry = get_latest_symbol_state(sym)
+
+                if entry_price <= 0:
+                    pos_sz = abs(float(pos.get("positionSize") or pos.get("size") or 0))
+                    pos_amt = abs(pos_qty)
+                    if pos_sz > 0 and pos_amt > 0:
+                        entry_price = round(pos_sz / pos_amt, 6)
+                    elif state_entry:
+                        entry_price = float(state_entry.get("entry_price") or state_entry.get("price") or 0)
                 
                 # Authoritative direction detection: Exchange position fields > Qty sign > State fallback
                 pos_dir_raw = str(pos.get("positionType") or pos.get("positionSide") or pos.get("side") or pos.get("type") or "").upper()
@@ -1504,7 +1519,7 @@ class SharkExchangeExecutor:
                 elif pos_qty > 0:
                     direction = "BUY"
                 else:
-                    st_heal = get_latest_symbol_state(sym)
+                    st_heal = state_entry or get_latest_symbol_state(sym)
                     st_sig = str(st_heal.get("direction") or st_heal.get("signal") or "").upper()
                     direction = "SELL" if st_sig in ("SHORT", "SELL") else "BUY"
 
@@ -1571,8 +1586,75 @@ class SharkExchangeExecutor:
                 # Always define pos_qty_abs here to avoid UnboundLocalError in SL/TP guard sections
                 pos_qty_abs = abs(pos_qty)
 
-                # Load state entry for current symbol
-                state_entry = get_latest_symbol_state(sym)
+                # 3. 2-Hour Time Shield (Cost-to-Cost SL ONLY if in profit; KEEP SL INTACT if in loss)
+                tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
+                if pos_time and not tp1_already_hit:
+                    elapsed_hours = (now_utc - pos_time).total_seconds() / 3600.0
+                    if elapsed_hours >= 2.0:
+                        already_shielded = False
+                        for o_sl in sl_orders:
+                            sl_p = float(o_sl.get("stopLossPrice") or o_sl.get("price") or o_sl.get("triggerPrice") or 0)
+                            if sl_p > 0:
+                                if direction == "BUY" and sl_p >= entry_price:
+                                    already_shielded = True
+                                elif direction == "SELL" and sl_p <= entry_price:
+                                    already_shielded = True
+
+                        # Fetch live market price to assess profit vs loss
+                        mark_p = 0.0
+                        for o_m in sym_orders:
+                            mp_cand = float(o_m.get("curMarketPrice") or 0)
+                            if mp_cand > 0:
+                                mark_p = mp_cand
+                                break
+                        if mark_p <= 0:
+                            try:
+                                from web_dashboard import fetch_live_market_price
+                                mark_p = await fetch_live_market_price(session, sym)
+                            except Exception:
+                                pass
+                        if mark_p <= 0:
+                            mark_p = float(pos.get("markPrice") or pos.get("lastPrice") or entry_price)
+
+                        # Determine if trade is currently in profit or in loss/drawdown
+                        is_in_profit = (direction == "BUY" and mark_p > entry_price) or (direction == "SELL" and mark_p < entry_price)
+                        is_in_loss = (direction == "BUY" and mark_p <= entry_price) or (direction == "SELL" and mark_p >= entry_price)
+
+                        if is_in_loss:
+                            # CRITICAL SAFETY RULE: If in loss after 2h, KEEP SL INTACT!
+                            # Do NOT choke the position or attempt an instant-trigger SL at entry.
+                            logger.info(
+                                f"⏳ 2-HOUR SHIELD MONITOR: {sym} [{direction}] active for {elapsed_hours:.1f}h "
+                                f"but currently in drawdown (Mark: {mark_p}, Entry: {entry_price}). "
+                                f"Keeping structural SL intact to allow position room to breathe."
+                            )
+                        elif is_in_profit and not already_shielded:
+                            logger.info(
+                                f"🛡️ 2-HOUR TIME SHIELD TRIGGERED for {sym} [{direction}]: active {elapsed_hours:.1f}h and in profit "
+                                f"(Mark: {mark_p}, Entry: {entry_price}). Moving SL to Cost-to-Cost ({entry_price})."
+                            )
+                            modified = await self.modify_stop_loss(session, sym, direction, entry_price, pos_qty_abs)
+                            if modified:
+                                if state_entry:
+                                    state_entry["be_hit_time_shield"] = True
+                                    state_entry["cur_sl"] = entry_price
+                                shield_msg = (
+                                    f"🛡️ <b>2-HOUR TIME SHIELD ACTIVATED — SL MOVED TO BREAKEVEN</b>\n\n"
+                                    f"<b>Asset:</b> {sym} [{direction}]\n"
+                                    f"<b>Entry Price:</b> <code>{entry_price}</code>\n"
+                                    f"<b>Current Price:</b> <code>{mark_p}</code> (In Profit)\n"
+                                    f"<b>New Stop-Loss:</b> <code>{entry_price}</code> (Cost-to-Cost)\n"
+                                    f"<b>Active Duration:</b> {elapsed_hours:.1f} hours\n\n"
+                                    f"⏱️ <i>Trade active >2 hours and in profit without reaching TP1. Stop-Loss auto-shifted to Entry Price (100% Risk-Free).</i>"
+                                )
+                                try:
+                                    await send_text_to_chat(shield_msg, chat_id=TELEGRAM_CHAT_ID)
+                                except Exception as e_tg:
+                                    logger.error(f"Failed to send 2-Hour Time Shield alert: {e_tg}")
+
+                # Ensure state entry is loaded
+                if not state_entry:
+                    state_entry = get_latest_symbol_state(sym)
 
                 # Seed cache on first run
                 is_first_run = sym not in self._tp_order_count_cache

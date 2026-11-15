@@ -277,6 +277,12 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         roi_pct = round(((raw_total - initial_cap) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
 
         positions = await executor.get_open_positions(session)
+        all_orders = await executor.get_open_orders(session)
+        orders_by_sym = {}
+        for o in all_orders:
+            s_clean = executor.clean_sym(o)
+            orders_by_sym.setdefault(s_clean, []).append(o)
+
         formatted_active = []
         total_live_unrealized_inr = 0.0
 
@@ -300,6 +306,33 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             sl_p = float(st_sym.get("cur_sl") or st_sym.get("initial_sl") or 0)
             tp1_p = float(st_sym.get("tp1") or 0)
             tp2_p = float(st_sym.get("tp2") or st_sym.get("tp3") or 0)
+
+            # Extract live SL and TPs directly from Exchange Orders
+            sym_orders = orders_by_sym.get(sym, [])
+            found_tps = []
+            for o_ord in sym_orders:
+                typ_up = str(o_ord.get("type") or "").upper()
+                if typ_up in ("STOP_MARKET", "STOP_LIMIT", "STOP") or o_ord.get("linkType") == "ORDER_SL" or o_ord.get("subType") == "STOP_LOSS":
+                    sl_ord_p = float(o_ord.get("stopLossPrice") or o_ord.get("price") or o_ord.get("triggerPrice") or 0)
+                    if sl_ord_p > 0:
+                        sl_p = sl_ord_p
+                elif typ_up == "LIMIT" and (o_ord.get("placeType") == "POSITION" or o_ord.get("linkType") == "ORDER_TP" or o_ord.get("reduceOnly")):
+                    tp_px = float(o_ord.get("price") or 0)
+                    if tp_px > 0:
+                        found_tps.append(tp_px)
+
+            if found_tps:
+                found_tps = sorted(found_tps)
+                if sig == "SELL":
+                    # For SHORT, higher price is closer to entry (TP1), lower price is TP2 runner
+                    tp1_p = found_tps[-1]
+                    if len(found_tps) > 1:
+                        tp2_p = found_tps[0]
+                else:
+                    # For LONG, lower price is closer to entry (TP1), higher price is TP2 runner
+                    tp1_p = found_tps[0]
+                    if len(found_tps) > 1:
+                        tp2_p = found_tps[-1]
 
             # Sub-second Real-Time Mark Price with Multi-Exchange Fallback
             mark_p = await fetch_live_market_price(session, sym)
@@ -335,7 +368,6 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "filled_at": str(p.get("createdAt") or p.get("time") or now_utc.strftime("%H:%M:%S"))
             })
 
-        all_orders = await executor.get_open_orders(session)
         formatted_resting = []
         for o in all_orders:
             if not o.get("reduceOnly") and o.get("placeType") != "POSITION":
