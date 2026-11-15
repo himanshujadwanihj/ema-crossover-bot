@@ -1218,8 +1218,9 @@ async def main_loop():
                                 is_weekend_elig = now_ist_elig.weekday() in (5, 6) # 5 = Saturday, 6 = Sunday
 
                                 sym_u_check = sym_upper.replace("/", "").replace("_", "")
-                                is_btc_eth_check = any(x in sym_u_check for x in ["BTC", "ETH"])
-                                is_gold_check = any(x in sym_u_check for x in ["XAU", "GOLD", "XAUT", "XAG"])
+                                sym_base_check = sym_u_check.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
+                                is_btc_eth_check = sym_base_check in ("BTC", "ETH")
+                                is_gold_check = any(c in sym_u_check for c in ["XAU", "GOLD", "XAUT", "XAG"])
 
                                 if is_weekend_elig and (is_btc_eth_check or is_gold_check):
                                     return False

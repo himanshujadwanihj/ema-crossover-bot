@@ -680,7 +680,10 @@ class SharkExchangeExecutor:
         clean_sym = to_shark_symbol(symbol)
 
         # 1. BTC / ETH / Gold Weekend Rule (Weekdays Mon-Fri Allowed; Sat-Sun No Trade)
-        is_weekend_restricted = any(m in clean_sym.upper() for m in ("BTC", "ETH", "XAU", "GOLD", "XAUT", "XAG"))
+        clean_base = clean_sym.upper().replace("USDT", "").replace("USD", "").replace("-PERP", "")
+        is_btc_or_eth = clean_base in ("BTC", "ETH")
+        is_commodity = any(m in clean_sym.upper() for m in ("XAU", "GOLD", "XAUT", "XAG", "CL", "NATGAS"))
+        is_weekend_restricted = is_btc_or_eth or is_commodity
         if is_weekend_restricted:
             try:
                 import zoneinfo

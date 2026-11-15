@@ -185,17 +185,23 @@ def is_weekend_trading_blocked(symbol: str) -> bool:
         return False
 
     clean = symbol.upper().replace("/", "").replace("_", "").replace("-", "").split(":")[0]
+    base = clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
     
-    # 1. BTC and ETH
-    if "BTC" in clean or "ETH" in clean:
+    # 1. Exact BTC and ETH
+    if base in ("BTC", "ETH"):
         return True
 
     # 2. Commodities (Gold, Silver, Crude Oil, Natgas)
-    if any(c in clean for c in ["XAU", "XAUT", "GOLD", "XAG", "SILVER", "NATGAS", "CL", "OIL"]):
+    if any(clean.startswith(c) for c in ["XAU", "XAUT", "XAG", "NATGAS", "CL", "CRUDEOIL"]) or base in ("GOLD", "SILVER", "OIL"):
         return True
 
-    # 3. US Equities / Stocks
-    if any(s in clean for s in ["NVDA", "TSLA", "MSTR", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "COIN", "AMD", "QQQ", "SPY", "BABA", "INTC", "DIS", "PYPL", "BA", "XOM", "SOXL", "SNDK"]):
+    # 3. US Equities / Stocks (Exact symbol matching - avoids substring collisions like HBAR/BAT matching BA)
+    us_stocks_exact = {
+        "NVDA", "TSLA", "MSTR", "AAPL", "AMZN", "GOOGL", "META", "MSFT", 
+        "COINB", "AMDB", "QQQ", "SPY", "BABAB", "INTCB", "DISB", "PYPLB", 
+        "BAB", "XOMB", "SOXL", "SNDKB"
+    }
+    if base in us_stocks_exact or (len(base) > 3 and base.endswith("B") and base[:-1] in us_stocks_exact):
         return True
 
     return False
