@@ -1860,10 +1860,12 @@ class SharkExchangeExecutor:
                             # Strict Liquidation Check: Is SL on or beyond liquidation price?
                             is_beyond_liq = (direction == "BUY" and live_liq > 0 and sl_p_raw <= live_liq) or                                             (direction == "SELL" and live_liq > 0 and sl_p_raw >= live_liq)
                             # Noise check: Is SL too tight on an UNTRAILED / FRESH trade?
-                            # IMPORTANT: If TP1 has already hit or position is trailed to breakeven/profit, do NOT downgrade SL!
-                            is_trailed = bool(state_entry and (state_entry.get("tp1_hit") or (state_entry.get("trail_stage") or 0) > 0))
+                            # IMPORTANT: If TP1 has already hit, or trade is at Cost-to-Cost / Breakeven, do NOT touch SL!
+                            is_trailed = bool(state_entry and (state_entry.get("tp1_hit") or (state_entry.get("trail_stage") or 0) > 0 or state_entry.get("be_hit_time_shield")))
+                            is_at_or_in_profit_sl = (direction == "BUY" and sl_p_raw >= entry_price) or (direction == "SELL" and sl_p_raw <= entry_price)
+                            is_protected = is_trailed or is_at_or_in_profit_sl
                             min_dist_threshold = round_price(sym, entry_price * (1.0 - min_sl_pct if direction == "BUY" else 1.0 + min_sl_pct))
-                            is_too_tight = not is_trailed and ((direction == "BUY" and sl_p_raw > min_dist_threshold) or (direction == "SELL" and sl_p_raw < min_dist_threshold))
+                            is_too_tight = not is_protected and ((direction == "BUY" and sl_p_raw > min_dist_threshold) or (direction == "SELL" and sl_p_raw < min_dist_threshold))
 
                             if is_beyond_liq:
                                 logger.critical(f"🚨 DANGER: SL {sl_p_raw} for {sym} [{direction}] is beyond liquidation {live_liq}! Upgrading SL above liquidation now!")
