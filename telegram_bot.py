@@ -1013,10 +1013,18 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pos_lines = []
                 for p in shark_pos:
                     sym = executor.clean_sym(p)
-                    side = p.get("side", p.get("direction", "LONG"))
-                    sz = p.get("positionAmt", p.get("quantity", p.get("size", 0)))
-                    upnl = p.get("unrealizedProfit", p.get("pnl", 0))
-                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating PnL: ${float(upnl):.2f})")
+                    pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+                    side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+                    sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+                    entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+                    mark_p = float(p.get("markPrice") or entry_p)
+                    if side == "SHORT":
+                        upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+                    else:
+                        upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+                    upnl_inr = upnl_usd * 102.0
+                    pnl_sign = "+" if upnl_inr >= 0 else ""
+                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating PnL: {pnl_sign}₹{upnl_inr:,.2f} / {pnl_sign}${upnl_usd:.2f})")
                 pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
 
                 ord_lines = []
@@ -1060,10 +1068,18 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pos_lines = []
                         for p in shark_pos:
                             sym = executor.clean_sym(p)
-                            side = p.get("side", p.get("direction", "LONG"))
-                            sz = p.get("positionAmt", p.get("size", 0))
-                            upnl = p.get("unrealizedProfit", p.get("pnl", 0))
-                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating PnL: ${float(upnl):.2f})")
+                            pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+                            side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+                            sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+                            entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+                            mark_p = float(p.get("markPrice") or entry_p)
+                            if side == "SHORT":
+                                upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+                            else:
+                                upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+                            upnl_inr = upnl_usd * 102.0
+                            pnl_sign = "+" if upnl_inr >= 0 else ""
+                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating PnL: {pnl_sign}₹{upnl_inr:,.2f} / {pnl_sign}${upnl_usd:.2f})")
                         pos_str = "\n".join(pos_lines) if pos_lines else "  • No open exchange positions."
                         shark_header = (
                             f"🦈 <b>SHARK EXCHANGE LIVE AUTO-TRADING</b>\n"

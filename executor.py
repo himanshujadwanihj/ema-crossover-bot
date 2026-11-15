@@ -1319,8 +1319,12 @@ class SharkExchangeExecutor:
                 
                 exit_p = float(pos.get("markPrice") or pos.get("lastPrice") or pos.get("entryPrice") or 0)
                 entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
-                unreal_pnl = float(pos.get("unrealizedPnl") or 0)
-                pnl_inr = unreal_pnl * self.usd_inr_rate
+                pos_qty_real = abs(float(pos.get("quantity") or pos.get("positionAmount") or pos.get("amount") or 0))
+                if exit_side == "SELL":  # Was LONG position
+                    pnl_usdt_close = (exit_p - entry_p) * pos_qty_real
+                else:                     # Was SHORT position
+                    pnl_usdt_close = (entry_p - exit_p) * pos_qty_real
+                pnl_inr = pnl_usdt_close * self.usd_inr_rate
                 pnl_str = f"+₹{pnl_inr:,.2f} INR" if pnl_inr >= 0 else f"-₹{abs(pnl_inr):,.2f} INR"
                 
                 from telegram_bot import send_text_alert
