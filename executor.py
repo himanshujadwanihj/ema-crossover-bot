@@ -307,6 +307,8 @@ class SharkExchangeExecutor:
         self._already_cancelled = set()  # order IDs cancelled this session — prevents repeat cancel loops
         self._session_active_symbols = {}  # symbol -> added_timestamp (strict in-memory active slot shield)
         self._pending_entry_orders = {}  # symbol -> {clientOrderId, placed_at, orderId, price, side, qty}
+        self._known_live_positions = {}  # symbol -> dict of open positions
+        self._notified_closed_ids = set()  # set of closed positionIds already notified to Telegram
 
     def is_configured(self) -> bool:
         """Returns True if API keys are configured and auto trading is enabled."""
@@ -1502,6 +1504,43 @@ class SharkExchangeExecutor:
                 if s not in orders_by_sym:
                     orders_by_sym[s] = []
                 orders_by_sym[s].append(o)
+
+            # REAL LIVE POSITION CLOSE MONITOR & NOTIFICATION
+            current_syms = {clean_contract_symbol(self.clean_sym(p)) for p in positions if clean_contract_symbol(self.clean_sym(p))}
+            just_closed = set(self._known_live_positions.keys()) - current_syms
+            if just_closed:
+                st_cl, closed_list = await self.shark_get(session, "/v1/positions/CLOSED")
+                if st_cl == 200 and isinstance(closed_list, list):
+                    for c_sym in just_closed:
+                        matched = next((cp for cp in closed_list if clean_contract_symbol(self.clean_sym(cp)) == c_sym), None)
+                        pos_id = str(matched.get("positionId") or matched.get("id") or "") if matched else ""
+                        if matched and pos_id not in self._notified_closed_ids:
+                            self._notified_closed_ids.add(pos_id)
+                            pnl_inr = float(matched.get("realizedProfitInMarginAsset") or 0.0)
+                            pnl_usd = float(matched.get("realizedProfit") or 0.0)
+                            pos_dir = str(matched.get("positionType") or "SHORT").upper()
+                            entry_p = float(matched.get("entryPrice") or 0.0)
+                            qty = abs(float(matched.get("quantity") or matched.get("positionAmount") or 0.0))
+                            is_win = pnl_inr > 0
+                            status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>" if is_win else ("🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC)</b>" if pnl_inr == 0 else "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>")
+                            sign = "+" if pnl_inr >= 0 else ""
+                            alert_msg = (
+                                f"{status_txt}\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>Asset:</b> {c_sym} [{pos_dir}]\n"
+                                f"<b>Entry Price:</b> ${entry_p}\n"
+                                f"<b>Quantity:</b> {qty}\n"
+                                f"<b>Realized PnL:</b> <b>{sign}₹{pnl_inr:,.2f} INR</b> ({sign}${pnl_usd:.2f} USDT)\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"<i>Broker Position Closed on Shark Exchange</i>"
+                            )
+                            try:
+                                from telegram_bot import send_text_alert
+                                await send_text_alert(alert_msg)
+                            except Exception as e_alert:
+                                logger.error(f"Failed to send close alert for {c_sym}: {e_alert}")
+                        self._known_live_positions.pop(c_sym, None)
+            
+            self._known_live_positions = {clean_contract_symbol(self.clean_sym(p)): p for p in positions if clean_contract_symbol(self.clean_sym(p))}
 
             # SAFETY SHIELD: Clean up any orphan position-bound orders if position is already closed
             for s_ord, ord_list in orders_by_sym.items():

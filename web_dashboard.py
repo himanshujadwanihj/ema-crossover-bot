@@ -397,9 +397,54 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                     "minutes_remaining": rem_m
                 })
 
+        # Fetch genuine closed positions directly from Shark Exchange Native API
+        st_cl, closed_raw = await executor.shark_get(session, "/v1/positions/CLOSED")
+        formatted_closed = []
+        c_wins = 0
+        c_losses = 0
+        gross_wins_inr = 0.0
+        gross_losses_inr = 0.0
+        if st_cl == 200 and isinstance(closed_raw, list):
+            # Session trades: November 2026 current live deployment
+            session_closed = [p for p in closed_raw if str(p.get("updatedAt", "")) >= "2026-11-14"]
+            for cp in session_closed:
+                sym_c = executor.clean_sym(cp)
+                pos_t = str(cp.get("positionType") or "SHORT").upper()
+                sig_c = "BUY" if pos_t in ("LONG", "BUY") else "SELL"
+                pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
+                pnl_usd = float(cp.get("realizedProfit") or 0.0)
+                entry_c = float(cp.get("entryPrice") or 0.0)
+                qty_c = abs(float(cp.get("quantity") or cp.get("positionAmount") or 0.0))
+                up_at = str(cp.get("updatedAt") or "")
+
+                if pnl_inr > 0:
+                    c_wins += 1
+                    gross_wins_inr += pnl_inr
+                    status_c = "TAKE PROFIT (WIN)"
+                elif pnl_inr < 0:
+                    c_losses += 1
+                    gross_losses_inr += abs(pnl_inr)
+                    status_c = "STOP LOSS HIT"
+                else:
+                    status_c = "BREAKEVEN (CTC)"
+
+                formatted_closed.append({
+                    "symbol": sym_c,
+                    "signal": sig_c,
+                    "status": status_c,
+                    "entry": entry_c,
+                    "quantity": qty_c,
+                    "pnl_inr": round(pnl_inr, 2),
+                    "pnl_usd": round(pnl_usd, 2),
+                    "closed_at": up_at
+                })
+
+        total_exec = c_wins + c_losses
+        win_rate = (c_wins / total_exec * 100.0) if total_exec > 0 else 0.0
+        profit_factor = round(gross_wins_inr / gross_losses_inr, 2) if gross_losses_inr > 0 else (99.0 if gross_wins_inr > 0 else 0.0)
+
         # Calculate live real-time equity
         live_equity_inr = round(raw_total + total_live_unrealized_inr, 2)
-        live_in_profit = total_live_unrealized_inr > 0
 
         payload = {
             "status": "online",
@@ -418,13 +463,13 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "fees_paid_inr": 0.0
             },
             "scorecard": {
-                "wins": 1 if live_in_profit else 0,
-                "losses": 0,
-                "total_executed": len(formatted_active),
-                "win_rate_pct": 100.0 if live_in_profit else 0.0,
-                "gross_wins_inr": round(max(0.0, total_live_unrealized_inr), 2),
-                "gross_losses_inr": round(abs(min(0.0, total_live_unrealized_inr)), 2),
-                "profit_factor": 99.0 if live_in_profit else 1.0,
+                "wins": c_wins,
+                "losses": c_losses,
+                "total_executed": total_exec,
+                "win_rate_pct": round(win_rate, 1),
+                "gross_wins_inr": round(gross_wins_inr, 2),
+                "gross_losses_inr": round(gross_losses_inr, 2),
+                "profit_factor": profit_factor,
                 "active_unrealized_pnl_inr": round(total_live_unrealized_inr, 2)
             },
             "lifecycle_funnel": {
@@ -436,7 +481,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             },
             "active_positions": formatted_active,
             "resting_orders": formatted_resting,
-            "recent_executed_trades": [],
+            "recent_executed_trades": formatted_closed,
             "recent_cancelled_orders": []
         }
         _last_real_stats_cache = payload

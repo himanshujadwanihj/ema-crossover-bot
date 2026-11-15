@@ -1679,12 +1679,7 @@
 
       const scEl = document.getElementById('live-score-counts');
       if (scEl) {
-        if (sc.active_unrealized_pnl_inr !== undefined && sc.active_unrealized_pnl_inr !== 0) {
-          const isP = sc.active_unrealized_pnl_inr >= 0;
-          scEl.innerText = (isP ? '+' : '') + '₹' + sc.active_unrealized_pnl_inr.toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Live';
-        } else {
-          scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
-        }
+        scEl.innerText = (sc.wins || 0) + 'W - ' + (sc.losses || 0) + 'L';
       }
 
       const totEl = document.getElementById('live-total-exec');
