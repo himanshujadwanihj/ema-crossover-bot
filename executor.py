@@ -527,15 +527,18 @@ class SharkExchangeExecutor:
             tp2_qty = 0.0
         else:
             # Trending Regime: 70% at TP1, 30% runner at TP2
-            tp1_qty = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
-            tp2_qty = round_coin_qty(clean_sym, total_qty - tp1_qty, price=entry_price)
-            if tp2_qty < min_lot:
+            raw_tp1 = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
+            raw_tp2 = round_coin_qty(clean_sym, total_qty - raw_tp1, price=entry_price)
+            if (total_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (total_qty + 1e-6):
                 if (total_qty - min_lot) >= min_lot:
                     tp2_qty = min_lot
                     tp1_qty = round_coin_qty(clean_sym, total_qty - tp2_qty, price=entry_price)
                 else:
                     tp1_qty = total_qty
                     tp2_qty = 0.0
+            else:
+                tp1_qty = raw_tp1
+                tp2_qty = raw_tp2
         tp3_qty = tp2_qty  # Backward compat alias
 
         return total_qty, tp1_qty, tp2_qty, tp2_qty, margin_usdt, notional_usdt
@@ -1107,15 +1110,18 @@ class SharkExchangeExecutor:
             tp1_qty = actual_qty
             tp2_qty = 0.0
         else:
-            tp1_qty = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
-            tp2_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=target_tp2)
-            if tp2_qty < min_lot:
+            raw_tp1 = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
+            raw_tp2 = round_coin_qty(clean_sym, actual_qty - raw_tp1, price=target_tp2)
+            if (actual_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (actual_qty + 1e-6):
                 if (actual_qty - min_lot) >= min_lot:
                     tp2_qty = min_lot
                     tp1_qty = round_coin_qty(clean_sym, actual_qty - tp2_qty, price=clean_tp1)
                 else:
                     tp1_qty = actual_qty
                     tp2_qty = 0.0
+            else:
+                tp1_qty = raw_tp1
+                tp2_qty = raw_tp2
         tp3_qty = 0.0
 
         # 1. Place Stop-Loss Order (Shark POSITION bracket SL)
@@ -1797,8 +1803,23 @@ class SharkExchangeExecutor:
                 tp_qty_field = float(pos.get("takeProfitOrdersQty") or 0)
                 current_tp_count = len(tp_orders)
 
-                # Always define pos_qty_abs here to avoid UnboundLocalError in SL/TP guard sections
+                # Always define pos_qty_abs and live mark_p here to avoid UnboundLocalError in SL/TP guard sections
                 pos_qty_abs = abs(pos_qty)
+
+                mark_p = 0.0
+                for o_m in sym_orders:
+                    mp_cand = float(o_m.get("curMarketPrice") or 0)
+                    if mp_cand > 0:
+                        mark_p = mp_cand
+                        break
+                if mark_p <= 0:
+                    try:
+                        from web_dashboard import fetch_live_market_price
+                        mark_p = await fetch_live_market_price(session, sym)
+                    except Exception:
+                        pass
+                if mark_p <= 0:
+                    mark_p = float(pos.get("markPrice") or pos.get("lastPrice") or entry_price)
 
                 # 3. 2-Hour Time Shield (Cost-to-Cost SL ONLY if in profit; KEEP SL INTACT if in loss)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
@@ -1813,22 +1834,6 @@ class SharkExchangeExecutor:
                                     already_shielded = True
                                 elif direction == "SELL" and sl_p <= entry_price:
                                     already_shielded = True
-
-                        # Fetch live market price to assess profit vs loss
-                        mark_p = 0.0
-                        for o_m in sym_orders:
-                            mp_cand = float(o_m.get("curMarketPrice") or 0)
-                            if mp_cand > 0:
-                                mark_p = mp_cand
-                                break
-                        if mark_p <= 0:
-                            try:
-                                from web_dashboard import fetch_live_market_price
-                                mark_p = await fetch_live_market_price(session, sym)
-                            except Exception:
-                                pass
-                        if mark_p <= 0:
-                            mark_p = float(pos.get("markPrice") or pos.get("lastPrice") or entry_price)
 
                         # Determine if trade is currently in profit or in loss/drawdown
                         is_in_profit = (direction == "BUY" and mark_p > entry_price) or (direction == "SELL" and mark_p < entry_price)
@@ -2186,7 +2191,7 @@ class SharkExchangeExecutor:
                 # TP HEAL & SCALE-IN / 2.0R RE-ALIGN: Re-place 70/30 TPs if missing, undersized, or distant (> 2.05R)
                 total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
-                is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.65))
+                is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.95))
 
                 has_distant_tp1 = False
                 if not tp1_already_hit and pos_qty_abs > 0 and tp_orders:
