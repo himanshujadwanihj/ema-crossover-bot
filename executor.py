@@ -2071,14 +2071,17 @@ class SharkExchangeExecutor:
 
                 has_distant_tp1 = False
                 if not tp1_already_hit and pos_qty_abs > 0 and tp_orders:
-                    for o_tp in tp_orders:
-                        o_px = float(o_tp.get("price") or 0)
-                        if direction == "BUY" and o_px > (entry_price + 2.05 * risk_step):
-                            has_distant_tp1 = True
-                            break
-                        elif direction == "SELL" and o_px < (entry_price - 2.05 * risk_step):
-                            has_distant_tp1 = True
-                            break
+                    # Check ONLY the nearest TP limit order (TP1), never the macro runner TP2
+                    valid_tp_prices = [float(o.get("price") or 0) for o in tp_orders if float(o.get("price") or 0) > 0]
+                    if valid_tp_prices:
+                        if direction == "BUY":
+                            nearest_tp = min(valid_tp_prices)
+                            if nearest_tp > (entry_price + 2.05 * risk_step):
+                                has_distant_tp1 = True
+                        else:
+                            nearest_tp = max(valid_tp_prices)
+                            if nearest_tp < (entry_price - 2.05 * risk_step):
+                                has_distant_tp1 = True
 
                 if (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
