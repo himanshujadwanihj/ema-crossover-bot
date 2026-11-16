@@ -239,11 +239,33 @@ def enforce_sl_above_liquidation(
         return round_price(symbol, sl)
 
 
+# Shark Exchange strict minimum order quantities per asset (verified on live exchange)
+SHARK_MIN_ORDER_QTY = {
+    "BTC": 0.002,     # Shark min: 0.002 BTC (0.001 rejected with Error 3010)
+    "ETH": 0.02,      # Shark min: 0.02 ETH (0.01 rejected with Error 3010)
+    "SOL": 0.1,       # Shark min: 0.1 SOL (0.01/0.05 rejected with Error 3010)
+    "XAU": 0.005,     # Shark min: 0.005 XAU (0.001 rejected with Error 3010)
+    "PAXG": 0.005,    # Shark min: 0.005 PAXG
+    "BNB": 0.01,      # Shark min: 0.01 BNB
+    "XAG": 0.1,       # Shark min: 0.1 XAG (Silver)
+}
+
+def get_exchange_min_qty(symbol: str) -> float:
+    """Returns the strict minimum allowable order quantity on Shark Exchange."""
+    clean = clean_contract_symbol(symbol).upper()
+    for base, min_q in SHARK_MIN_ORDER_QTY.items():
+        if base in clean:
+            return min_q
+    if any(c in clean for c in ('AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY')):
+        return 1.0
+    return 0.1
+
+
 def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
     """Helper to round quantity according to symbol lot sizes on Shark Exchange."""
     if qty is None:
         return 0.0
-    clean_sym = clean_contract_symbol(symbol)
+    clean_sym = clean_contract_symbol(symbol).upper()
     try:
         f_qty = float(qty)
     except (ValueError, TypeError):
@@ -253,12 +275,18 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
     if f_qty <= 0:
         return 0.0
 
-    if any(c in clean_sym for c in ('BTC', 'ETH', 'XAU', 'PAXG')):
-        rounded = max(0.001, round(f_qty, 3))
+    if 'BTC' in clean_sym:
+        rounded = max(0.002, round(f_qty, 3))
+    elif 'ETH' in clean_sym:
+        rounded = max(0.02, round(f_qty, 3))
+    elif any(c in clean_sym for c in ('XAU', 'PAXG')):
+        rounded = max(0.005, round(f_qty, 3))
+    elif 'SOL' in clean_sym:
+        rounded = max(0.1, round(f_qty, 2))
+    elif 'BNB' in clean_sym:
+        rounded = max(0.01, round(f_qty, 2))
     elif 'XAG' in clean_sym:
         rounded = max(0.1, round(f_qty, 1))
-    elif any(c in clean_sym for c in ('SOL', 'BNB')):
-        rounded = max(0.01, round(f_qty, 2))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
         rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('NEAR', 'AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM', 'ZEC', 'TAO', 'MKR', 'COMP', 'QNT')):
@@ -448,11 +476,11 @@ class SharkExchangeExecutor:
 
     def calculate_position_size(self, symbol: str, entry_price: float, sl_price: float = None, available_margin_inr: float = None, adx: float = None) -> tuple:
         """
-        Calculates position quantities for ₹1,500 INR margin at 10x leverage.
-        Notional Value = (₹1,500 / 102.0) * 10 = ~$147.06 USDT.
+        Calculates position quantities with dynamic 2.0% available margin sizing.
+        Enforces exchange minimum lot floors for BTC, ETH, SOL, XAU so orders are never rejected with Error 3010.
         Adaptive TP:
-        - If ADX < 20 (Ranging/Chop): 100% exit at TP1
-        - If ADX >= 20 (Trending): 70% at TP1, 30% runner at TP3
+        - If ADX < 20 (Ranging/Chop) OR total_qty < 2 * min_lot: 100% exit at TP1
+        - If ADX >= 20 (Trending) AND total_qty >= 2 * min_lot: 70% at TP1, 30% runner at TP2
         Returns (total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt).
         """
         clean_sym = clean_contract_symbol(symbol)
@@ -464,8 +492,20 @@ class SharkExchangeExecutor:
             margin_inr = float(self.margin_inr)
         else:
             margin_inr = 1500.0
-        notional_inr = margin_inr * self.leverage
 
+        min_lot = get_exchange_min_qty(clean_sym)
+        # Enforce Minimum Margin floor for high-priced coins (BTC, ETH, etc.) to ensure total_qty >= exchange min lot
+        if entry_price > 0 and min_lot > 0:
+            min_notional_usdt = min_lot * entry_price
+            min_required_margin_inr = (min_notional_usdt / self.leverage) * self.usd_inr_rate * 1.05  # 5% safety buffer
+            if margin_inr < min_required_margin_inr:
+                logger.info(
+                    f"Boosting margin for {clean_sym} from ₹{margin_inr:.2f} to ₹{min_required_margin_inr:.2f} "
+                    f"to strictly satisfy Shark minimum order size {min_lot}"
+                )
+                margin_inr = round(min_required_margin_inr, 2)
+
+        notional_inr = margin_inr * self.leverage
         margin_usdt = margin_inr / self.usd_inr_rate
         notional_usdt = margin_usdt * self.leverage
 
@@ -475,17 +515,24 @@ class SharkExchangeExecutor:
         raw_total_qty = notional_usdt / entry_price
         total_qty = round_coin_qty(clean_sym, raw_total_qty, price=entry_price)
 
-        if adx is not None and adx < 20.0:
-            # Choppy / Range Regime: 100% exit at TP1
+        if min_lot > 0 and total_qty < min_lot:
+            total_qty = min_lot
+
+        if (adx is not None and adx < 20.0) or (total_qty < (2 * min_lot)):
+            # Choppy / Range Regime OR position size cannot be split into multiple valid exchange lots
             tp1_qty = total_qty
             tp2_qty = 0.0
         else:
             # Trending Regime: 70% at TP1, 30% runner at TP2
             tp1_qty = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
             tp2_qty = round_coin_qty(clean_sym, total_qty - tp1_qty, price=entry_price)
-            if tp2_qty <= 0:
-                tp1_qty = total_qty
-                tp2_qty = 0.0
+            if tp2_qty < min_lot:
+                if (total_qty - min_lot) >= min_lot:
+                    tp2_qty = min_lot
+                    tp1_qty = round_coin_qty(clean_sym, total_qty - tp2_qty, price=entry_price)
+                else:
+                    tp1_qty = total_qty
+                    tp2_qty = 0.0
         tp3_qty = tp2_qty  # Backward compat alias
 
         return total_qty, tp1_qty, tp2_qty, tp2_qty, margin_usdt, notional_usdt
@@ -1042,15 +1089,20 @@ class SharkExchangeExecutor:
 
         # Elite 70/30 2-TP Profit Booking Model: 70% at TP1, 30% runner at TP2
         target_tp2 = clean_tp2 or clean_tp3
-        if adx is not None and adx < 20.0:
+        min_lot = get_exchange_min_qty(clean_sym)
+        if (adx is not None and adx < 20.0) or (actual_qty < (2 * min_lot)):
             tp1_qty = actual_qty
             tp2_qty = 0.0
         else:
             tp1_qty = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
             tp2_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=target_tp2)
-            if tp2_qty <= 0:
-                tp1_qty = actual_qty
-                tp2_qty = 0.0
+            if tp2_qty < min_lot:
+                if (actual_qty - min_lot) >= min_lot:
+                    tp2_qty = min_lot
+                    tp1_qty = round_coin_qty(clean_sym, actual_qty - tp2_qty, price=clean_tp1)
+                else:
+                    tp1_qty = actual_qty
+                    tp2_qty = 0.0
         tp3_qty = 0.0
 
         # 1. Place Stop-Loss Order (Shark POSITION bracket SL)
