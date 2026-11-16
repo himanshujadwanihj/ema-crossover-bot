@@ -377,7 +377,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 sym = executor.clean_sym(o)
                 sig = str(o.get("side") or "BUY").upper()
                 px = float(o.get("price") or 0)
-                qty = float(o.get("quantity") or 0)
+                qty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
                 c_time = str(o.get("createdAt") or o.get("time") or "")
                 rem_m = 30
                 if c_time:

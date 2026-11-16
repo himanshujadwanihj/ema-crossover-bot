@@ -337,6 +337,21 @@ class SharkExchangeExecutor:
             raw = str(obj)
         return to_shark_symbol(raw)
 
+    def extract_order_qty(self, obj: dict) -> float:
+        """Extracts order quantity across all exchange field conventions (e.g. orderAmount, quantity, origQty)."""
+        if not isinstance(obj, dict):
+            return 0.0
+        for k in ("orderAmount", "quantity", "origQty", "amount", "size", "holdQty", "positionAmount", "volume"):
+            val = obj.get(k)
+            if val is not None:
+                try:
+                    v = float(val)
+                    if abs(v) > 0:
+                        return abs(v)
+                except Exception:
+                    pass
+        return 0.0
+
     async def shark_get(self, session: aiohttp.ClientSession, endpoint: str, params: dict = None) -> tuple:
         """Executes an authenticated GET request to Shark Exchange."""
         if params is None:
@@ -1969,10 +1984,10 @@ class SharkExchangeExecutor:
                 # 2. Check if existing SL order is beyond liquidation or too tight:
                 elif sl_orders and pos_qty_abs > 0:
                     # Check if existing SL order quantity is under-sized compared to live position (e.g. after scale-in / averaging)
-                    total_sl_qty = sum(abs(float(o.get("quantity") or o.get("origQty") or o.get("amount") or 0)) for o in sl_orders)
-                    if total_sl_qty < (pos_qty_abs * 0.90):
+                    total_sl_qty = sum(self.extract_order_qty(o) for o in sl_orders)
+                    if total_sl_qty > 0 and total_sl_qty < (pos_qty_abs * 0.90):
                         last_heal = self._tp_sl_heal_lock.get(sym + "_sl_scalein", 0)
-                        if time.time() - last_heal > 15:
+                        if time.time() - last_heal > 60:
                             logger.warning(f"🛡️ SCALE-IN SL RESIZE: Live position {sym} grew to {pos_qty_abs} but SL order only covers {total_sl_qty}. Resizing SL to full position size!")
                             st_heal = get_latest_symbol_state(sym)
                             sl_p_cur = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("price") or st_heal.get("cur_sl") or safe_sl_threshold)
@@ -2007,12 +2022,13 @@ class SharkExchangeExecutor:
                                     break
 
                 # TP HEAL & SCALE-IN RE-ALIGN: Re-place 70/30 TPs if missing or undersized due to scale-in
-                total_tp_qty = sum(abs(float(o.get("quantity") or o.get("origQty") or o.get("amount") or 0)) for o in tp_orders)
-                is_tp_undersized = (pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty < (pos_qty_abs * 0.65))
+                total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
+                tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
+                is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.65))
                 if (current_tp_count == 0 or is_tp_undersized) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
-                    if never_healed or (time.time() - last_heal > 60):
+                    if never_healed or (time.time() - last_heal > 120):
                         reason_lbl = "scale-in expansion" if is_tp_undersized else ("fresh fill" if never_healed else "re-heal")
                         logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — re-placing 70/30 TP limits now")
                         st_heal = get_latest_symbol_state(sym)
