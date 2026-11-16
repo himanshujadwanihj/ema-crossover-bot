@@ -1530,6 +1530,7 @@ async def send_pre_squeeze_radar_alert(radar_data: dict):
     sq_tf = radar_data.get("tf_label", "1H")
     text = (
         f"📡 <b>PRE-SQUEEZE RADAR (Coiling Watchlist)</b>\n"
+        f"⚠️ <i>[WATCHLIST RADAR ONLY — NO AUTO-ORDER SUBMITTED YET]</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 <b>Pair:</b> <code>{display_sym}</code> ({sq_tf} Base)\n"
         f"⚡ <b>Setup:</b> {status_icon} <b>{direction_tag}</b>\n"
@@ -1547,7 +1548,8 @@ async def send_pre_squeeze_radar_alert(radar_data: dict):
         f"{'🟢' if direction == 'BUY' else '🔴'} <b>{'Breakout' if direction == 'BUY' else 'Breakdown'} Trigger:</b> <code>{format_price(trigger_entry, symbol)}</code>\n"
         f"🛑 <b>Base Invalidation (SL):</b> <code>{format_price(invalidation_sl, symbol)}</code>\n\n"
         f"💡 <b>Execution Strategy:</b>\n"
-        f"Do NOT enter early in the middle of the range. Bot is monitoring live orderbook &amp; CVD. You will receive an instant trade entry alert as soon as the candle confirms out of the base!\n"
+        f"⚠️ <b>Status:</b> Watching only (Stage 1). No order placed on Shark Exchange yet.\n"
+        f"Trade order will execute automatically as soon as the 1H candle confirms a clean breakout beyond <code>{format_price(trigger_entry, symbol)}</code> with whale CVD buying!\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
 

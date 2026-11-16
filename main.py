@@ -828,6 +828,51 @@ async def shark_native_tp_sl_monitor(session):
     from executor import executor
     await executor.sync_and_manage_live_orders(session)
 
+_rejection_notified_cache = {}
+
+async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: dict = None):
+    """Notifies the user immediately via Telegram when a signal is rejected/filtered from Shark execution."""
+    cand = cand or {}
+    uniq_k = cand.get("unique_key") or "signal"
+    c_ts = str(cand.get("candle_ts") or "")
+    stars = cand.get("aligned_count", 0)
+    rsi_val = cand.get("rsi")
+    entry_p = cand.get("entry")
+    
+    dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason[:25]}"
+    now_ts = time.time()
+    
+    # Prune old cache (> 2 hours)
+    for k, ts in list(_rejection_notified_cache.items()):
+        if now_ts - ts > 7200:
+            _rejection_notified_cache.pop(k, None)
+            
+    if dedup_key in _rejection_notified_cache and (now_ts - _rejection_notified_cache[dedup_key] < 1800):
+        return  # Deduplicated within 30 minutes
+        
+    _rejection_notified_cache[dedup_key] = now_ts
+    
+    stars_str = f"{stars}/4 Stars" if stars > 0 else "Signal"
+    rsi_str = f" | 📊 <b>RSI:</b> <code>{float(rsi_val):.1f}</code>" if rsi_val is not None else ""
+    entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{entry_p}</code>" if entry_p else ""
+    
+    msg = (
+        f"🛡️ <b>SHARK AUTO-TRADE FILTER NOTICE</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 <b>Pair:</b> <code>{symbol}</code> [<b>{signal.upper()}</b>]\n"
+        f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{entry_str}\n"
+        f"🚫 <b>Execution Status:</b> Order Not Placed\n"
+        f"📋 <b>Exact Reason:</b> {reason}\n\n"
+        f"💡 <i>Signal was sent to Scanner Channel for manual review, but auto-order was suppressed by the safety shield.</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    try:
+        from telegram_bot import send_trading_update
+        await send_trading_update(msg)
+        logger.info(f"Dispatched trade rejection notice for {symbol} [{signal}]: {reason}")
+    except Exception as e_ntf:
+        logger.error(f"Error dispatching rejection notice: {e_ntf}")
+
 async def main_loop():
     validate_config()
     from state import clear_all_pending_backlogs
@@ -1275,9 +1320,13 @@ async def main_loop():
                                     raw_candidates.append(r["trade"])
                         if raw_candidates:
                             from executor import executor
-                            def _is_auto_trade_eligible(c):
+                            def _check_auto_trade_eligibility(c):
                                 sym = c.get("symbol", "")
                                 sym_upper = sym.upper()
+                                sig = c.get("signal", "BUY").upper()
+                                stars = c.get("aligned_count", 0)
+                                rsi = c.get("rsi")
+
                                 # MINOR #2 FIX: Check AUTO_TRADE_EXCLUDED_SYMBOLS from config (exact base asset match)
                                 from config import AUTO_TRADE_EXCLUDED_SYMBOLS
                                 sym_clean = sym_upper.replace("/", "").replace("_", "")
@@ -1286,7 +1335,8 @@ async def main_loop():
                                     excl_clean = excl.upper().replace("/", "").replace("_", "")
                                     excl_base = excl_clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
                                     if sym_clean == excl_clean or sym_base == excl_base:
-                                        return False
+                                        return False, f"Symbol {sym} is in AUTO_TRADE_EXCLUDED_SYMBOLS config."
+
                                 # USER DIRECTIVE: Weekdays (Mon-Fri) BTC & ETH can be traded!
                                 # Weekend (Saturday & Sunday): Strictly NO trades on BTC, ETH, and Gold!
                                 import zoneinfo
@@ -1294,52 +1344,54 @@ async def main_loop():
                                 now_ist_elig = datetime.now(ist_tz_elig)
                                 is_weekend_elig = now_ist_elig.weekday() in (5, 6) # 5 = Saturday, 6 = Sunday
 
-                                sym_u_check = sym_upper.replace("/", "").replace("_", "")
-                                sym_base_check = sym_u_check.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
-                                is_btc_eth_check = sym_base_check in ("BTC", "ETH")
-                                is_gold_check = any(c in sym_u_check for c in ["XAU", "GOLD", "XAUT", "XAG"])
+                                is_btc_eth_check = sym_base in ("BTC", "ETH")
+                                is_gold_check = any(c_name in sym_clean for c_name in ["XAU", "GOLD", "XAUT", "XAG"])
 
                                 if is_weekend_elig and (is_btc_eth_check or is_gold_check):
-                                    return False
+                                    return False, f"Weekend trading paused for {sym} (Sat/Sun per directive). Weekdays only."
 
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
-                                # NOTE: exact base-asset matching only — no substring (prevents METAM/SHIB/ARB/BNB/TRB false blocks)
                                 from executor import is_us_stock_token
                                 is_us_stock = is_us_stock_token(sym)
                                 if is_us_stock:
-                                    return False
+                                    return False, f"{sym} is a US Stock Token (Automated execution disabled per user directive; Telegram signal only)."
 
                                 # STRICT USER DIRECTIVE: Execute ONLY assets in approved execution list (Top 25 volume crypto & commodities)
                                 from config import is_allowed_trading_asset
                                 if not is_allowed_trading_asset(sym):
-                                    return False
+                                    return False, f"{sym} is outside Approved Top 25 volume crypto & commodities list."
 
-                                stars = c.get("aligned_count", 0)
                                 # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
                                 if stars < 3:
-                                    return False
-                                rsi = c.get("rsi")
-                                sig = c.get("signal", "BUY").upper()
+                                    return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
+
                                 is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG"])
                                 if rsi is not None:
                                     try:
                                         f_rsi = float(rsi)
                                         if is_gold_or_commodity:
                                             if sig == "BUY" and not (38.0 <= f_rsi <= 75.0):
-                                                return False
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity BUY zone [38.0 - 75.0]."
                                             elif sig == "SELL" and not (25.0 <= f_rsi <= 62.0):
-                                                return False
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity SELL zone [25.0 - 62.0]."
                                         else:
                                             if sig == "BUY" and not (42.0 <= f_rsi <= 75.0):
-                                                return False
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto BUY zone [42.0 - 75.0] (Market exhausted/overbought)."
                                             elif sig == "SELL" and not (25.0 <= f_rsi <= 58.0):
-                                                return False
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [25.0 - 58.0] (Weak sell momentum/oversold)."
                                     except (ValueError, TypeError):
                                         pass
-                                return True
+                                return True, "Eligible"
 
-                            eligible_candidates = [c for c in raw_candidates if _is_auto_trade_eligible(c)]
-                            
+                            eligible_candidates = []
+                            for c in raw_candidates:
+                                is_ok, reason = _check_auto_trade_eligibility(c)
+                                if is_ok:
+                                    eligible_candidates.append(c)
+                                else:
+                                    logger.info(f"Auto-trade filtered candidate {c.get('symbol')} [{c.get('signal')}]: {reason}")
+                                    await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
+
                             if eligible_candidates and executor.is_configured():
                                 from executor import clean_contract_symbol
                                 TIER_1_SUPER_MAJORS = {"BTC", "ETH", "SOL", "BNB", "XAUT"}
@@ -1376,7 +1428,9 @@ async def main_loop():
 
                                     # Verify duplicate check before submitting order (allows trend scale-in if TP1 already booked)
                                     if await executor.has_active_trade_on_exchange(session, sym, signal=sig):
-                                        logger.info(f"Skipping {sym} — active trade/order already exists on exchange for this symbol.")
+                                        dup_reason = f"Active trade or resting order already exists on Shark Exchange for {sym}. Single Order Margin Shield prevents duplicate overlapping positions."
+                                        logger.info(f"Skipping {sym} — {dup_reason}")
+                                        await notify_signal_rejection(sym, sig, dup_reason, cand=cand)
                                         continue
 
                                     logger.info(f"⚡ BULK TRADE EXECUTE: {sym} [{sig}] ({stars}/4 Stars Priority)")
@@ -1394,6 +1448,9 @@ async def main_loop():
                                         t_qty = shark_res.get("total_qty", 0)
                                         update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
                                         logger.info(f"Marked shark_order_placed=True for {state_key}")
+                                    elif shark_res and shark_res.get("status") in ("skipped", "error"):
+                                        fail_reason = shark_res.get("reason", "Broker execution rejected")
+                                        await notify_signal_rejection(sym, sig, f"Shark Broker: {fail_reason}", cand=cand)
                                     
                                     # Mandatory 1.5-second sequential pause between bulk trade executions
                                     await asyncio.sleep(1.5)
