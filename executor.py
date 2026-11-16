@@ -54,7 +54,7 @@ from config import (
     clean_contract_symbol,
     to_shark_symbol
 )
-from telegram_bot import format_price, send_text_to_chat
+from telegram_bot import format_price, send_text_alert, send_text_to_chat
 
 logger = logging.getLogger("executor")
 
@@ -1764,7 +1764,7 @@ class SharkExchangeExecutor:
                                     f"⏱️ <i>Trade active >2 hours and in profit without reaching TP1. Stop-Loss auto-shifted to Entry Price (100% Risk-Free).</i>"
                                 )
                                 try:
-                                    await send_text_to_chat(shield_msg, chat_id=TELEGRAM_CHAT_ID)
+                                    await send_text_alert(shield_msg)
                                 except Exception as e_tg:
                                     logger.error(f"Failed to send 2-Hour Time Shield alert: {e_tg}")
 
