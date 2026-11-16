@@ -340,6 +340,9 @@ class SharkExchangeExecutor:
         self._pending_entry_orders = {}  # symbol -> {clientOrderId, placed_at, orderId, price, side, qty}
         self._known_live_positions = {}  # symbol -> dict of open positions
         self._notified_closed_ids = set()  # set of closed positionIds already notified to Telegram
+        self._notified_filled_positions = set()  # set of positionIds already notified of entry fill to Telegram
+        self._last_positions_fetch_ok = True
+        self._last_orders_fetch_ok = True
 
     def is_configured(self) -> bool:
         """Returns True if API keys are configured and auto trading is enabled."""
@@ -551,8 +554,9 @@ class SharkExchangeExecutor:
         return False
 
     async def get_open_orders(self, session: aiohttp.ClientSession, symbol: str = None) -> list:
-        """Queries active open orders from Shark Exchange."""
+        """Queries active open orders from Shark Exchange. Returns list of orders, or [] if empty/failed."""
         status, response = await self.shark_get(session, "/v1/order/open-orders")
+        self._last_orders_fetch_ok = (status == 200)
         if status == 200:
             if isinstance(response, list):
                 data = response
@@ -565,11 +569,13 @@ class SharkExchangeExecutor:
                     clean_sym = clean_contract_symbol(symbol)
                     return [o for o in data if clean_contract_symbol(o.get("symbol", "")) == clean_sym]
                 return data
+        logger.warning(f"Shark get_open_orders returned non-200 status {status}: {response}")
         return []
 
     async def get_open_positions(self, session: aiohttp.ClientSession) -> list:
-        """Queries active open positions from Shark Exchange."""
+        """Queries active open positions from Shark Exchange. Returns list of open positions, or [] if empty/failed."""
         status, response = await self.shark_get(session, "/v1/positions/OPEN")
+        self._last_positions_fetch_ok = (status == 200)
         if status == 200:
             if isinstance(response, list):
                 data = response
@@ -596,12 +602,15 @@ class SharkExchangeExecutor:
                     if qty > 0:
                         result.append(p)
                 return result
+        logger.warning(f"Shark get_open_positions returned non-200 status {status}: {response}")
         return []
 
     async def get_open_position(self, session: aiohttp.ClientSession, symbol: str) -> dict:
         """Gets single active open position for symbol."""
         shark_sym = to_shark_symbol(symbol)
         positions = await self.get_open_positions(session)
+        if not positions:
+            return None
         for p in positions:
             p_sym = to_shark_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "")
             if p_sym == shark_sym:
@@ -625,6 +634,10 @@ class SharkExchangeExecutor:
         # 1. Fetch Exchange State
         positions = await self.get_open_positions(session)
         open_orders = await self.get_open_orders(session)
+
+        if not self._last_positions_fetch_ok or not self._last_orders_fetch_ok:
+            logger.warning(f"has_active_trade_on_exchange: API fetch failed for {clean_sym}. Shielding against duplicate submission.")
+            return True
 
         # Symbols with an active open position on exchange
         position_symbols = set()
@@ -1196,28 +1209,30 @@ class SharkExchangeExecutor:
                 else:
                     logger.info(f"TP2 placed for {clean_sym} at {target_tp2} qty={tp2_qty} (30% Runner LIMIT)")
 
-        # 4. Safe Telegram Fill Alert (Fires only after orders are safely placed on broker)
-        try:
-            bal_summary = await self.get_wallet_balance_summary(session)
-            bal_block = f"\n\n{bal_summary}" if bal_summary else ""
-            px_disp = f"{fill_price:,.4f}" if fill_price else "Limit Entry"
-            pos_dir_disp = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
-            fill_msg = (
-                f"🟢 <b>REAL LIVE TRADE: LIMIT ORDER FILLED (SHARK EXCHANGE)</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>Asset:</b> {clean_sym} [{pos_dir_disp}] 10x Isolated\n"
-                f"🎯 <b>Fill Price:</b> {px_disp}\n"
-                f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
-                f"🛡️ <b>Stop-Loss Armed:</b> {clean_sl}\n"
-                f"🎯 <b>Targets:</b> TP1: {clean_tp1} (70% Book) | TP2: {target_tp2} (30% Runner)"
-                f"{bal_block}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
-            )
-            from telegram_bot import send_text_alert as _send_alert
-            await _send_alert(fill_msg)
-        except Exception as e_alert:
-            logger.warning(f"Failed to send fill alert for {clean_sym}: {e_alert}")
+        # 4. Safe Telegram Fill Alert (Fires only once per unique positionId on broker)
+        if pos_id and pos_id not in self._notified_filled_positions:
+            self._notified_filled_positions.add(pos_id)
+            try:
+                bal_summary = await self.get_wallet_balance_summary(session)
+                bal_block = f"\n\n{bal_summary}" if bal_summary else ""
+                px_disp = f"{fill_price:,.4f}" if fill_price else "Limit Entry"
+                pos_dir_disp = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
+                fill_msg = (
+                    f"🟢 <b>REAL LIVE TRADE: LIMIT ORDER FILLED (SHARK EXCHANGE)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>Asset:</b> {clean_sym} [{pos_dir_disp}] 10x Isolated\n"
+                    f"🎯 <b>Fill Price:</b> {px_disp}\n"
+                    f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
+                    f"🛡️ <b>Stop-Loss Armed:</b> {clean_sl}\n"
+                    f"🎯 <b>Targets:</b> TP1: {clean_tp1} (70% Book) | TP2: {target_tp2} (30% Runner)"
+                    f"{bal_block}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
+                )
+                from telegram_bot import send_text_alert as _send_alert
+                await _send_alert(fill_msg)
+            except Exception as e_alert:
+                logger.warning(f"Failed to send fill alert for {clean_sym}: {e_alert}")
 
         return True
 
@@ -1585,6 +1600,13 @@ class SharkExchangeExecutor:
             positions  = await self.get_open_positions(session)
             all_orders = await self.get_open_orders(session)
 
+            if not self._last_positions_fetch_ok or not self._last_orders_fetch_ok:
+                logger.warning(
+                    f"sync_and_manage_live_orders: API query failed (positions_ok={self._last_positions_fetch_ok}, "
+                    f"orders_ok={self._last_orders_fetch_ok}). Skipping iteration to protect state integrity."
+                )
+                return
+
             # Sync local in-memory active symbols with live exchange positions + open orders + recent local entries
             live_syms = {clean_contract_symbol(self.clean_sym(p)) for p in positions}
             entry_syms = {clean_contract_symbol(self.clean_sym(o)) for o in all_orders if not o.get("reduceOnly") and o.get("placeType") != "POSITION"}
@@ -1633,15 +1655,18 @@ class SharkExchangeExecutor:
                             be_shield_hit = bool(st_sym and (st_sym.get("be_hit_time_shield") or st_sym.get("be_hit")))
 
                             pnl_note = ""
-                            if abs(pnl_inr) <= 15.0:
+                            if pnl_inr < -15.0:
+                                status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
+                            elif abs(pnl_inr) <= 15.0:
                                 status_txt = "🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC) 🤝</b>"
-                            elif tp2_was_hit:
-                                status_txt = "🎯 <b>REAL LIVE TRADE: FULL TAKE PROFIT (TP2) HIT 🏆</b>"
-                            elif tp1_was_hit:
-                                status_txt = "🛡️ <b>REAL LIVE TRADE: RUNNER CLOSED (TP1 PROFIT SECURED) 🤝</b>"
-                                pnl_note = f"\n💡 <i>Breakdown: 70% profit was credited at TP1 earlier. The remaining runner closed at entry CTC. Total net profit: +₹{pnl_inr:,.2f} INR.</i>"
-                            elif pnl_inr > 15.0:
-                                status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
+                            elif tp2_was_hit or pnl_inr > 15.0:
+                                if tp1_was_hit:
+                                    status_txt = "🛡️ <b>REAL LIVE TRADE: RUNNER CLOSED (TP1 PROFIT SECURED) 🤝</b>"
+                                    pnl_note = f"\n💡 <i>Breakdown: 70% profit was credited at TP1 earlier. The remaining runner closed at entry CTC. Total net profit: +₹{pnl_inr:,.2f} INR.</i>"
+                                elif tp2_was_hit:
+                                    status_txt = "🎯 <b>REAL LIVE TRADE: FULL TAKE PROFIT (TP2) HIT 🏆</b>"
+                                else:
+                                    status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
                             else:
                                 status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
                             sign = "+" if pnl_inr >= 0 else ""
