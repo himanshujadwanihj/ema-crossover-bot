@@ -1569,8 +1569,20 @@ class SharkExchangeExecutor:
                             pos_dir = str(matched.get("positionType") or "SHORT").upper()
                             entry_p = float(matched.get("entryPrice") or 0.0)
                             qty = abs(float(matched.get("quantity") or matched.get("positionAmount") or 0.0))
+                            from state import get_latest_symbol_state
+                            st_sym = get_latest_symbol_state(c_sym)
+                            tp1_was_hit = bool(st_sym and st_sym.get("tp1_hit"))
+                            tp2_was_hit = bool(st_sym and st_sym.get("tp2_hit"))
+                            be_shield_hit = bool(st_sym and (st_sym.get("be_hit_time_shield") or st_sym.get("be_hit")))
+
+                            pnl_note = ""
                             if abs(pnl_inr) <= 15.0:
                                 status_txt = "🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC) 🤝</b>"
+                            elif tp2_was_hit:
+                                status_txt = "🎯 <b>REAL LIVE TRADE: FULL TAKE PROFIT (TP2) HIT 🏆</b>"
+                            elif tp1_was_hit:
+                                status_txt = "🛡️ <b>REAL LIVE TRADE: RUNNER CLOSED (TP1 PROFIT SECURED) 🤝</b>"
+                                pnl_note = f"\n💡 <i>Breakdown: 70% profit was credited at TP1 earlier. The remaining runner closed at entry CTC. Total net profit: +₹{pnl_inr:,.2f} INR.</i>"
                             elif pnl_inr > 15.0:
                                 status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
                             else:
@@ -1581,9 +1593,9 @@ class SharkExchangeExecutor:
                                 f"<b>Asset:</b> {c_sym} [{pos_dir}]\n"
                                 f"<b>Entry Price:</b> ${entry_p}\n"
                                 f"<b>Quantity:</b> {qty}\n"
-                                f"<b>Realized PnL:</b> <b>{sign}₹{pnl_inr:,.2f} INR</b> ({sign}${pnl_usd:.2f} USDT)\n"
+                                f"<b>Total Position PnL:</b> <b>{sign}₹{pnl_inr:,.2f} INR</b> ({sign}${pnl_usd:.2f} USDT)\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"<i>Broker Position Closed on Shark Exchange</i>"
+                                f"<i>Broker Position Closed on Shark Exchange</i>{pnl_note}"
                             )
                             try:
                                 from telegram_bot import send_text_alert
