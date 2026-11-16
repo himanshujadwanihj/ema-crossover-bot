@@ -248,6 +248,7 @@ SHARK_MIN_ORDER_QTY = {
     "PAXG": 0.005,    # Shark min: 0.005 PAXG
     "BNB": 0.01,      # Shark min: 0.01 BNB
     "XAG": 0.1,       # Shark min: 0.1 XAG (Silver)
+    "LTC": 1.0,       # Shark min: 1.0 LTC (0.5 rejected with Error 3010)
 }
 
 def get_exchange_min_qty(symbol: str) -> float:
@@ -289,9 +290,9 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
         rounded = max(0.1, round(f_qty, 1))
-    elif any(c in clean_sym for c in ('NEAR', 'AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM', 'ZEC', 'TAO', 'MKR', 'COMP', 'QNT')):
+    elif any(c in clean_sym for c in ('AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM', 'ZEC', 'TAO', 'MKR', 'COMP', 'QNT')):
         rounded = max(0.1, round(f_qty, 1))
-    elif any(c in clean_sym for c in ('AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY')):
+    elif any(c in clean_sym for c in ('NEAR', 'AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY', 'DOGE', 'ADA', 'XRP', 'SUI')):
         rounded = max(1, int(round(f_qty)))
     elif price >= 100:
         rounded = max(0.1, round(f_qty, 1))
@@ -529,11 +530,12 @@ class SharkExchangeExecutor:
             # Trending Regime: 70% at TP1, 30% runner at TP2
             raw_tp1 = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
             raw_tp2 = round_coin_qty(clean_sym, total_qty - raw_tp1, price=entry_price)
-            if (total_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (total_qty + 1e-6):
+            if (total_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (total_qty + 1e-6) or raw_tp2 < min_lot:
                 if (total_qty - min_lot) >= min_lot:
                     tp2_qty = min_lot
                     tp1_qty = round_coin_qty(clean_sym, total_qty - tp2_qty, price=entry_price)
                 else:
+                    # Cannot split into 2 valid exchange lots >= min_lot: Fall back to 1 TP (100% at TP1)
                     tp1_qty = total_qty
                     tp2_qty = 0.0
             else:
@@ -1112,11 +1114,12 @@ class SharkExchangeExecutor:
         else:
             raw_tp1 = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
             raw_tp2 = round_coin_qty(clean_sym, actual_qty - raw_tp1, price=target_tp2)
-            if (actual_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (actual_qty + 1e-6):
+            if (actual_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (actual_qty + 1e-6) or raw_tp2 < min_lot:
                 if (actual_qty - min_lot) >= min_lot:
                     tp2_qty = min_lot
                     tp1_qty = round_coin_qty(clean_sym, actual_qty - tp2_qty, price=clean_tp1)
                 else:
+                    # Cannot split into 2 valid lots >= min_lot: Fall back to 1 TP (100% at TP1)
                     tp1_qty = actual_qty
                     tp2_qty = 0.0
             else:
@@ -1150,7 +1153,7 @@ class SharkExchangeExecutor:
         else:
             logger.info(f"Fill Protection SL for {clean_sym}: Status {status_sl} - {res_sl}")
 
-        # 0. Clean up any existing TP bracket/limit orders on position to enforce fresh 70/30 split
+        # 0. Clean up any existing TP bracket/limit orders on position to enforce fresh split
         try:
             cur_orders = await self.get_open_orders(session, symbol=clean_sym)
             for o in cur_orders:
@@ -1160,12 +1163,17 @@ class SharkExchangeExecutor:
                 if is_tp:
                     cid_tp = o.get("clientOrderId")
                     if cid_tp:
-                        logger.info(f"Purging old TP order {cid_tp} for {clean_sym} to enforce fresh 70/30 split")
+                        logger.info(f"Purging old TP order {cid_tp} for {clean_sym} to enforce fresh split")
                         await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid_tp)})
         except Exception as e_clean:
             logger.debug(f"TP bracket cleanup check error for {clean_sym}: {e_clean}")
 
-        # 2. Place Take-Profit 1 Order (70% Book) as POSITION LIMIT Reduce-Only
+        # Track placed TP orders for 1-TP fallback
+        tp1_order_placed = False
+        tp1_cid = None
+        tp2_order_placed = False
+
+        # 2. Place Take-Profit 1 Order as POSITION LIMIT Reduce-Only
         if tp1_qty > 0:
             tp1_valid = (exit_side == "SELL" and clean_tp1 > clean_sl) or (exit_side == "BUY" and clean_tp1 < clean_sl)
             if not tp1_valid:
@@ -1183,7 +1191,9 @@ class SharkExchangeExecutor:
                 }
                 st, res = await self.shark_post(session, "/v1/order/place-order", tp1_payload)
                 if st in (200, 201):
-                    logger.info(f"TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (70% Book LIMIT)")
+                    tp1_order_placed = True
+                    tp1_cid = res.get("clientOrderId") if isinstance(res, dict) else None
+                    logger.info(f"TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (LIMIT)")
                 else:
                     logger.warning(f"TP1 failed for {clean_sym}: {res}")
 
@@ -1204,16 +1214,49 @@ class SharkExchangeExecutor:
                     "quantity": tp2_qty,
                     "price": target_tp2
                 }
-                st, res = await self.shark_post(session, "/v1/order/place-order", tp2_payload)
-                if st not in (200, 201):
-                    logger.warning(f"TP2 failed for {clean_sym}: {res}")
-                    if st == 400 and isinstance(res, dict) and res.get("error") == "3010":
-                        rem_qty = round_coin_qty(clean_sym, actual_qty - tp1_qty, price=target_tp2)
-                        if rem_qty > 0:
-                            tp2_payload["quantity"] = rem_qty
-                            await self.shark_post(session, "/v1/order/place-order", tp2_payload)
-                else:
+                st2, res2 = await self.shark_post(session, "/v1/order/place-order", tp2_payload)
+                if st2 in (200, 201):
+                    tp2_order_placed = True
                     logger.info(f"TP2 placed for {clean_sym} at {target_tp2} qty={tp2_qty} (30% Runner LIMIT)")
+                else:
+                    logger.warning(f"TP2 failed for {clean_sym}: {res2}")
+
+        # ── IRONCLAD BRACKET FALLBACK: If 2 TPs could not be fully placed, fallback to 1 TP (100%) at TP1 ──
+        if tp2_qty > 0 and not tp2_order_placed:
+            logger.warning(f"🛡️ 1-TP FALLBACK: {clean_sym} unable to support 2nd TP ({tp2_qty}). Enforcing 1 single TP (100% position: {actual_qty}) at TP1 ({clean_tp1})!")
+            if tp1_order_placed and tp1_cid:
+                # Cancel the partial TP1 order to place the full 100% order
+                await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(tp1_cid)})
+            
+            full_tp_payload = {
+                "placeType": "POSITION",
+                "positionId": pos_id,
+                "reduceOnly": True,
+                "type": "LIMIT",
+                "side": exit_side,
+                "symbol": clean_sym,
+                "quantity": actual_qty,
+                "price": clean_tp1
+            }
+            st_full, res_full = await self.shark_post(session, "/v1/order/place-order", full_tp_payload)
+            if st_full in (200, 201):
+                logger.info(f"🛡️ 1-TP FALLBACK SUCCESS: {clean_sym} protected with 1 single TP for 100% ({actual_qty}) at {clean_tp1}")
+            else:
+                logger.error(f"🚨 CRITICAL: 1-TP Fallback failed for {clean_sym}: {res_full}")
+        elif not tp1_order_placed and not tp2_order_placed:
+            # Emergency: Neither TP placed, try placing 1 single TP for full 100% quantity
+            logger.warning(f"🚨 EMERGENCY: Neither TP placed for {clean_sym}. Placing emergency 1-TP for full {actual_qty} at {clean_tp1}!")
+            emergency_tp = {
+                "placeType": "POSITION",
+                "positionId": pos_id,
+                "reduceOnly": True,
+                "type": "LIMIT",
+                "side": exit_side,
+                "symbol": clean_sym,
+                "quantity": actual_qty,
+                "price": clean_tp1
+            }
+            await self.shark_post(session, "/v1/order/place-order", emergency_tp)
 
         # 4. Safe Telegram Fill Alert (Fires only once per unique positionId on broker)
         if pos_id and pos_id not in self._notified_filled_positions:
@@ -2188,7 +2231,7 @@ class SharkExchangeExecutor:
                                     self._tp_sl_heal_lock[sym + "_sl_adjust"] = time.time()
                                     break
 
-                # TP HEAL & SCALE-IN / 2.0R RE-ALIGN: Re-place 70/30 TPs if missing, undersized, or distant (> 2.05R)
+                # TP HEAL & SCALE-IN / 2.0R RE-ALIGN: Re-place 70/30 TPs (or 100% 1-TP) if missing, undersized, or distant (> 2.05R)
                 total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
                 is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.95))
@@ -2207,12 +2250,13 @@ class SharkExchangeExecutor:
                             if nearest_tp < (entry_price - 2.05 * risk_step):
                                 has_distant_tp1 = True
 
-                if (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
+                should_heal_tp = (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and tps_hit == 0 and not tp1_already_hit
+                if should_heal_tp:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
-                    if never_healed or (time.time() - last_heal > 120):
-                        reason_lbl = "2.0R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("fresh fill" if never_healed else "re-heal"))
-                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — re-placing 70/30 TP limits now (TP1={tp1})")
+                    if never_healed or (time.time() - last_heal > 30):
+                        reason_lbl = "2.0R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
+                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={tp1})")
                         st_heal = get_latest_symbol_state(sym)
                         sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
                         await self.place_tp_limits(
