@@ -256,12 +256,12 @@ async def register_paper_trade(alert_data: dict):
     if risk == 0: risk = entry * 0.015
 
     if signal == "BUY":
-        if tp1 <= entry: tp1 = entry + 1.6 * risk
-        if tp2 <= tp1: tp2 = entry + 3.5 * risk
+        if tp1 <= entry: tp1 = entry + 2.0 * risk
+        if tp2 <= tp1: tp2 = entry + 6.0 * risk
         tp3 = tp2
     else:
-        if tp1 >= entry or tp1 == 0: tp1 = entry - 1.6 * risk
-        if tp2 >= tp1 or tp2 == 0: tp2 = entry - 3.5 * risk
+        if tp1 >= entry or tp1 == 0: tp1 = entry - 2.0 * risk
+        if tp2 >= tp1 or tp2 == 0: tp2 = entry - 6.0 * risk
         tp3 = tp2
 
     async with _wallet_lock:
@@ -695,44 +695,46 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                     pos["tp1_alert_sent"] = True
                     asyncio.create_task(notify_telegram(msg))
 
-        # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (BUY)
+        # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (BUY - Option 2: 4R, 5R, 6R+)
         if pos.get("tp1_hit", False) and not pos.get("tp3_hit", False):
             risk_step = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-            # Stage 2 (+3.0R Expansion -> Ratchet SL to +2.0R)
-            if p_high >= entry + (3.0 * risk_step) and pos.get("trail_stage", 0) < 2:
-                ratchet_sl = entry + (2.0 * risk_step)
+            current_r = (p_high - entry) / risk_step if risk_step > 0 else 0.0
+            cur_stage = pos.get("trail_stage", 0)
+            target_stage = 0
+            target_lock_r = 0.0
+            if current_r >= 6.0:
+                target_stage = 5
+                target_lock_r = round(current_r - 1.0, 1)
+            elif current_r >= 5.0:
+                target_stage = 4
+                target_lock_r = 4.0
+            elif current_r >= 4.0:
+                target_stage = 3
+                target_lock_r = 3.0
+            elif current_r >= 3.0:
+                target_stage = 2
+                target_lock_r = 2.0
+            elif current_r >= 2.2:
+                target_stage = 1
+                target_lock_r = 1.2
+
+            prev_lock = float(pos.get("cur_lock_r") or 0.0)
+            if target_stage > cur_stage or (target_stage == 5 and target_lock_r > prev_lock + 0.4):
+                ratchet_sl = entry + (target_lock_r * risk_step)
                 ratchet_sl = enforce_sl_above_liquidation(symbol, entry, ratchet_sl, signal, LEVERAGE, liq)
                 if ratchet_sl > pos["current_sl"]:
                     pos["current_sl"] = ratchet_sl
-                    pos["trail_stage"] = 2
+                    pos["trail_stage"] = target_stage
+                    pos["cur_lock_r"] = target_lock_r
                     pos["profit_lock_sl"] = ratchet_sl
                     updated = True
                     msg = (
-                        f"🔥 <b>PAPER TRAILING SL RATCHET (+2.0R LOCKED) 🏆{tick_tag}</b>\n"
+                        f"🔥 <b>PAPER TRAILING SL RATCHET (+{target_lock_r:.1f}R LOCKED) 🏆{tick_tag}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"<b>Asset:</b> {symbol} [BUY]\n"
-                        f"🚀 <b>Expansion:</b> Price surged past +3.0R ({format_price(entry + 3.0*risk_step, symbol)})!\n"
-                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+2.0R Profit Floor)\n"
-                        f"<i>30% runner gains locked — Anti-Giveback engine active!</i>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    asyncio.create_task(notify_telegram(msg))
-            # Stage 1 (+2.2R Expansion -> Ratchet SL to +1.2R)
-            elif p_high >= entry + (2.2 * risk_step) and pos.get("trail_stage", 0) < 1:
-                ratchet_sl = entry + (1.2 * risk_step)
-                ratchet_sl = enforce_sl_above_liquidation(symbol, entry, ratchet_sl, signal, LEVERAGE, liq)
-                if ratchet_sl > pos["current_sl"]:
-                    pos["current_sl"] = ratchet_sl
-                    pos["trail_stage"] = 1
-                    pos["profit_lock_sl"] = ratchet_sl
-                    updated = True
-                    msg = (
-                        f"🛡️ <b>PAPER TRAILING SL RATCHET (+1.2R LOCKED) 🚀{tick_tag}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<b>Asset:</b> {symbol} [BUY]\n"
-                        f"🚀 <b>Expansion:</b> Price reached +2.2R ({format_price(entry + 2.2*risk_step, symbol)})!\n"
-                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+1.2R Profit Floor)\n"
-                        f"<i>Anti-Giveback active — Protecting runner profits!</i>\n"
+                        f"🚀 <b>Trend Expansion:</b> Price reached <b>+{current_r:.1f}R</b> ({format_price(p_high, symbol)})!\n"
+                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+{target_lock_r:.1f}R Profit Floor)\n"
+                        f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     asyncio.create_task(notify_telegram(msg))
@@ -953,44 +955,46 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                     pos["tp1_alert_sent"] = True
                     asyncio.create_task(notify_telegram(msg))
 
-        # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (SELL)
+        # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (SELL - Option 2: 4R, 5R, 6R+)
         if pos.get("tp1_hit", False) and not pos.get("tp3_hit", False):
             risk_step = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-            # Stage 2 (+3.0R Expansion -> Ratchet SL to +2.0R)
-            if p_low <= entry - (3.0 * risk_step) and pos.get("trail_stage", 0) < 2:
-                ratchet_sl = entry - (2.0 * risk_step)
+            current_r = (entry - p_low) / risk_step if risk_step > 0 else 0.0
+            cur_stage = pos.get("trail_stage", 0)
+            target_stage = 0
+            target_lock_r = 0.0
+            if current_r >= 6.0:
+                target_stage = 5
+                target_lock_r = round(current_r - 1.0, 1)
+            elif current_r >= 5.0:
+                target_stage = 4
+                target_lock_r = 4.0
+            elif current_r >= 4.0:
+                target_stage = 3
+                target_lock_r = 3.0
+            elif current_r >= 3.0:
+                target_stage = 2
+                target_lock_r = 2.0
+            elif current_r >= 2.2:
+                target_stage = 1
+                target_lock_r = 1.2
+
+            prev_lock = float(pos.get("cur_lock_r") or 0.0)
+            if target_stage > cur_stage or (target_stage == 5 and target_lock_r > prev_lock + 0.4):
+                ratchet_sl = entry - (target_lock_r * risk_step)
                 ratchet_sl = enforce_sl_above_liquidation(symbol, entry, ratchet_sl, signal, LEVERAGE, liq)
                 if ratchet_sl < pos["current_sl"]:
                     pos["current_sl"] = ratchet_sl
-                    pos["trail_stage"] = 2
+                    pos["trail_stage"] = target_stage
+                    pos["cur_lock_r"] = target_lock_r
                     pos["profit_lock_sl"] = ratchet_sl
                     updated = True
                     msg = (
-                        f"🔥 <b>PAPER TRAILING SL RATCHET (+2.0R LOCKED) 🏆{tick_tag}</b>\n"
+                        f"🔥 <b>PAPER TRAILING SL RATCHET (+{target_lock_r:.1f}R LOCKED) 🏆{tick_tag}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"<b>Asset:</b> {symbol} [SELL]\n"
-                        f"🚀 <b>Expansion:</b> Price dumped past +3.0R ({format_price(entry - 3.0*risk_step, symbol)})!\n"
-                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+2.0R Profit Floor)\n"
-                        f"<i>30% runner gains locked — Anti-Giveback engine active!</i>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    asyncio.create_task(notify_telegram(msg))
-            # Stage 1 (+2.2R Expansion -> Ratchet SL to +1.2R)
-            elif p_low <= entry - (2.2 * risk_step) and pos.get("trail_stage", 0) < 1:
-                ratchet_sl = entry - (1.2 * risk_step)
-                ratchet_sl = enforce_sl_above_liquidation(symbol, entry, ratchet_sl, signal, LEVERAGE, liq)
-                if ratchet_sl < pos["current_sl"]:
-                    pos["current_sl"] = ratchet_sl
-                    pos["trail_stage"] = 1
-                    pos["profit_lock_sl"] = ratchet_sl
-                    updated = True
-                    msg = (
-                        f"🛡️ <b>PAPER TRAILING SL RATCHET (+1.2R LOCKED) 🚀{tick_tag}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<b>Asset:</b> {symbol} [SELL]\n"
-                        f"🚀 <b>Expansion:</b> Price reached +2.2R ({format_price(entry - 2.2*risk_step, symbol)})!\n"
-                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+1.2R Profit Floor)\n"
-                        f"<i>Anti-Giveback active — Protecting runner profits!</i>\n"
+                        f"🚀 <b>Trend Expansion:</b> Price dumped past <b>+{current_r:.1f}R</b> ({format_price(p_low, symbol)})!\n"
+                        f"🛡️ <b>SL Ratcheted to:</b> {format_price(ratchet_sl, symbol)} (+{target_lock_r:.1f}R Profit Floor)\n"
+                        f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     asyncio.create_task(notify_telegram(msg))

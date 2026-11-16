@@ -177,12 +177,12 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             raw_tp2 = float(data.get("tp2") or data.get("tp3")) if (data.get("tp2") is not None or data.get("tp3") is not None) else None
 
             if direction == "BUY":
-                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 > entry) else (entry + 1.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 > tp1) else max(tp1 * 1.003, entry + 2.5 * risk)
+                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 > entry) else (entry + 2.0 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 > tp1) else max(tp1 * 1.003, entry + 6.0 * risk)
                 tp3 = tp2
             else:
-                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 < entry) else (entry - 1.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 < tp1) else min(tp1 * 0.997, entry - 2.5 * risk)
+                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 < entry) else (entry - 2.0 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 < tp1) else min(tp1 * 0.997, entry - 6.0 * risk)
                 tp3 = tp2
 
             tp1_hit = data.get("tp1_hit", False)

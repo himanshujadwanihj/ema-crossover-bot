@@ -919,20 +919,20 @@ class SharkExchangeExecutor:
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
                     if not tp1 or tp1 <= fill_price:
-                        tp1 = round_price(clean_sym, fill_price + 1.2 * risk)
+                        tp1 = round_price(clean_sym, fill_price + 2.0 * risk)
                     if not tp2 or tp2 <= tp1:
-                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 2.2 * risk))
+                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 6.0 * risk))
                     if not tp3 or tp3 <= tp2:
-                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 3.2 * risk))
+                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 6.0 * risk))
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
                     if not tp1 or tp1 >= fill_price:
-                        tp1 = round_price(clean_sym, fill_price - 1.2 * risk)
+                        tp1 = round_price(clean_sym, fill_price - 2.0 * risk)
                     if not tp2 or tp2 >= tp1:
-                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 2.2 * risk))
+                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 6.0 * risk))
                     if not tp3 or tp3 >= tp2:
-                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 3.2 * risk))
+                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 6.0 * risk))
 
                 # Update state so downstream monitoring uses correct direction TPs
                 from state import update_trade_progress, get_latest_symbol_state
@@ -1822,97 +1822,95 @@ class SharkExchangeExecutor:
                         current_stage = int(state_entry.get("trail_stage") or 0)
 
                         if direction == "BUY":
-                            # Stage 2 (+3.0R Expansion -> Ratchet SL to +2.0R)
-                            if cur_px >= entry_price + (3.0 * risk_step) and current_stage < 2:
-                                ratchet_sl = entry_price + (2.0 * risk_step)
-                                live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
-                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
-                                logger.info(f"🔥 TRAILING RATCHET [BUY]: {sym} hit +3.0R! Ratcheting SL to +2.0R ({safe_sl})")
-                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
-                                st_map = _load()
-                                for k_st in list(st_map.keys()):
-                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
-                                        st_map[k_st]["cur_sl"] = safe_sl
-                                        st_map[k_st]["trail_stage"] = 2
-                                        _save(st_map)
-                                        break
-                                from telegram_bot import send_text_alert as _send_alert
-                                await _send_alert(
-                                    f"🔥 <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+2.0R LOCKED) 🏆</b>\n\n"
-                                    f"<b>Asset:</b> {sym} [BUY]\n"
-                                    f"🚀 <b>Expansion:</b> Price reached +3.0R ({format_price(cur_px)})!\n"
-                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+2.0R)</b> on Shark Exchange.\n"
-                                    f"<i>Anti-Giveback active — 30% runner gains locked!</i>"
-                                )
+                            current_r = (cur_px - entry_price) / risk_step if risk_step > 0 else 0.0
 
-                            # Stage 1 (+2.2R Expansion -> Ratchet SL to +1.2R)
-                            elif cur_px >= entry_price + (2.2 * risk_step) and current_stage < 1:
-                                ratchet_sl = entry_price + (1.2 * risk_step)
+                            # Dynamic Multi-R Uncapped Trailing Ladder (Option 2: 4R, 5R, 6R+)
+                            target_stage = 0
+                            target_lock_r = 0.0
+                            if current_r >= 6.0:
+                                target_stage = 5
+                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price above 6R
+                            elif current_r >= 5.0:
+                                target_stage = 4
+                                target_lock_r = 4.0
+                            elif current_r >= 4.0:
+                                target_stage = 3
+                                target_lock_r = 3.0
+                            elif current_r >= 3.0:
+                                target_stage = 2
+                                target_lock_r = 2.0
+                            elif current_r >= 2.2:
+                                target_stage = 1
+                                target_lock_r = 1.2
+
+                            prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
+                            if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
+                                ratchet_sl = round_price(sym, entry_price + (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
                                 safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
-                                logger.info(f"🛡️ TRAILING RATCHET [BUY]: {sym} hit +2.2R! Ratcheting SL to +1.2R ({safe_sl})")
+                                logger.info(f"🔥 TRAILING RATCHET [BUY]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
-                                        st_map[k_st]["trail_stage"] = 1
+                                        st_map[k_st]["trail_stage"] = target_stage
+                                        st_map[k_st]["cur_lock_r"] = target_lock_r
                                         _save(st_map)
                                         break
                                 from telegram_bot import send_text_alert as _send_alert
                                 await _send_alert(
-                                    f"🛡️ <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+1.2R LOCKED) 🚀</b>\n\n"
+                                    f"🔥 <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+{target_lock_r:.1f}R LOCKED) 🏆</b>\n\n"
                                     f"<b>Asset:</b> {sym} [BUY]\n"
-                                    f"🚀 <b>Expansion:</b> Price reached +2.2R ({format_price(cur_px)})!\n"
-                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+1.2R)</b> on Shark Exchange.\n"
-                                    f"<i>Anti-Giveback active — Protecting runner profits!</i>"
+                                    f"🚀 <b>Trend Expansion:</b> Price reached <b>+{current_r:.1f}R</b> ({format_price(cur_px)})!\n"
+                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+{target_lock_r:.1f}R Profit Locked)</b> on Shark Exchange.\n"
+                                    f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>"
                                 )
 
                         elif direction == "SELL":
-                            # Stage 2 (+3.0R Expansion -> Ratchet SL to +2.0R)
-                            if cur_px <= entry_price - (3.0 * risk_step) and current_stage < 2:
-                                ratchet_sl = entry_price - (2.0 * risk_step)
-                                live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
-                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
-                                logger.info(f"🔥 TRAILING RATCHET [SELL]: {sym} hit +3.0R! Ratcheting SL to +2.0R ({safe_sl})")
-                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
-                                st_map = _load()
-                                for k_st in list(st_map.keys()):
-                                    if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
-                                        st_map[k_st]["cur_sl"] = safe_sl
-                                        st_map[k_st]["trail_stage"] = 2
-                                        _save(st_map)
-                                        break
-                                from telegram_bot import send_text_alert as _send_alert
-                                await _send_alert(
-                                    f"🔥 <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+2.0R LOCKED) 🏆</b>\n\n"
-                                    f"<b>Asset:</b> {sym} [SELL]\n"
-                                    f"🚀 <b>Expansion:</b> Price dumped past +3.0R ({format_price(cur_px)})!\n"
-                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+2.0R)</b> on Shark Exchange.\n"
-                                    f"<i>Anti-Giveback active — 30% runner gains locked!</i>"
-                                )
+                            current_r = (entry_price - cur_px) / risk_step if risk_step > 0 else 0.0
 
-                            # Stage 1 (+2.2R Expansion -> Ratchet SL to +1.2R)
-                            elif cur_px <= entry_price - (2.2 * risk_step) and current_stage < 1:
-                                ratchet_sl = entry_price - (1.2 * risk_step)
+                            # Dynamic Multi-R Uncapped Trailing Ladder (Option 2: 4R, 5R, 6R+)
+                            target_stage = 0
+                            target_lock_r = 0.0
+                            if current_r >= 6.0:
+                                target_stage = 5
+                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price above 6R
+                            elif current_r >= 5.0:
+                                target_stage = 4
+                                target_lock_r = 4.0
+                            elif current_r >= 4.0:
+                                target_stage = 3
+                                target_lock_r = 3.0
+                            elif current_r >= 3.0:
+                                target_stage = 2
+                                target_lock_r = 2.0
+                            elif current_r >= 2.2:
+                                target_stage = 1
+                                target_lock_r = 1.2
+
+                            prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
+                            if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
+                                ratchet_sl = round_price(sym, entry_price - (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
                                 safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
-                                logger.info(f"🛡️ TRAILING RATCHET [SELL]: {sym} hit +2.2R! Ratcheting SL to +1.2R ({safe_sl})")
+                                logger.info(f"🔥 TRAILING RATCHET [SELL]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
-                                        st_map[k_st]["trail_stage"] = 1
+                                        st_map[k_st]["trail_stage"] = target_stage
+                                        st_map[k_st]["cur_lock_r"] = target_lock_r
                                         _save(st_map)
                                         break
                                 from telegram_bot import send_text_alert as _send_alert
                                 await _send_alert(
-                                    f"🛡️ <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+1.2R LOCKED) 🚀</b>\n\n"
+                                    f"🔥 <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+{target_lock_r:.1f}R LOCKED) 🏆</b>\n\n"
                                     f"<b>Asset:</b> {sym} [SELL]\n"
-                                    f"🚀 <b>Expansion:</b> Price reached +2.2R ({format_price(cur_px)})!\n"
-                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+1.2R)</b> on Shark Exchange.\n"
-                                    f"<i>Anti-Giveback active — Protecting runner profits!</i>"
+                                    f"🚀 <b>Trend Expansion:</b> Price dumped past <b>+{current_r:.1f}R</b> ({format_price(cur_px)})!\n"
+                                    f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+{target_lock_r:.1f}R Profit Locked)</b> on Shark Exchange.\n"
+                                    f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>"
                                 )
 
                 # SL GUARD: Ensure SL exists and enforces safe liquidation floor & distance for live positions

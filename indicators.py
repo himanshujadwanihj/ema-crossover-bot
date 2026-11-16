@@ -286,13 +286,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             tp1 = entry + (2.0 * risk)
             lbl1 = "2.0 R:R Expansion Target 1"
 
-        higher_bsl = [p for p in all_bsl if p > tp1 * 1.005]
+        higher_bsl = [p for p in all_bsl if p >= entry + (5.0 * risk)]
         if len(higher_bsl) >= 1:
             tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
-            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run Runner)"
+            lbl2 = f"Major Liquidity Target 2 ({round((tp2-entry)/risk, 1)}R Runner)"
         else:
-            tp2 = max(tp1 * 1.005, entry + (3.5 * risk))
-            lbl2 = "3.5 R:R Expansion Target 2 (Runner)"
+            tp2 = max(tp1 * 1.005, entry + (6.0 * risk))
+            lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
 
         rr1 = (tp1 - entry) / risk
         rr2 = (tp2 - entry) / risk
@@ -370,13 +370,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             tp1 = entry - (2.0 * risk)
             lbl1 = "2.0 R:R Expansion Target 1"
 
-        lower_ssl = [p for p in all_ssl if p < tp1 * 0.995]
+        lower_ssl = [p for p in all_ssl if p <= entry - (5.0 * risk)]
         if len(lower_ssl) >= 1:
             tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
-            lbl2 = "Order Block / Liquidity Target 2 (0.35% Front-Run Runner)"
+            lbl2 = f"Major Liquidity Target 2 ({round((entry-tp2)/risk, 1)}R Runner)"
         else:
-            tp2 = min(tp1 * 0.995, entry - (3.5 * risk))
-            lbl2 = "3.5 R:R Expansion Target 2 (Runner)"
+            tp2 = min(tp1 * 0.995, entry - (6.0 * risk))
+            lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
 
         rr1 = (entry - tp1) / risk
         rr2 = (entry - tp2) / risk
