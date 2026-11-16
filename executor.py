@@ -1899,9 +1899,9 @@ class SharkExchangeExecutor:
                             elif current_r >= 3.0:
                                 target_stage = 2
                                 target_lock_r = 2.0
-                            elif current_r >= 2.2:
+                            elif current_r >= 2.0:
                                 target_stage = 1
-                                target_lock_r = 1.2
+                                target_lock_r = 1.0
 
                             prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
                             if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
@@ -1945,9 +1945,9 @@ class SharkExchangeExecutor:
                             elif current_r >= 3.0:
                                 target_stage = 2
                                 target_lock_r = 2.0
-                            elif current_r >= 2.2:
+                            elif current_r >= 2.0:
                                 target_stage = 1
-                                target_lock_r = 1.2
+                                target_lock_r = 1.0
 
                             prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
                             if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
@@ -2135,22 +2135,22 @@ class SharkExchangeExecutor:
             pnl_inr  = pnl_usdt * self.usd_inr_rate
             runner_qty = real_qty if real_qty > 0 else tp3_qty
 
-            # 2. Shift SL to Cost-to-Cost + 0.4% (Guaranteed Fee-Proof Shield & Profit-Lock)
+            # 2. Shift SL to Cost-to-Cost (Breakeven + 0.15% Fee Shield)
             risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (real_entry * 0.012)
             if direction == "BUY":
-                # Entry + 0.40% CTC buffer or +0.4R (whichever gives stronger protection)
-                target_sl = max(real_entry * 1.004, real_entry + (0.40 * risk))
+                # Entry + 0.15% CTC buffer (covers exchange taker fees and slippage)
+                target_sl = real_entry * 1.0015
                 trailed_sl = round_price(clean_sym, min(target_sl, tp1 * 0.998))
             else:
-                # Entry - 0.40% CTC buffer or -0.4R (whichever gives stronger protection)
-                target_sl = min(real_entry * 0.996, real_entry - (0.40 * risk))
+                # Entry - 0.15% CTC buffer (covers exchange taker fees and slippage)
+                target_sl = real_entry * 0.9985
                 trailed_sl = round_price(clean_sym, max(target_sl, tp1 * 1.002))
 
             # Clamp with Liquidation Shield
             safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange to CTC + 0.4% for remaining runner
-            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC + 0.4% {safe_trailed_sl} (Runner qty={runner_qty})")
+            # 3. Modify Stop-Loss order on Shark Exchange to CTC for remaining runner
+            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (Breakeven) {safe_trailed_sl} (Runner qty={runner_qty})")
             if runner_qty > 0:
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty)
 
@@ -2174,7 +2174,7 @@ class SharkExchangeExecutor:
                 f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR) 💰\n"
                 f"🛡️ <b>SL Trailed to Entry Price (Cost-to-Cost / Breakeven):</b> {format_price(safe_trailed_sl)}\n"
                 f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
-                f"<i>Trade is now 100% Zero-Risk. Aiming for full 1:3.0+ RR expansion!</i>{bal_block}"
+                f"<i>Trade is now 100% Zero-Risk. 30% runner trailing for full trend capture!</i>{bal_block}"
             )
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(msg)

@@ -150,10 +150,10 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         if signal == "BUY":
-            tp1, tp2 = entry + (2.0 * risk), entry + (3.5 * risk)
+            tp1, tp2 = entry + (2.0 * risk), entry + (6.0 * risk)
         else:
-            tp1, tp2 = entry - (2.0 * risk), entry - (3.5 * risk)
-        return sl, (tp1, tp2), (2.0, 3.5), ("2.0 R:R Target 1 (70% Book)", "3.5 R:R Target 2 (30% Runner)")
+            tp1, tp2 = entry - (2.0 * risk), entry - (6.0 * risk)
+        return sl, (tp1, tp2), (2.0, 6.0), ("2.0 R:R Target 1 (70% Book)", "6.0 R:R Target 2 (30% Runner)")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -267,31 +267,31 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: Strictly Minimum 1:2.0 R:R on TP1 WITH Front-Running Below Order Block / Liquidity Pool
-        # Front-run buffer: 0.35% below the order block / fractal resistance high for maximum fill probability
-        FRONT_RUN_PCT = 0.0035
-        min_tp1_required = entry + max(2.0 * risk, entry * 0.016)
-        pool_threshold = min_tp1_required / (1.0 - FRONT_RUN_PCT)
+        # USER DIRECTIVE: Smart 1.5R - 2.0R TP1 (70% Book) + 30% Trailing Runner
+        # Search for Liquidity Pools / Order Blocks between 1.5R and 2.0R.
+        # Front-run buffer: 0.20% below the order block / fractal resistance high for maximum fill probability.
+        FRONT_RUN_PCT = 0.0020
+        min_tp1_target = entry + (1.5 * risk)
+        max_tp1_target = entry + (2.0 * risk)
         
-        base_bsl = [p for p in bsl_levels if p >= pool_threshold]
-        irl_bsl = [p for p in internal_bsl if p >= pool_threshold]
-        erl_bsl = [p for p in refine_bsl if p >= pool_threshold]
-        all_bsl = sorted(list(set(base_bsl + irl_bsl + erl_bsl)))
+        all_bsl = sorted(list(set(bsl_levels + internal_bsl + refine_bsl)))
+        eligible_tp1_pools = [p for p in all_bsl if (p * (1.0 - FRONT_RUN_PCT)) >= min_tp1_target and (p * (1.0 - FRONT_RUN_PCT)) <= max_tp1_target]
         
-        if len(all_bsl) >= 1:
-            raw_tp1 = all_bsl[0]
+        if eligible_tp1_pools:
+            raw_tp1 = eligible_tp1_pools[0]
             tp1 = round(raw_tp1 * (1.0 - FRONT_RUN_PCT), 6)
-            lbl1 = "Order Block / Liquidity Target 1 (0.35% Front-Run Below High)"
+            rr_val = round((tp1 - entry) / risk, 1)
+            lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
         else:
-            tp1 = entry + (2.0 * risk)
-            lbl1 = "2.0 R:R Expansion Target 1"
+            tp1 = round(entry + (2.0 * risk), 6)
+            lbl1 = "2.0 R:R Target 1 (70% Book)"
 
-        higher_bsl = [p for p in all_bsl if p >= entry + (5.0 * risk)]
+        higher_bsl = [p for p in all_bsl if p >= entry + (4.0 * risk)]
         if len(higher_bsl) >= 1:
             tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
             lbl2 = f"Major Liquidity Target 2 ({round((tp2-entry)/risk, 1)}R Runner)"
         else:
-            tp2 = max(tp1 * 1.005, entry + (6.0 * risk))
+            tp2 = max(tp1 * 1.005, round(entry + (6.0 * risk), 6))
             lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
 
         rr1 = (tp1 - entry) / risk
@@ -351,31 +351,31 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: Strictly Minimum 1:2.0 R:R on TP1 WITH Front-Running Above Order Block / Liquidity Pool
-        # Front-run buffer: 0.35% above the order block / fractal support low for maximum fill probability
-        FRONT_RUN_PCT = 0.0035
-        max_tp1_required = entry - max(2.0 * risk, entry * 0.016)
-        pool_threshold = max_tp1_required / (1.0 + FRONT_RUN_PCT)
+        # USER DIRECTIVE: Smart 1.5R - 2.0R TP1 (70% Book) + 30% Trailing Runner
+        # Search for Liquidity Pools / Order Blocks between 1.5R and 2.0R below entry.
+        # Front-run buffer: 0.20% above the order block / fractal support low for maximum fill probability.
+        FRONT_RUN_PCT = 0.0020
+        min_tp1_target = entry - (1.5 * risk)  # 1.5R below entry
+        max_tp1_target = entry - (2.0 * risk)  # 2.0R below entry
         
-        base_ssl = [p for p in ssl_levels if p <= pool_threshold]
-        irl_ssl = [p for p in internal_ssl if p <= pool_threshold]
-        erl_ssl = [p for p in refine_ssl if p <= pool_threshold]
-        all_ssl = sorted(list(set(base_ssl + irl_ssl + erl_ssl)), reverse=True)
+        all_ssl = sorted(list(set(ssl_levels + internal_ssl + refine_ssl)), reverse=True)
+        eligible_tp1_pools = [p for p in all_ssl if (p * (1.0 + FRONT_RUN_PCT)) <= min_tp1_target and (p * (1.0 + FRONT_RUN_PCT)) >= max_tp1_target]
         
-        if len(all_ssl) >= 1:
-            raw_tp1 = all_ssl[0]
+        if eligible_tp1_pools:
+            raw_tp1 = eligible_tp1_pools[0]
             tp1 = round(raw_tp1 * (1.0 + FRONT_RUN_PCT), 6)
-            lbl1 = "Order Block / Liquidity Target 1 (0.35% Front-Run Above Low)"
+            rr_val = round((entry - tp1) / risk, 1)
+            lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
         else:
-            tp1 = entry - (2.0 * risk)
-            lbl1 = "2.0 R:R Expansion Target 1"
+            tp1 = round(entry - (2.0 * risk), 6)
+            lbl1 = "2.0 R:R Target 1 (70% Book)"
 
-        lower_ssl = [p for p in all_ssl if p <= entry - (5.0 * risk)]
+        lower_ssl = [p for p in all_ssl if p <= entry - (4.0 * risk)]
         if len(lower_ssl) >= 1:
             tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
             lbl2 = f"Major Liquidity Target 2 ({round((entry-tp2)/risk, 1)}R Runner)"
         else:
-            tp2 = min(tp1 * 0.995, entry - (6.0 * risk))
+            tp2 = min(tp1 * 0.995, round(entry - (6.0 * risk), 6))
             lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
 
         rr1 = (entry - tp1) / risk
