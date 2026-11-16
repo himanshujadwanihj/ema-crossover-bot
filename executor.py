@@ -261,16 +261,19 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.01, round(f_qty, 2))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
         rounded = max(0.1, round(f_qty, 1))
+    elif any(c in clean_sym for c in ('NEAR', 'AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM', 'ZEC', 'TAO', 'MKR', 'COMP', 'QNT')):
+        rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY')):
         rounded = max(1, int(round(f_qty)))
-    elif any(c in clean_sym for c in ('NEAR', 'AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM')):
-        rounded = max(0.1, round(f_qty, 1))
     elif price >= 100:
         rounded = max(0.1, round(f_qty, 1))
     elif price >= 30:
         rounded = max(0.1, round(f_qty, 1))
+    elif f_qty < 1.0:
+        # High-value assets where notional size is under 1 unit (e.g. 0.15 TAO, 0.11 ZEC)
+        rounded = max(0.01, round(f_qty, 2)) if f_qty < 0.1 else max(0.1, round(f_qty, 1))
     else:
-        # Altcoins with price < $30 (PENDLE, AVAX, TIA, SEI, ONDO, RENDER, ENA, DOGE, XRP, XLM, etc.): whole integers (0 decimals)
+        # Standard low-priced altcoins (< $30): whole integers (0 decimals)
         rounded = max(1, int(round(f_qty)))
 
     if isinstance(rounded, float) and rounded.is_integer():
