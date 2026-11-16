@@ -966,7 +966,7 @@ class SharkExchangeExecutor:
                 if pos_direction == "BUY":
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    if not tp1 or tp1 <= fill_price:
+                    if not tp1 or tp1 <= fill_price or tp1 > (fill_price + 2.05 * risk):
                         tp1 = round_price(clean_sym, fill_price + 2.0 * risk)
                     if not tp2 or tp2 <= tp1:
                         tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 6.0 * risk))
@@ -975,7 +975,7 @@ class SharkExchangeExecutor:
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    if not tp1 or tp1 >= fill_price:
+                    if not tp1 or tp1 >= fill_price or tp1 < (fill_price - 2.05 * risk):
                         tp1 = round_price(clean_sym, fill_price - 2.0 * risk)
                     if not tp2 or tp2 >= tp1:
                         tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 6.0 * risk))
@@ -1076,15 +1076,17 @@ class SharkExchangeExecutor:
         else:
             logger.info(f"Fill Protection SL for {clean_sym}: Status {status_sl} - {res_sl}")
 
-        # 0. Clean up any accidental single 100% TP bracket order on position to enforce 70/30 split
+        # 0. Clean up any existing TP bracket/limit orders on position to enforce fresh 70/30 split
         try:
             cur_orders = await self.get_open_orders(session, symbol=clean_sym)
             for o in cur_orders:
-                is_tp = o.get("subType") == "TAKE_PROFIT" or o.get("linkType") in ("ORDER_TP", "ORDER_TP_SL")
-                if is_tp and (o.get("placeType") == "POSITION" or o.get("reduceOnly")):
+                is_tp = (o.get("subType") == "TAKE_PROFIT" or 
+                         o.get("linkType") in ("ORDER_TP", "ORDER_TP_SL") or 
+                         (o.get("type") == "LIMIT" and (o.get("placeType") == "POSITION" or o.get("reduceOnly"))))
+                if is_tp:
                     cid_tp = o.get("clientOrderId")
                     if cid_tp:
-                        logger.info(f"Purging old 100% TP bracket {cid_tp} for {clean_sym} to enforce exact 70/30 split")
+                        logger.info(f"Purging old TP order {cid_tp} for {clean_sym} to enforce fresh 70/30 split")
                         await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid_tp)})
         except Exception as e_clean:
             logger.debug(f"TP bracket cleanup check error for {clean_sym}: {e_clean}")
@@ -1830,16 +1832,45 @@ class SharkExchangeExecutor:
                     tp2 = state_entry.get("tp2")
                     tp3 = state_entry.get("tp3")
 
+                initial_sl_val = float(state_entry.get("initial_sl") or 0) if state_entry else 0
+                risk_step = abs(entry_price - initial_sl_val) if (initial_sl_val > 0 and initial_sl_val != entry_price) else (entry_price * 0.015)
+
                 if not tp1 or not tp2 or not tp3:
-                    risk = entry_price * 0.015
                     if direction == "BUY":
-                        tp1 = tp1 or (entry_price + 1.0 * risk)
-                        tp2 = tp2 or (entry_price + 1.6 * risk)
-                        tp3 = tp3 or (entry_price + 2.5 * risk)
+                        tp1 = tp1 or round_price(sym, entry_price + 2.0 * risk_step)
+                        tp2 = tp2 or round_price(sym, entry_price + 6.0 * risk_step)
+                        tp3 = tp2
                     else:
-                        tp1 = tp1 or (entry_price - 1.0 * risk)
-                        tp2 = tp2 or (entry_price - 1.6 * risk)
-                        tp3 = tp3 or (entry_price - 2.5 * risk)
+                        tp1 = tp1 or round_price(sym, entry_price - 2.0 * risk_step)
+                        tp2 = tp2 or round_price(sym, entry_price - 6.0 * risk_step)
+                        tp3 = tp2
+
+                # Active Trade TP1 Re-Alignment: Ensure TP1 never exceeds 2.05R
+                if not (state_entry and state_entry.get("tp1_hit")):
+                    if direction == "BUY":
+                        if tp1 and tp1 > (entry_price + 2.05 * risk_step):
+                            new_tp1 = round_price(sym, entry_price + 2.0 * risk_step)
+                            logger.info(f"🎯 REALIGN TP1 [BUY]: {sym} TP1 {tp1} exceeds 2.0R. Realigning to 2.0R: {new_tp1}")
+                            tp1 = new_tp1
+                            from state import _load, _save
+                            st_map = _load()
+                            for k_st in list(st_map.keys()):
+                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    st_map[k_st]["tp1"] = tp1
+                                    _save(st_map)
+                                    break
+                    else:
+                        if tp1 and tp1 < (entry_price - 2.05 * risk_step):
+                            new_tp1 = round_price(sym, entry_price - 2.0 * risk_step)
+                            logger.info(f"🎯 REALIGN TP1 [SELL]: {sym} TP1 {tp1} exceeds 2.0R. Realigning to 2.0R: {new_tp1}")
+                            tp1 = new_tp1
+                            from state import _load, _save
+                            st_map = _load()
+                            for k_st in list(st_map.keys()):
+                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    st_map[k_st]["tp1"] = tp1
+                                    _save(st_map)
+                                    break
 
                 # Fire step-trailing SL on genuine TP hit transitions (supports both 70/30 2-TP and legacy 3-TP)
                 if tps_hit > 0:
@@ -2033,16 +2064,28 @@ class SharkExchangeExecutor:
                                     self._tp_sl_heal_lock[sym + "_sl_adjust"] = time.time()
                                     break
 
-                # TP HEAL & SCALE-IN RE-ALIGN: Re-place 70/30 TPs if missing or undersized due to scale-in
+                # TP HEAL & SCALE-IN / 2.0R RE-ALIGN: Re-place 70/30 TPs if missing, undersized, or distant (> 2.05R)
                 total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
                 is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.65))
-                if (current_tp_count == 0 or is_tp_undersized) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
+
+                has_distant_tp1 = False
+                if not tp1_already_hit and pos_qty_abs > 0 and tp_orders:
+                    for o_tp in tp_orders:
+                        o_px = float(o_tp.get("price") or 0)
+                        if direction == "BUY" and o_px > (entry_price + 2.05 * risk_step):
+                            has_distant_tp1 = True
+                            break
+                        elif direction == "SELL" and o_px < (entry_price - 2.05 * risk_step):
+                            has_distant_tp1 = True
+                            break
+
+                if (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
                     if never_healed or (time.time() - last_heal > 120):
-                        reason_lbl = "scale-in expansion" if is_tp_undersized else ("fresh fill" if never_healed else "re-heal")
-                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — re-placing 70/30 TP limits now")
+                        reason_lbl = "2.0R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("fresh fill" if never_healed else "re-heal"))
+                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — re-placing 70/30 TP limits now (TP1={tp1})")
                         st_heal = get_latest_symbol_state(sym)
                         sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
                         await self.place_tp_limits(
