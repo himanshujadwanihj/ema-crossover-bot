@@ -1927,15 +1927,54 @@ class SharkExchangeExecutor:
                                     _save(st_map)
                                     break
 
+                # ── Strict Fill Verification & False TP1 Auto-Correction Shield ───────────────
+                orig_qty = float(pos.get("primaryOrdersQty") or (state_entry.get("total_qty") if state_entry else 0) or pos_qty_abs)
+                realized_pnl_inr = float(pos.get("realizedProfitInMarginAsset") or 0.0)
+                price_at_tp1 = False
+                if tp1 and mark_p > 0:
+                    price_at_tp1 = (direction == "BUY" and mark_p >= tp1 * 0.998) or (direction == "SELL" and mark_p <= tp1 * 1.002)
+
+                # Self-Healing False TP1 State Correction:
+                # If state mistakenly claims tp1_hit=True, but position on exchange is still full size (pos_qty_abs >= orig_qty * 0.85)
+                # and price has not reached TP1 and no profit realized, reset tp1_hit to False!
+                if state_entry and state_entry.get("tp1_hit"):
+                    if pos_qty_abs >= (orig_qty * 0.85) and realized_pnl_inr <= 0 and not price_at_tp1:
+                        logger.warning(
+                            f"🛡️ FALSE TP1 RECOVERY: {sym} had tp1_hit=True in state, but exchange position is still full size "
+                            f"({pos_qty_abs}/{orig_qty}) and mark price ({mark_p}) has not reached TP1 ({tp1}). Resetting tp1_hit=False!"
+                        )
+                        state_entry["tp1_hit"] = False
+                        state_entry.pop("tp1_hit_at", None)
+                        from state import _load, _save
+                        st_map = _load()
+                        for k_st in list(st_map.keys()):
+                            if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                st_map[k_st]["tp1_hit"] = False
+                                st_map[k_st].pop("tp1_hit_at", None)
+                                _save(st_map)
+                                break
+
                 # Fire step-trailing SL on genuine TP hit transitions (supports both 70/30 2-TP and legacy 3-TP)
                 if tps_hit > 0:
                     logger.info(f"🎯 TP MONITOR: {sym} [{direction}] TPs {prev_tp_count}→{current_tp_count}")
 
+                    # STRICT TRIPLE-VERIFICATION FOR TP1:
+                    # 1. Price MUST have reached TP1
+                    # 2. Position quantity on exchange MUST have reduced (pos_qty_abs <= orig_qty * 0.60) OR broker confirmed realized profit > 0
+                    is_genuine_tp1_fill = (price_at_tp1 and (pos_qty_abs <= orig_qty * 0.60 or realized_pnl_inr > 0))
+
                     # 1. TP1 Hit: 70% Booked (transition 2→1 in 70/30 model, or 3→2 in legacy)
                     if (not state_entry or not state_entry.get("tp1_hit")) and current_tp_count >= 1:
-                        logger.info(f"  → TP1 HIT (70% Booked on Exchange): trailing SL to +0.4R Profit Floor")
-                        await self.update_trailing_sl_on_tp_hit(
-                            session, sym, "TP1", entry_price, tp1, tp2, tp3)
+                        if is_genuine_tp1_fill:
+                            logger.info(f"  → TP1 HIT CONFIRMED (70% Booked on Exchange, Qty {orig_qty}→{pos_qty_abs}): trailing SL to CTC")
+                            await self.update_trailing_sl_on_tp_hit(
+                                session, sym, "TP1", entry_price, tp1, tp2, tp3)
+                        else:
+                            logger.info(
+                                f"  → TP order count shifted for {sym} ({prev_tp_count}→{current_tp_count}) "
+                                f"but NOT confirmed by exchange (Pos: {pos_qty_abs}/{orig_qty}, Mark: {mark_p}, TP1: {tp1}, RealizedPnL: {realized_pnl_inr}). "
+                                f"Ignoring false trigger (orders refreshing/re-healing)."
+                            )
 
                     # 2. Final Exit: 0 TPs remaining
                     elif current_tp_count == 0:
@@ -2232,9 +2271,15 @@ class SharkExchangeExecutor:
 
         if tp_stage == "TP1":
             # 1. 70% Profit Booked at TP1
-            pnl_usdt = calc_pnl(tp1_qty, tp1, real_entry, direction)
-            pnl_inr  = pnl_usdt * self.usd_inr_rate
-            runner_qty = real_qty if real_qty > 0 else tp3_qty
+            realized_inr = float(pos.get("realizedProfitInMarginAsset") or 0.0) if pos else 0.0
+            realized_usd = float(pos.get("realizedProfit") or 0.0) if pos else 0.0
+            if realized_inr > 0:
+                pnl_inr = realized_inr
+                pnl_usdt = realized_usd if realized_usd > 0 else (realized_inr / self.usd_inr_rate)
+            else:
+                pnl_usdt = calc_pnl(tp1_qty, tp1, real_entry, direction)
+                pnl_inr  = pnl_usdt * self.usd_inr_rate
+            runner_qty = real_qty if (real_qty > 0 and real_qty < initial_qty * 0.85) else tp3_qty
 
             # 2. Shift SL to Cost-to-Cost (Breakeven + 0.15% Fee Shield)
             risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (real_entry * 0.012)
@@ -2268,11 +2313,12 @@ class SharkExchangeExecutor:
 
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
+            conf_tag = " [Exchange Verified]" if realized_inr > 0 else ""
             msg = (
                 f"🎯 <b>REAL LIVE TRADE: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                 f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
-                f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR) 💰\n"
+                f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
                 f"🛡️ <b>SL Trailed to Entry Price (Cost-to-Cost / Breakeven):</b> {format_price(safe_trailed_sl)}\n"
                 f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
                 f"<i>Trade is now 100% Zero-Risk. 30% runner trailing for full trend capture!</i>{bal_block}"
