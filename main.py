@@ -1374,8 +1374,8 @@ async def main_loop():
                                     sig = cand["signal"]
                                     stars = cand.get("aligned_count", 0)
 
-                                    # Verify duplicate check before submitting order
-                                    if await executor.has_active_trade_on_exchange(session, sym):
+                                    # Verify duplicate check before submitting order (allows trend scale-in if TP1 already booked)
+                                    if await executor.has_active_trade_on_exchange(session, sym, signal=sig):
                                         logger.info(f"Skipping {sym} — active trade/order already exists on exchange for this symbol.")
                                         continue
 

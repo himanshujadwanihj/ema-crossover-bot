@@ -543,11 +543,14 @@ class SharkExchangeExecutor:
                 return p
         return None
 
-    async def has_active_trade_on_exchange(self, session: aiohttp.ClientSession, symbol: str) -> bool:
+    async def has_active_trade_on_exchange(self, session: aiohttp.ClientSession, symbol: str, signal: str = None) -> bool:
         """
-        SINGLE ORDER SHIELD (Portfolio Cap Removed):
+        SINGLE ORDER SHIELD & TREND SCALE-IN ENGINE:
         Checks if symbol already has an active open position or pending entry order on Shark Exchange.
-        Prevents duplicate entries on the same symbol while allowing unlimited concurrent trades across different symbols.
+        - Prevents duplicate entries on the same symbol while allowing unlimited concurrent trades across different symbols.
+        - TREND SCALE-IN (PYRAMIDING): If an existing position has already secured TP1 (70% profit booked,
+          only 30% runner remaining, tp1_hit == True) AND the new signal is in the SAME direction,
+          AND no pending entry limit order is currently resting on exchange, allows scaling in!
         """
         if not self.is_configured():
             return False
@@ -589,12 +592,42 @@ class SharkExchangeExecutor:
             else:
                 self._session_active_symbols.pop(sym_k, None)
 
+        # TREND SCALE-IN ENGINE:
+        # If position exists on exchange, but NO pending entry order is resting:
+        if clean_sym in position_symbols and clean_sym not in pending_entry_symbols and signal:
+            sig_upper = str(signal).upper()
+            sig_dir = "BUY" if sig_upper in ("BUY", "LONG") else "SELL"
+
+            pos_obj = None
+            for p in positions:
+                if to_shark_symbol(p.get("contractPair") or p.get("symbol") or p.get("contractName") or "") == clean_sym:
+                    pos_obj = p
+                    break
+
+            if pos_obj:
+                pos_dir_raw = str(pos_obj.get("positionType") or pos_obj.get("positionSide") or pos_obj.get("side") or pos_obj.get("type") or "").upper()
+                pos_dir = "BUY" if pos_dir_raw in ("LONG", "BUY") else "SELL"
+
+                # If new signal is in the SAME direction as existing runner
+                if pos_dir == sig_dir:
+                    from state import get_latest_symbol_state
+                    st_entry = get_latest_symbol_state(clean_sym)
+                    tp1_hit = bool(st_entry and st_entry.get("tp1_hit"))
+                    realized_pnl = float(pos_obj.get("realizedProfitInMarginAsset") or pos_obj.get("realizedProfit") or 0.0)
+
+                    # Only allow scale-in if TP1 (70%) was already booked or profit secured
+                    if tp1_hit or realized_pnl > 15.0:
+                        logger.info(
+                            f"🚀 TREND SCALE-IN PERMITTED: {clean_sym} [{sig_dir}] has booked TP1 (70%) / 30% runner active "
+                            f"(Realized PnL: ₹{realized_pnl:,.2f}). Allowing scale-in entry order to ride the trend!"
+                        )
+                        return False
+
         # Merge Exchange state with local in-memory active slots set (Zero Race Condition Shield)
         active_symbols = position_symbols | pending_entry_symbols | unexpired_local
         logger.info(f"Exchange active symbols check: positions={position_symbols} pending={pending_entry_symbols} local={unexpired_local}")
 
-        # USER DIRECTIVE: Portfolio cap removed completely from everywhere!
-        # Only check if active trade or pending order already exists for this exact symbol (duplicate guard)
+        # Check if active trade or pending order already exists for this exact symbol (duplicate guard)
         if clean_sym in active_symbols:
             logger.warning(f"SINGLE ORDER SHIELD: Active trade or order already exists for {clean_sym}. Skipping duplicate.")
             return True
@@ -716,9 +749,9 @@ class SharkExchangeExecutor:
             logger.info(f"AUTO-TRADING NOT CONFIGURED: Keys or toggle not set. Skipping execution for {clean_sym}.")
             return {"status": "skipped", "reason": "Exchange executor not configured or disabled"}
 
-        # 2. Single Order Margin Shield Guard
+        # 2. Single Order Margin Shield Guard & Trend Scale-In
         try:
-            if await self.has_active_trade_on_exchange(session, clean_sym):
+            if await self.has_active_trade_on_exchange(session, clean_sym, signal=signal):
                 return {"status": "skipped", "reason": f"Active trade or orders already exist on Shark for {clean_sym}"}
         except Exception as e:
             logger.error(f"Error checking exchange state for {clean_sym}: {e}")
@@ -1935,6 +1968,18 @@ class SharkExchangeExecutor:
 
                 # 2. Check if existing SL order is beyond liquidation or too tight:
                 elif sl_orders and pos_qty_abs > 0:
+                    # Check if existing SL order quantity is under-sized compared to live position (e.g. after scale-in / averaging)
+                    total_sl_qty = sum(abs(float(o.get("quantity") or o.get("origQty") or o.get("amount") or 0)) for o in sl_orders)
+                    if total_sl_qty < (pos_qty_abs * 0.90):
+                        last_heal = self._tp_sl_heal_lock.get(sym + "_sl_scalein", 0)
+                        if time.time() - last_heal > 15:
+                            logger.warning(f"🛡️ SCALE-IN SL RESIZE: Live position {sym} grew to {pos_qty_abs} but SL order only covers {total_sl_qty}. Resizing SL to full position size!")
+                            st_heal = get_latest_symbol_state(sym)
+                            sl_p_cur = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("price") or st_heal.get("cur_sl") or safe_sl_threshold)
+                            safe_sl = enforce_sl_above_liquidation(sym, entry_price, sl_p_cur, direction, self.leverage, live_liq)
+                            await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
+                            self._tp_sl_heal_lock[sym + "_sl_scalein"] = time.time()
+
                     for o_sl in sl_orders:
                         sl_p_raw = float(o_sl.get("stopLossPrice") or o_sl.get("stopPrice") or o_sl.get("price") or 0)
                         if sl_p_raw > 0:
@@ -1961,17 +2006,29 @@ class SharkExchangeExecutor:
                                     self._tp_sl_heal_lock[sym + "_sl_adjust"] = time.time()
                                     break
 
-                # TP HEAL: Re-place TPs if missing and position still open
-                if current_tp_count == 0 and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
+                # TP HEAL & SCALE-IN RE-ALIGN: Re-place 70/30 TPs if missing or undersized due to scale-in
+                total_tp_qty = sum(abs(float(o.get("quantity") or o.get("origQty") or o.get("amount") or 0)) for o in tp_orders)
+                is_tp_undersized = (pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty < (pos_qty_abs * 0.65))
+                if (current_tp_count == 0 or is_tp_undersized) and pos_qty_abs > 0 and not is_first_run and tps_hit == 0:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
-                    if never_healed or (time.time() - last_heal > 120):
-                        logger.warning(f"⚠️ {sym}: 0 TPs {'(fresh fill)' if never_healed else '(re-heal)'} — placing TPs now")
+                    if never_healed or (time.time() - last_heal > 60):
+                        reason_lbl = "scale-in expansion" if is_tp_undersized else ("fresh fill" if never_healed else "re-heal")
+                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — re-placing 70/30 TP limits now")
                         st_heal = get_latest_symbol_state(sym)
                         sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
                         await self.place_tp_limits(
                             session, sym, direction, entry_price, tp1, tp2, tp3, initial_sl=sl_val)
                         self._tp_sl_heal_lock[sym + "_tp"] = time.time()
+                        if is_tp_undersized:
+                            from state import _load, _save
+                            st_map = _load()
+                            for k_st in list(st_map.keys()):
+                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    st_map[k_st]["tp1_hit"] = False
+                                    st_map[k_st]["total_qty"] = pos_qty_abs
+                                    _save(st_map)
+                                    break
 
                 self._tp_order_count_cache[sym] = current_tp_count
 
