@@ -2026,12 +2026,12 @@ class SharkExchangeExecutor:
 
                 # 2. Check if existing SL order is beyond liquidation or too tight:
                 elif sl_orders and pos_qty_abs > 0:
-                    # Check if existing SL order quantity is under-sized compared to live position (e.g. after scale-in / averaging)
+                    # Check if existing SL order quantity is misaligned with live position (scale-in or partial TP fills)
                     total_sl_qty = sum(self.extract_order_qty(o) for o in sl_orders)
-                    if total_sl_qty > 0 and total_sl_qty < (pos_qty_abs * 0.90):
+                    if total_sl_qty > 0 and (total_sl_qty < (pos_qty_abs * 0.90) or total_sl_qty > (pos_qty_abs * 1.10)):
                         last_heal = self._tp_sl_heal_lock.get(sym + "_sl_scalein", 0)
                         if time.time() - last_heal > 60:
-                            logger.warning(f"🛡️ SCALE-IN SL RESIZE: Live position {sym} grew to {pos_qty_abs} but SL order only covers {total_sl_qty}. Resizing SL to full position size!")
+                            logger.warning(f"🛡️ POSITION SL RESIZE: Live position {sym} is {pos_qty_abs} but SL order covers {total_sl_qty}. Resizing SL to match exact remaining position size!")
                             st_heal = get_latest_symbol_state(sym)
                             sl_p_cur = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("price") or st_heal.get("cur_sl") or safe_sl_threshold)
                             safe_sl = enforce_sl_above_liquidation(sym, entry_price, sl_p_cur, direction, self.leverage, live_liq)
