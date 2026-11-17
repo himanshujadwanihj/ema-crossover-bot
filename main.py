@@ -383,6 +383,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
             tf_states[l] = get_trend_state(tf_data.get(l))
             
         signals_sent = 0
+        sq_candidate = None
 
         macro_struct = "Unknown"
         if "1D" in tf_data:
@@ -518,6 +519,27 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2)
                                         mark_radar_triggered(symbol)
                                         logger.info(f"💥 DEDICATED 1H SQUEEZE BREAKOUT TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
+
+                                        # AUTO-TRADING ENROLLMENT:
+                                        # Capture 1H Squeeze Breakout candidate for Shark Exchange execution
+                                        sq_candidate = {
+                                            "symbol": symbol,
+                                            "signal": sq_signal,
+                                            "entry": entry,
+                                            "sl": dyn_sl,
+                                            "tp1": tp1,
+                                            "tp2": tp2,
+                                            "tp": tp1,
+                                            "aligned_count": 4,  # High-conviction verified squeeze with CVD + volume
+                                            "is_3_htf_aligned": True,
+                                            "is_30m_early": False,
+                                            "is_special": (symbol in SPECIAL_LIST),
+                                            "is_dedicated_squeeze": True,
+                                            "unique_key": unique_sq_key,
+                                            "candle_ts": candle_ts,
+                                            "rr2": rr2 or 2.0,
+                                            "rsi": sq_rsi,
+                                        }
             except Exception as e_sq_eng:
                 logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
 
@@ -525,6 +547,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
         # BUG #1 FIX: Collect ALL crossover candidates from ALL timeframes (not just the first one).
         # Previously `return cand` was inside the loop causing all 4H/1D signals to be silently dropped.
         all_crossover_candidates = []
+        if sq_candidate:
+            all_crossover_candidates.append(sq_candidate)
 
         for label in ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]:
             is_gold = symbol in ["XAU/USD", "XAUT/USDT", "XAUTUSDT"] or "XAU" in symbol.upper()
@@ -1353,6 +1377,20 @@ async def main_loop():
                                 if not is_allowed_trading_asset(sym):
                                     return False, f"{sym} is outside Approved Top 25 volume crypto & commodities list."
 
+                                # USER DIRECTIVE: Squeeze Breakout Trades Included in Auto-Trading!
+                                # Dedicated 1H Squeeze Breakout: already passed institutional 6-point verification (TTM squeeze coiling + volume surge >= 1.5x + CVD aligned + body ratio >= 50% + wick cap <= 35% + BTC micro-gate)
+                                if c.get("is_dedicated_squeeze"):
+                                    if rsi is not None:
+                                        try:
+                                            f_rsi = float(rsi)
+                                            if sig == "BUY" and not (40.0 <= f_rsi <= 75.0):
+                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [40.0 - 75.0]."
+                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 60.0):
+                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [25.0 - 60.0]."
+                                        except (ValueError, TypeError):
+                                            pass
+                                    return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"
+
                                 # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
                                 if stars < 3:
                                     return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
@@ -1410,8 +1448,9 @@ async def main_loop():
 
                                     stars = c.get("aligned_count", 0)
                                     early = 0.5 if c.get("is_30m_early") else 0.0
-                                    signal_score = stars + early
-                                    rr_score = c.get("rr3") or 1.5
+                                    sq_boost = 1.0 if c.get("is_dedicated_squeeze") else 0.0
+                                    signal_score = stars + early + sq_boost
+                                    rr_score = c.get("rr3") or c.get("rr2") or 1.5
                                     return (tier, signal_score, rr_score)
 
                                 eligible_candidates.sort(key=_coin_tier_rank, reverse=True)
