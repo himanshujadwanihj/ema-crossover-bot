@@ -1046,21 +1046,21 @@ class SharkExchangeExecutor:
                 if pos_direction == "BUY":
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    if not tp1 or tp1 <= fill_price or tp1 > (fill_price + 2.05 * risk):
-                        tp1 = round_price(clean_sym, fill_price + 2.0 * risk)
+                    if not tp1 or tp1 <= fill_price or tp1 > (fill_price + 1.55 * risk):
+                        tp1 = round_price(clean_sym, fill_price + 1.5 * risk)
                     if not tp2 or tp2 <= tp1:
-                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 6.0 * risk))
+                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 4.0 * risk))
                     if not tp3 or tp3 <= tp2:
-                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 6.0 * risk))
+                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 4.0 * risk))
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    if not tp1 or tp1 >= fill_price or tp1 < (fill_price - 2.05 * risk):
-                        tp1 = round_price(clean_sym, fill_price - 2.0 * risk)
+                    if not tp1 or tp1 >= fill_price or tp1 < (fill_price - 1.55 * risk):
+                        tp1 = round_price(clean_sym, fill_price - 1.5 * risk)
                     if not tp2 or tp2 >= tp1:
-                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 6.0 * risk))
+                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 4.0 * risk))
                     if not tp3 or tp3 >= tp2:
-                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 6.0 * risk))
+                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 4.0 * risk))
 
                 # Update state so downstream monitoring uses correct direction TPs
                 from state import update_trade_progress, get_latest_symbol_state
@@ -1303,7 +1303,8 @@ class SharkExchangeExecutor:
         symbol: str,
         direction: str,
         new_sl: float,
-        qty: float
+        qty: float,
+        is_trailed: bool = False
     ) -> bool:
         """
         Trails/replaces the stop-loss order on Shark Exchange:
@@ -1325,14 +1326,10 @@ class SharkExchangeExecutor:
             sl_orders = [
                 o for o in open_orders
                 if (
-                    o.get("placeType") == "POSITION"
-                    or o.get("reduceOnly")
-                    or o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                    o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
                     or o.get("subType") == "STOP_LOSS"
-                ) and not (
-                    str(o.get("placeType") or "").upper() == "ORDER_FORM"
-                    and str(o.get("type") or "").upper() == "LIMIT"
-                )
+                    or (o.get("placeType") == "POSITION" and (o.get("stopLossPrice") or o.get("stopPrice")))
+                ) and str(o.get("type") or "").upper() != "LIMIT"
             ]
 
             # 2. Get active position for positionId and actual qty
@@ -1350,7 +1347,7 @@ class SharkExchangeExecutor:
             # Enforce Liquidation Shield on modified SL
             live_liq = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
             entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or clean_new_sl)
-            clean_new_sl = enforce_sl_above_liquidation(clean_sym, entry_p, clean_new_sl, direction, self.leverage, live_liq, is_trailed=True)
+            clean_new_sl = enforce_sl_above_liquidation(clean_sym, entry_p, clean_new_sl, direction, self.leverage, live_liq, is_trailed=is_trailed)
             clean_qty  = round_coin_qty(clean_sym, actual_qty, price=clean_new_sl)
 
             # ── KEY FIX: Cancel OLD SL FIRST by orderId or clientOrderId to avoid error 3023 ──
@@ -1897,12 +1894,12 @@ class SharkExchangeExecutor:
                             target_sl = float(state_entry.get("tp1"))
                             if (direction == "BUY" and target_sl < entry_price) or (direction == "SELL" and target_sl > entry_price):
                                 logger.info(f"TP Monitor [INIT]: {sym} TP2 hit in state. Ensuring SL is at TP1 ({target_sl}) on exchange.")
-                                await self.modify_stop_loss(session, sym, direction, target_sl, pos_qty_abs)
+                                await self.modify_stop_loss(session, sym, direction, target_sl, pos_qty_abs, is_trailed=True)
                         elif state_entry.get("tp1_hit"):
                             target_sl = float(state_entry.get("initial_sl") or entry_price)
                             if (direction == "BUY" and target_sl <= entry_price) or (direction == "SELL" and target_sl >= entry_price):
                                 logger.info(f"TP Monitor [INIT]: {sym} TP1 hit in state. Ensuring SL is at CTC ({target_sl}) on exchange.")
-                                await self.modify_stop_loss(session, sym, direction, target_sl, pos_qty_abs)
+                                await self.modify_stop_loss(session, sym, direction, target_sl, pos_qty_abs, is_trailed=True)
                 else:
                     prev_tp_count = self._tp_order_count_cache[sym]
 
@@ -1920,20 +1917,20 @@ class SharkExchangeExecutor:
 
                 if not tp1 or not tp2 or not tp3:
                     if direction == "BUY":
-                        tp1 = tp1 or round_price(sym, entry_price + 2.0 * risk_step)
-                        tp2 = tp2 or round_price(sym, entry_price + 6.0 * risk_step)
+                        tp1 = tp1 or round_price(sym, entry_price + 1.5 * risk_step)
+                        tp2 = tp2 or round_price(sym, entry_price + 5.0 * risk_step)
                         tp3 = tp2
                     else:
-                        tp1 = tp1 or round_price(sym, entry_price - 2.0 * risk_step)
-                        tp2 = tp2 or round_price(sym, entry_price - 6.0 * risk_step)
+                        tp1 = tp1 or round_price(sym, entry_price - 1.5 * risk_step)
+                        tp2 = tp2 or round_price(sym, entry_price - 5.0 * risk_step)
                         tp3 = tp2
 
-                # Active Trade TP1 Re-Alignment: Ensure TP1 never exceeds 2.05R
+                # Active Trade TP1 Re-Alignment: Ensure TP1 never exceeds 1.55R
                 if not (state_entry and state_entry.get("tp1_hit")):
                     if direction == "BUY":
-                        if tp1 and tp1 > (entry_price + 2.05 * risk_step):
-                            new_tp1 = round_price(sym, entry_price + 2.0 * risk_step)
-                            logger.info(f"🎯 REALIGN TP1 [BUY]: {sym} TP1 {tp1} exceeds 2.0R. Realigning to 2.0R: {new_tp1}")
+                        if tp1 and tp1 > (entry_price + 1.55 * risk_step):
+                            new_tp1 = round_price(sym, entry_price + 1.5 * risk_step)
+                            logger.info(f"🎯 REALIGN TP1 [BUY]: {sym} TP1 {tp1} exceeds 1.5R. Realigning to 1.5R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -1943,9 +1940,9 @@ class SharkExchangeExecutor:
                                     _save(st_map)
                                     break
                     else:
-                        if tp1 and tp1 < (entry_price - 2.05 * risk_step):
-                            new_tp1 = round_price(sym, entry_price - 2.0 * risk_step)
-                            logger.info(f"🎯 REALIGN TP1 [SELL]: {sym} TP1 {tp1} exceeds 2.0R. Realigning to 2.0R: {new_tp1}")
+                        if tp1 and tp1 < (entry_price - 1.55 * risk_step):
+                            new_tp1 = round_price(sym, entry_price - 1.5 * risk_step)
+                            logger.info(f"🎯 REALIGN TP1 [SELL]: {sym} TP1 {tp1} exceeds 1.5R. Realigning to 1.5R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -2060,9 +2057,9 @@ class SharkExchangeExecutor:
                             if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
                                 ratchet_sl = round_price(sym, entry_price + (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
-                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
+                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val, is_trailed=True)
                                 logger.info(f"🔥 TRAILING RATCHET [BUY]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
-                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
+                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs, is_trailed=True)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
@@ -2106,9 +2103,9 @@ class SharkExchangeExecutor:
                             if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
                                 ratchet_sl = round_price(sym, entry_price - (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
-                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val)
+                                safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val, is_trailed=True)
                                 logger.info(f"🔥 TRAILING RATCHET [SELL]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
-                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs)
+                                await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs, is_trailed=True)
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
@@ -2186,7 +2183,7 @@ class SharkExchangeExecutor:
                                     self._tp_sl_heal_lock[sym + "_sl_adjust"] = time.time()
                                     break
 
-                # TP HEAL & SCALE-IN / 2.0R RE-ALIGN: Re-place 70/30 TPs (or 100% 1-TP) if missing, undersized, or distant (> 2.05R)
+                # TP HEAL & SCALE-IN / 1.5R RE-ALIGN: Re-place 70/30 TPs (or 100% 1-TP) if missing, undersized, or distant (> 1.55R)
                 total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
                 is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.95))
@@ -2198,11 +2195,11 @@ class SharkExchangeExecutor:
                     if valid_tp_prices:
                         if direction == "BUY":
                             nearest_tp = min(valid_tp_prices)
-                            if nearest_tp > (entry_price + 2.05 * risk_step):
+                            if nearest_tp > (entry_price + 1.55 * risk_step):
                                 has_distant_tp1 = True
                         else:
                             nearest_tp = max(valid_tp_prices)
-                            if nearest_tp < (entry_price - 2.05 * risk_step):
+                            if nearest_tp < (entry_price - 1.55 * risk_step):
                                 has_distant_tp1 = True
 
                 should_heal_tp = (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and tps_hit == 0 and not tp1_already_hit
@@ -2210,7 +2207,7 @@ class SharkExchangeExecutor:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
                     if never_healed or (time.time() - last_heal > 30):
-                        reason_lbl = "2.0R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
+                        reason_lbl = "1.5R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
                         logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={tp1})")
                         st_heal = get_latest_symbol_state(sym)
                         sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
@@ -2328,7 +2325,7 @@ class SharkExchangeExecutor:
             # 3. Modify Stop-Loss order on Shark Exchange to CTC (+0.4% Profit Floor) for remaining runner
             logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Runner qty={runner_qty})")
             if runner_qty > 0:
-                await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty)
+                await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty, is_trailed=True)
 
             # 4. Update persistent state
             st_map = _load()

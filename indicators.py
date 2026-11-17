@@ -150,10 +150,10 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         if signal == "BUY":
-            tp1, tp2 = entry + (2.0 * risk), entry + (6.0 * risk)
+            tp1, tp2 = entry + (1.5 * risk), entry + (4.0 * risk)
         else:
-            tp1, tp2 = entry - (2.0 * risk), entry - (6.0 * risk)
-        return sl, (tp1, tp2), (2.0, 6.0), ("2.0 R:R Target 1 (70% Book)", "6.0 R:R Target 2 (30% Runner)")
+            tp1, tp2 = entry - (1.5 * risk), entry - (4.0 * risk)
+        return sl, (tp1, tp2), (1.5, 4.0), ("1.5 R:R Target 1 (70% Book)", "4.0 R:R Target 2 (30% Runner)")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -267,12 +267,12 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: Smart 1.5R - 2.0R TP1 (70% Book) + 30% Trailing Runner
-        # Search for Liquidity Pools / Order Blocks between 1.5R and 2.0R.
+        # USER DIRECTIVE: High-Probability 1.5R TP1 (70% Book) + Trailing Multi-R Runner
+        # Search for Liquidity Pools / Order Blocks between 1.30R and 1.55R.
         # Front-run buffer: 0.20% below the order block / fractal resistance high for maximum fill probability.
         FRONT_RUN_PCT = 0.0020
-        min_tp1_target = entry + (1.5 * risk)
-        max_tp1_target = entry + (2.0 * risk)
+        min_tp1_target = entry + (1.30 * risk)
+        max_tp1_target = entry + (1.55 * risk)
         
         all_bsl = sorted(list(set(bsl_levels + internal_bsl + refine_bsl)))
         eligible_tp1_pools = [p for p in all_bsl if (p * (1.0 - FRONT_RUN_PCT)) >= min_tp1_target and (p * (1.0 - FRONT_RUN_PCT)) <= max_tp1_target]
@@ -283,8 +283,8 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             rr_val = round((tp1 - entry) / risk, 1)
             lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
         else:
-            tp1 = round(entry + (2.0 * risk), 6)
-            lbl1 = "2.0 R:R Target 1 (70% Book)"
+            tp1 = round(entry + (1.5 * risk), 6)
+            lbl1 = "1.5 R:R Target 1 (70% Book)"
 
         higher_bsl = [p for p in all_bsl if p >= entry + (4.0 * risk)]
         if len(higher_bsl) >= 1:
@@ -351,12 +351,12 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: Smart 1.5R - 2.0R TP1 (70% Book) + 30% Trailing Runner
-        # Search for Liquidity Pools / Order Blocks between 1.5R and 2.0R below entry.
+        # USER DIRECTIVE: High-Probability 1.5R TP1 (70% Book) + Trailing Multi-R Runner
+        # Search for Liquidity Pools / Order Blocks between 1.30R and 1.55R below entry.
         # Front-run buffer: 0.20% above the order block / fractal support low for maximum fill probability.
         FRONT_RUN_PCT = 0.0020
-        min_tp1_target = entry - (1.5 * risk)  # 1.5R below entry
-        max_tp1_target = entry - (2.0 * risk)  # 2.0R below entry
+        min_tp1_target = entry - (1.30 * risk)  # 1.30R below entry (closer)
+        max_tp1_target = entry - (1.55 * risk)  # 1.55R below entry (further)
         
         all_ssl = sorted(list(set(ssl_levels + internal_ssl + refine_ssl)), reverse=True)
         eligible_tp1_pools = [p for p in all_ssl if (p * (1.0 + FRONT_RUN_PCT)) <= min_tp1_target and (p * (1.0 + FRONT_RUN_PCT)) >= max_tp1_target]
@@ -367,8 +367,8 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             rr_val = round((entry - tp1) / risk, 1)
             lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
         else:
-            tp1 = round(entry - (2.0 * risk), 6)
-            lbl1 = "2.0 R:R Target 1 (70% Book)"
+            tp1 = round(entry - (1.5 * risk), 6)
+            lbl1 = "1.5 R:R Target 1 (70% Book)"
 
         lower_ssl = [p for p in all_ssl if p <= entry - (4.0 * risk)]
         if len(lower_ssl) >= 1:

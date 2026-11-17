@@ -944,7 +944,12 @@ async def main_loop():
         logger.warning(f"Could not resolve server IP: {e_ip}")
     
     try:
-        connector = aiohttp.TCPConnector(limit=100, limit_per_host=30, ttl_dns_cache=300)
+        try:
+            import certifi, ssl
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(limit=100, limit_per_host=30, ttl_dns_cache=300, ssl=ssl_ctx)
+        except Exception:
+            connector = aiohttp.TCPConnector(limit=100, limit_per_host=30, ttl_dns_cache=300, ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
             async def tp_monitor_worker():
                 logger.info("⚡ Fast TP/SL Monitor Worker STARTED (Polling every 5s for real-time exchange TP/SL hit alerts & order sweeps)")
