@@ -1006,13 +1006,25 @@ class SharkExchangeExecutor:
 
         clean_sym = clean_contract_symbol(symbol)
         try:
-            # Resolve actual SL: prefer explicit param → state → safe fallback (NOT entry!)
+            # Resolve actual SL: prefer explicit param → exchange live SL order → state → safe fallback (NOT entry!)
             actual_sl = initial_sl
+            if not actual_sl or actual_sl == entry:
+                open_ords = await self.get_open_orders(session, symbol=clean_sym)
+                sl_ords = [
+                    o for o in open_ords
+                    if (
+                        o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                        or o.get("subType") == "STOP_LOSS"
+                        or (o.get("placeType") == "POSITION" and (o.get("stopLossPrice") or o.get("stopPrice")))
+                    ) and str(o.get("type") or "").upper() != "LIMIT"
+                ]
+                if sl_ords:
+                    actual_sl = float(sl_ords[0].get("stopLossPrice") or sl_ords[0].get("stopPrice") or sl_ords[0].get("price") or 0)
             if not actual_sl or actual_sl == entry:
                 from state import get_latest_symbol_state
                 state_entry = get_latest_symbol_state(clean_sym)
                 if state_entry:
-                    actual_sl = float(state_entry.get("initial_sl") or state_entry.get("sl") or 0)
+                    actual_sl = float(state_entry.get("cur_sl") or state_entry.get("initial_sl") or state_entry.get("sl") or 0)
             # Last resort: 2% buffer (never breakeven)
             if not actual_sl or actual_sl == entry:
                 if direction.upper() in ("BUY", "LONG"):
@@ -1912,7 +1924,8 @@ class SharkExchangeExecutor:
                     tp2 = state_entry.get("tp2")
                     tp3 = state_entry.get("tp3")
 
-                initial_sl_val = float(state_entry.get("initial_sl") or 0) if state_entry else 0
+                live_sl_order_p = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
+                initial_sl_val = live_sl_order_p or (float(state_entry.get("initial_sl") or 0) if state_entry else 0)
                 risk_step = abs(entry_price - initial_sl_val) if (initial_sl_val > 0 and initial_sl_val != entry_price) else (entry_price * 0.015)
 
                 if not tp1 or not tp2 or not tp3:
@@ -2210,7 +2223,8 @@ class SharkExchangeExecutor:
                         reason_lbl = "1.5R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
                         logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={tp1})")
                         st_heal = get_latest_symbol_state(sym)
-                        sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
+                        sl_from_order = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
+                        sl_val = sl_from_order or float((st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price) if st_heal else entry_price)
                         await self.place_tp_limits(
                             session, sym, direction, entry_price, tp1, tp2, tp3, initial_sl=sl_val)
                         self._tp_sl_heal_lock[sym + "_tp"] = time.time()
