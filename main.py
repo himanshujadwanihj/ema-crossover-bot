@@ -135,6 +135,11 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             symbol = parts[0]
             direction = parts[2]
             
+            from executor import is_us_stock_token
+            if is_us_stock_token(symbol):
+                update_trade_outcome(key, "SIGNAL_ONLY_US_STOCK")
+                continue
+            
             entry = data.get("entry")
             sl = data.get("sl")
             initial_sl = data.get("initial_sl") or sl
@@ -270,28 +275,15 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                 if shark_order_placed:
                     continue
 
-                # Rule 2.5-Hour Time Shield (If active >2h 30m without hitting TP1, shift SL to Entry)
+                # Rule 2.5-Hour Time Shield (If active >2h without hitting TP1, shift SL to Entry for internal stats)
                 time_shield_hit = data.get("be_hit_time_shield", False)
                 if limit_filled and fill_dt and not tp1_hit and not time_shield_hit:
                     elapsed_since_fill = candle_dt - fill_dt
                     if elapsed_since_fill >= timedelta(hours=2):
                         time_shield_hit = True
                         update_trade_progress(key, be_hit_time_shield=True, new_sl=entry)
-                        # STRATEGY #6 FIX: Notify user when Time Shield activates (SL moved to breakeven)
-                        try:
-                            from telegram_bot import send_text_to_chat
-                            from config import TELEGRAM_TRADING_CHANNEL_ID
-                            ist_sym = symbol
-                            shield_msg = (
-                                f"🛡️ <b>2H TIME SHIELD ACTIVATED — SL MOVED TO BREAKEVEN</b>\n\n"
-                                f"<b>Asset:</b> {ist_sym} [{direction}]\n"
-                                f"<b>Entry:</b> {entry}\n"
-                                f"⏱️ Trade active for 2h without hitting TP1. SL auto-moved to <b>Entry (Breakeven)</b>.\n"
-                                f"<i>Position is now risk-free. If SL hits → reported as BREAKEVEN.</i>"
-                            )
-                            asyncio.create_task(send_text_to_chat(TELEGRAM_TRADING_CHANNEL_ID or "771305593", shield_msg))
-                        except Exception as _shield_err:
-                            logger.debug(f"Time shield notify error: {_shield_err}")
+                        # NOTE: Simulated paper signals NEVER send Telegram alerts to trading channel.
+                        # Real trade 2-Hour Time Shield alerts are handled exclusively by executor.py on real Shark positions.
 
                 # Rule 3: Multi-Stage Partial Profit & Trailing SL Check (+0.4R Profit-Lock Engine)
                 risk_dist = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
@@ -1390,7 +1382,13 @@ async def main_loop():
                                     eligible_candidates.append(c)
                                 else:
                                     logger.info(f"Auto-trade filtered candidate {c.get('symbol')} [{c.get('signal')}]: {reason}")
-                                    await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
+                                    from executor import is_us_stock_token
+                                    if is_us_stock_token(c.get("symbol", "")):
+                                        from state import update_trade_outcome, _make_key
+                                        st_k = _make_key(c.get("symbol"), c.get("unique_key"), c.get("signal"), c.get("candle_ts"))
+                                        update_trade_outcome(st_k, "SIGNAL_ONLY_US_STOCK")
+                                    else:
+                                        await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
 
                             if eligible_candidates and executor.is_configured():
                                 from executor import clean_contract_symbol
