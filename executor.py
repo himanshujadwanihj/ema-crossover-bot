@@ -290,9 +290,17 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
         rounded = max(0.1, round(f_qty, 1))
-    elif any(c in clean_sym for c in ('AAVE', 'LINK', 'LTC', 'BCH', 'ETC', 'DOT', 'APT', 'ARB', 'OP', 'ATOM', 'ZEC', 'TAO', 'MKR', 'COMP', 'QNT')):
+    elif any(c in clean_sym for c in ('TAO', 'MKR')):
+        rounded = max(0.01, round(f_qty, 2))
+    elif any(c in clean_sym for c in ('AAVE', 'BCH', 'COMP', 'QNT', 'ZEC')):
         rounded = max(0.1, round(f_qty, 1))
-    elif any(c in clean_sym for c in ('NEAR', 'AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 'EIGEN', 'RAY', 'DOGE', 'ADA', 'XRP', 'SUI')):
+    elif 'LTC' in clean_sym:
+        rounded = max(1.0, round(f_qty, 1))
+    elif any(c in clean_sym for c in (
+        'NEAR', 'AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 
+        'EIGEN', 'RAY', 'DOGE', 'ADA', 'XRP', 'SUI', 'ARB', 'OP', 'DOT', 'ATOM', 
+        'APT', 'ETC', 'LINK', 'UNI', 'POL', 'JUP', 'SHIB', 'TRX', 'PEPE'
+    )):
         rounded = max(1, int(round(f_qty)))
     elif price >= 100:
         rounded = max(0.1, round(f_qty, 1))
@@ -304,6 +312,10 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
     else:
         # Standard low-priced altcoins (< $30): whole integers (0 decimals)
         rounded = max(1, int(round(f_qty)))
+
+    min_exchange_q = get_exchange_min_qty(clean_sym)
+    if min_exchange_q > 0 and rounded < min_exchange_q:
+        rounded = min_exchange_q
 
     if isinstance(rounded, float) and rounded.is_integer():
         return int(rounded)
