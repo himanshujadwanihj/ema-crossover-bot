@@ -1876,66 +1876,9 @@ class SharkExchangeExecutor:
                 if mark_p <= 0:
                     mark_p = float(pos.get("markPrice") or pos.get("lastPrice") or entry_price)
 
-                # 3. 2-Hour Time Shield (Cost-to-Cost SL ONLY if in profit; KEEP SL INTACT if in loss)
-                tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
-                if pos_time and not tp1_already_hit:
-                    elapsed_hours = (now_utc - pos_time).total_seconds() / 3600.0
-                    if elapsed_hours >= 2.0:
-                        already_shielded = False
-                        for o_sl in sl_orders:
-                            sl_p = float(o_sl.get("stopLossPrice") or o_sl.get("price") or o_sl.get("triggerPrice") or 0)
-                            if sl_p > 0:
-                                if direction == "BUY" and sl_p >= entry_price:
-                                    already_shielded = True
-                                elif direction == "SELL" and sl_p <= entry_price:
-                                    already_shielded = True
-
-                        # Determine if trade is currently in profit or in loss/drawdown
-                        is_in_profit = (direction == "BUY" and mark_p > entry_price) or (direction == "SELL" and mark_p < entry_price)
-                        is_in_loss = (direction == "BUY" and mark_p <= entry_price) or (direction == "SELL" and mark_p >= entry_price)
-
-                        if is_in_loss:
-                            # CRITICAL SAFETY RULE: If in loss after 2h, KEEP SL INTACT!
-                            # Do NOT choke the position or attempt an instant-trigger SL at entry.
-                            logger.info(
-                                f"⏳ 2-HOUR SHIELD MONITOR: {sym} [{direction}] active for {elapsed_hours:.1f}h "
-                                f"but currently in drawdown (Mark: {mark_p}, Entry: {entry_price}). "
-                                f"Keeping structural SL intact to allow position room to breathe."
-                            )
-                        elif is_in_profit and not already_shielded:
-                            logger.info(
-                                f"🛡️ 2-HOUR TIME SHIELD TRIGGERED for {sym} [{direction}]: active {elapsed_hours:.1f}h and in profit "
-                                f"(Mark: {mark_p}, Entry: {entry_price}). Moving SL to Cost-to-Cost ({entry_price})."
-                            )
-                            modified = await self.modify_stop_loss(session, sym, direction, entry_price, pos_qty_abs)
-                            if modified:
-                                if state_entry:
-                                    state_entry["be_hit_time_shield"] = True
-                                    state_entry["cur_sl"] = entry_price
-                                    try:
-                                        from state import _load, _save
-                                        st_map = _load()
-                                        for k_st in list(st_map.keys()):
-                                            if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
-                                                st_map[k_st]["be_hit_time_shield"] = True
-                                                st_map[k_st]["cur_sl"] = entry_price
-                                                _save(st_map)
-                                                break
-                                    except Exception as e_save:
-                                        logger.debug(f"Failed to save state on 2h shield: {e_save}")
-                                shield_msg = (
-                                    f"🛡️ <b>2-HOUR TIME SHIELD ACTIVATED — SL MOVED TO BREAKEVEN</b>\n\n"
-                                    f"<b>Asset:</b> {sym} [{direction}]\n"
-                                    f"<b>Entry Price:</b> <code>{entry_price}</code>\n"
-                                    f"<b>Current Price:</b> <code>{mark_p}</code> (In Profit)\n"
-                                    f"<b>New Stop-Loss:</b> <code>{entry_price}</code> (Cost-to-Cost)\n"
-                                    f"<b>Active Duration:</b> {elapsed_hours:.1f} hours\n\n"
-                                    f"⏱️ <i>Trade active >2 hours and in profit without reaching TP1. Stop-Loss auto-shifted to Entry Price (100% Risk-Free).</i>"
-                                )
-                                try:
-                                    await send_text_alert(shield_msg)
-                                except Exception as e_tg:
-                                    logger.error(f"Failed to send 2-Hour Time Shield alert: {e_tg}")
+                # 3. 2-Hour Time Shield: DISABLED per user directive
+                # Previously, moving SL to Breakeven after 2 hours suffocated 1H/4H swing positions before they had time to reach TP1.
+                # Now, structural SL (below swing low / EMA 26) is kept intact until TP1 (70%) is genuinely hit!
 
                 # Ensure state entry is loaded
                 if not state_entry:
@@ -2367,22 +2310,23 @@ class SharkExchangeExecutor:
                 pnl_inr  = pnl_usdt * self.usd_inr_rate
             runner_qty = real_qty if (real_qty > 0 and real_qty < initial_qty * 0.85) else tp3_qty
 
-            # 2. Shift SL to Cost-to-Cost (Breakeven + 0.15% Fee Shield)
+            # 2. Shift SL to Cost-to-Cost (+0.4% / +0.4R Guaranteed Profit Floor)
             risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (real_entry * 0.012)
+            profit_lock_dist = max(real_entry * 0.0040, 0.40 * risk)
             if direction == "BUY":
-                # Entry + 0.15% CTC buffer (covers exchange taker fees and slippage)
-                target_sl = real_entry * 1.0015
+                # Entry + 0.40% / +0.4R Guaranteed Profit Floor (covers exchange taker fees and locks profit)
+                target_sl = real_entry + profit_lock_dist
                 trailed_sl = round_price(clean_sym, min(target_sl, tp1 * 0.998))
             else:
-                # Entry - 0.15% CTC buffer (covers exchange taker fees and slippage)
-                target_sl = real_entry * 0.9985
+                # Entry - 0.40% / +0.4R Guaranteed Profit Floor (covers exchange taker fees and locks profit)
+                target_sl = real_entry - profit_lock_dist
                 trailed_sl = round_price(clean_sym, max(target_sl, tp1 * 1.002))
 
             # Clamp with Liquidation Shield
             safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange to CTC for remaining runner
-            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (Breakeven) {safe_trailed_sl} (Runner qty={runner_qty})")
+            # 3. Modify Stop-Loss order on Shark Exchange to CTC (+0.4% Profit Floor) for remaining runner
+            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Runner qty={runner_qty})")
             if runner_qty > 0:
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty)
 
@@ -2405,7 +2349,7 @@ class SharkExchangeExecutor:
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                 f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
                 f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
-                f"🛡️ <b>SL Trailed to Entry Price (Cost-to-Cost / Breakeven):</b> {format_price(safe_trailed_sl)}\n"
+                f"🛡️ <b>SL Trailed to Cost-to-Cost (+0.4% Profit Floor):</b> {format_price(safe_trailed_sl)}\n"
                 f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
                 f"<i>Trade is now 100% Zero-Risk. 30% runner trailing for full trend capture!</i>{bal_block}"
             )

@@ -275,15 +275,8 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                 if shark_order_placed:
                     continue
 
-                # Rule 2.5-Hour Time Shield (If active >2h without hitting TP1, shift SL to Entry for internal stats)
-                time_shield_hit = data.get("be_hit_time_shield", False)
-                if limit_filled and fill_dt and not tp1_hit and not time_shield_hit:
-                    elapsed_since_fill = candle_dt - fill_dt
-                    if elapsed_since_fill >= timedelta(hours=2):
-                        time_shield_hit = True
-                        update_trade_progress(key, be_hit_time_shield=True, new_sl=entry)
-                        # NOTE: Simulated paper signals NEVER send Telegram alerts to trading channel.
-                        # Real trade 2-Hour Time Shield alerts are handled exclusively by executor.py on real Shark positions.
+                # Rule 2.5-Hour Time Shield: DISABLED per user directive (allow trades full room to hit TP1)
+                time_shield_hit = False
 
                 # Rule 3: Multi-Stage Partial Profit & Trailing SL Check (+0.4R Profit-Lock Engine)
                 risk_dist = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
