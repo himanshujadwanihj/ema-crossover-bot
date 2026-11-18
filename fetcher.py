@@ -344,6 +344,23 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
         target_symbols.insert(0, STOCK_ALIAS_MAP[binance_symbol])
     elif binance_symbol.endswith("BUSDT"):
         target_symbols.append(binance_symbol[:-5] + "USDT")
+
+    # Crypto Ticker Aliases & 1000x mapping for Binance klines
+    crypto_kline_aliases = {
+        "MUBUSDT": "MUBARAKUSDT",
+        "RAYSOLUSDT": "RAYUSDT",
+        "1000PEPEUSDT": "PEPEUSDT",
+        "1000SHIBUSDT": "SHIBUSDT",
+        "1000BONKUSDT": "BONKUSDT",
+        "1000FLOKIUSDT": "FLOKIUSDT",
+        "1000CATUSDT": "CATUSDT",
+        "1000RATSUSDT": "RATSUSDT",
+        "1MBABYDOGEUSDT": "BABYDOGEUSDT",
+        "MATICUSDT": "POLUSDT",
+        "RNDRUSDT": "RENDERUSDT",
+    }
+    if binance_symbol in crypto_kline_aliases:
+        target_symbols.append(crypto_kline_aliases[binance_symbol])
     vision_url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
     spot_me_url = f"https://api.binance.me/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
     futures_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"

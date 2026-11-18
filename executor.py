@@ -52,7 +52,8 @@ from config import (
     US_STOCK_TOKENS,
     TELEGRAM_CHAT_ID,
     clean_contract_symbol,
-    to_shark_symbol
+    to_shark_symbol,
+    get_symbol_price_multiplier
 )
 from telegram_bot import format_price, send_text_alert, send_text_to_chat
 
@@ -299,7 +300,8 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
     elif any(c in clean_sym for c in (
         'NEAR', 'AVAX', 'PENDLE', 'TIA', 'SEI', 'ONDO', 'RENDER', 'FET', 'ENA', 
         'EIGEN', 'RAY', 'DOGE', 'ADA', 'XRP', 'SUI', 'ARB', 'OP', 'DOT', 'ATOM', 
-        'APT', 'ETC', 'LINK', 'UNI', 'POL', 'JUP', 'SHIB', 'TRX', 'PEPE'
+        'APT', 'ETC', 'LINK', 'UNI', 'POL', 'JUP', 'SHIB', 'TRX', 'PEPE',
+        'BONK', 'FLOKI', 'CAT', 'RATS', 'SATS', 'BABYDOGE', 'MUBARAK', 'RAYSOL'
     )):
         rounded = max(1, int(round(f_qty)))
     elif price >= 100:
@@ -760,6 +762,13 @@ class SharkExchangeExecutor:
             current_sl = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
             current_tp = float(tp_orders[0].get("price") or 0) if tp_orders else 0
 
+            # Scale prices if needed for 1000x multiplier contracts
+            mult = get_symbol_price_multiplier(clean_sym, entry)
+            if mult != 1.0:
+                entry = entry * mult
+                sl = sl * mult
+                tp1 = tp1 * mult
+
             clean_new_sl = round_price(clean_sym, sl)
             clean_new_tp = round_price(clean_sym, tp1)
 
@@ -936,6 +945,16 @@ class SharkExchangeExecutor:
         - Submits Entry Limit Order with Stop-Loss attached.
         """
         clean_sym = to_shark_symbol(symbol)
+
+        # Scale prices if needed for 1000x / 1Mx multiplier contracts (e.g. 1000PEPE, 1000SHIB, 1000BONK, 1MBABYDOGE)
+        multiplier = get_symbol_price_multiplier(clean_sym, entry)
+        if multiplier != 1.0:
+            logger.info(f"⚡ MULTIPLIER APPLIED: Scaling {clean_sym} prices by {multiplier}x (Entry: {entry} -> {entry * multiplier})")
+            entry = entry * multiplier
+            sl = sl * multiplier
+            tp1 = tp1 * multiplier
+            if tp2: tp2 = tp2 * multiplier
+            if tp3: tp3 = tp3 * multiplier
 
         # 1. BTC / ETH / Gold Weekend Rule (Weekdays Mon-Fri Allowed; Sat-Sun No Trade)
         clean_base = clean_sym.upper().replace("USDT", "").replace("USD", "").replace("-PERP", "")

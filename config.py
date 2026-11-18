@@ -101,36 +101,117 @@ def clean_contract_symbol(symbol: str) -> str:
 def to_shark_symbol(symbol: str) -> str:
     """
     Translates bot internal tickers / Binance symbols to Shark Exchange native contracts:
+    - MUB/USDT, MUBUSDT, MUBARAK/USDT -> MUBARAKUSDT
+    - PEPE/USDT, PEPEUSDT -> 1000PEPEUSDT
+    - SHIB/USDT, SHIBUSDT -> 1000SHIBUSDT
+    - BONK/USDT, BONKUSDT -> 1000BONKUSDT
+    - FLOKI/USDT, FLOKIUSDT -> 1000FLOKIUSDT
+    - CAT/USDT, CATUSDT, SIMONSCAT/USDT -> 1000CATUSDT
+    - RATS/USDT, RATSUSDT -> 1000RATSUSDT
+    - SATS/USDT, SATSUSDT -> 1000SATSUSDT
+    - BABYDOGE/USDT, BABYDOGEUSDT -> 1MBABYDOGEUSDT
+    - RAY/USDT, RAYUSDT -> RAYSOLUSDT
+    - MATIC/USDT, MATICUSDT -> POLUSDT
+    - RNDR/USDT, RNDRUSDT -> RENDERUSDT
     - XAU/USD, XAUUSD, XAUT/USDT -> XAUUSDT
     - XAG/USD, XAGUSD, XAG/USDT -> XAGUSDT
-    - CL/USD -> CLUSDT
-    - NATGAS/USD -> NATGASUSDT
-    - AAPLB/USDT, AAPLBUSDT -> AAPLUSDT
-    - NVDAB/USDT, NVDABUSDT -> NVDAUSDT
-    - TSLAB/USDT, TSLABUSDT -> TSLAUSDT
-    - MSTRB/USDT, MSTRBUSDT -> MSTRUSDT
-    - AMZNB/USDT, AMZNBUSDT -> AMZNUSDT
-    - METAB/USDT, METABUSDT -> METAUSDT
-    - MSFTB/USDT, MSFTBUSDT -> MSFTUSDT
-    - GOOGLB/USDT, GOOGLBUSDT -> GOOGLUSDT
-    - SPYB/USDT, SPYBUSDT -> SPYUSDT
-    - QQQB/USDT, QQQBUSDT -> QQQUSDT
-    - Any other [TICKER]BUSDT -> [TICKER]USDT
-    - Standard crypto (e.g. SOL/USDT) -> SOLUSDT
+    - CL/USD, CLUSDT, CRUDEOIL -> CLUSDT
+    - NATGAS/USD, NATGASUSDT -> NATGASUSDT
+    - BZ/USD, BRENT -> BZUSDT
+    - XPD/USD, PALLADIUM -> XPDUSDT
+    - XPT/USD, PLATINUM -> XPTUSDT
+    - US Stock Tokens: AAPLB/USDT -> AAPLUSDT, etc.
     """
     clean = clean_contract_symbol(symbol)
     
-    # 1. Commodities mapping to USDT pairs on Shark
+    # 1. Crypto ticker aliases & Meme Multiplier contracts on Shark Exchange
+    crypto_alias_map = {
+        # Mubarak Token (Binance MUB / MUBARAK -> Shark MUBARAKUSDT)
+        "MUBUSDT": "MUBARAKUSDT",
+        "MUBARAKUSDT": "MUBARAKUSDT",
+        "MUB": "MUBARAKUSDT",
+        "MUBARAK": "MUBARAKUSDT",
+
+        # 1000x & 1Mx Meme Multiplier Tokens
+        "PEPEUSDT": "1000PEPEUSDT",
+        "PEPE": "1000PEPEUSDT",
+        "1000PEPEUSDT": "1000PEPEUSDT",
+        "1000PEPE": "1000PEPEUSDT",
+
+        "SHIBUSDT": "1000SHIBUSDT",
+        "SHIB": "1000SHIBUSDT",
+        "1000SHIBUSDT": "1000SHIBUSDT",
+        "1000SHIB": "1000SHIBUSDT",
+
+        "BONKUSDT": "1000BONKUSDT",
+        "BONK": "1000BONKUSDT",
+        "1000BONKUSDT": "1000BONKUSDT",
+        "1000BONK": "1000BONKUSDT",
+
+        "FLOKIUSDT": "1000FLOKIUSDT",
+        "FLOKI": "1000FLOKIUSDT",
+        "1000FLOKIUSDT": "1000FLOKIUSDT",
+        "1000FLOKI": "1000FLOKIUSDT",
+
+        "CATUSDT": "1000CATUSDT",
+        "CAT": "1000CATUSDT",
+        "SIMONSCATUSDT": "1000CATUSDT",
+        "SIMONSCAT": "1000CATUSDT",
+        "1000CATUSDT": "1000CATUSDT",
+        "1000CAT": "1000CATUSDT",
+
+        "RATSUSDT": "1000RATSUSDT",
+        "RATS": "1000RATSUSDT",
+        "1000RATSUSDT": "1000RATSUSDT",
+        "1000RATS": "1000RATSUSDT",
+
+        "SATSUSDT": "1000SATSUSDT",
+        "SATS": "1000SATSUSDT",
+        "1000SATSUSDT": "1000SATSUSDT",
+        "1000SATS": "1000SATSUSDT",
+
+        "BABYDOGEUSDT": "1MBABYDOGEUSDT",
+        "BABYDOGE": "1MBABYDOGEUSDT",
+        "1MBABYDOGEUSDT": "1MBABYDOGEUSDT",
+        "1MBABYDOGE": "1MBABYDOGEUSDT",
+
+        # Raydium (RAY on Binance -> RAYSOL on Shark)
+        "RAYUSDT": "RAYSOLUSDT",
+        "RAY": "RAYSOLUSDT",
+        "RAYSOLUSDT": "RAYSOLUSDT",
+        "RAYSOL": "RAYSOLUSDT",
+
+        # Rebranded tokens
+        "MATICUSDT": "POLUSDT",
+        "MATIC": "POLUSDT",
+        "POLUSDT": "POLUSDT",
+        "POL": "POLUSDT",
+
+        "RNDRUSDT": "RENDERUSDT",
+        "RNDR": "RENDERUSDT",
+        "RENDERUSDT": "RENDERUSDT",
+        "RENDER": "RENDERUSDT",
+    }
+    if clean in crypto_alias_map:
+        return crypto_alias_map[clean]
+
+    # 2. Commodities mapping to USDT pairs on Shark
     if clean in ("XAUUSD", "XAUTUSDT", "XAU", "GOLDUSDT", "GOLD"):
         return "XAUUSDT"
     if clean in ("XAGUSD", "XAGUSDT", "XAG", "SILVERUSDT", "SILVER"):
         return "XAGUSDT"
     if clean in ("CLUSD", "CL", "CRUDEOILUSDT", "CRUDEOIL"):
         return "CLUSDT"
-    if clean in ("NATGASUSD", "NATGAS"):
+    if clean in ("NATGASUSD", "NATGAS", "NATGASUSDT"):
         return "NATGASUSDT"
+    if clean in ("BZUSD", "BZ", "BRENTUSDT", "BRENT", "BZUSDT"):
+        return "BZUSDT"
+    if clean in ("XPDUSD", "XPD", "PALLADIUMUSDT", "PALLADIUM", "XPDUSDT"):
+        return "XPDUSDT"
+    if clean in ("XPTUSD", "XPT", "PLATINUMUSDT", "PLATINUM", "XPTUSDT"):
+        return "XPTUSDT"
         
-    # 2. US Stock Tokens: strip synthetic 'B' before USDT for Shark Exchange
+    # 3. US Stock Tokens: strip synthetic 'B' before USDT for Shark Exchange
     stock_b_map = {
         "AAPLBUSDT": "AAPLUSDT", "NVDABUSDT": "NVDAUSDT", "TSLABUSDT": "TSLAUSDT",
         "MSTRBUSDT": "MSTRUSDT", "AMZNBUSDT": "AMZNUSDT", "METABUSDT": "METAUSDT",
@@ -152,6 +233,44 @@ def to_shark_symbol(symbol: str) -> str:
             return f"{base}USDT"
         
     return clean
+
+
+def get_symbol_price_multiplier(symbol: str, price: float) -> float:
+    """
+    Returns the price multiplier needed when converting from Binance Spot / unscaled ticker
+    to Shark Exchange contract sizing:
+    - 1000PEPEUSDT: 1000.0 if price < 0.0005 else 1.0
+    - 1000SHIBUSDT: 1000.0 if price < 0.001 else 1.0
+    - 1000BONKUSDT: 1000.0 if price < 0.001 else 1.0
+    - 1000FLOKIUSDT: 1000.0 if price < 0.005 else 1.0
+    - 1000CATUSDT: 1000.0 if price < 0.001 else 1.0
+    - 1000RATSUSDT: 1000.0 if price < 0.01 else 1.0
+    - 1000SATSUSDT: 1000.0 if price < 0.0001 else 1.0
+    - 1MBABYDOGEUSDT: 1000000.0 if price < 0.0001 else 1.0
+    """
+    clean = to_shark_symbol(symbol)
+    p = float(price or 0.0)
+    if p <= 0:
+        return 1.0
+        
+    if clean == "1000PEPEUSDT" and p < 0.0005:
+        return 1000.0
+    if clean == "1000SHIBUSDT" and p < 0.001:
+        return 1000.0
+    if clean == "1000BONKUSDT" and p < 0.001:
+        return 1000.0
+    if clean == "1000FLOKIUSDT" and p < 0.005:
+        return 1000.0
+    if clean == "1000CATUSDT" and p < 0.001:
+        return 1000.0
+    if clean == "1000RATSUSDT" and p < 0.01:
+        return 1000.0
+    if clean == "1000SATSUSDT" and p < 0.0001:
+        return 1000.0
+    if clean == "1MBABYDOGEUSDT" and p < 0.0001:
+        return 1000000.0
+        
+    return 1.0
 
 
 def validate_config() -> None:

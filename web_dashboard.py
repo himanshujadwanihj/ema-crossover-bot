@@ -193,15 +193,58 @@ _last_real_stats_time = 0
 async def fetch_live_market_price(session, symbol: str) -> float:
     """Fetches real-time market price across multiple exchanges (Bybit, Binance Vision, Gate, MEXC) with rapid fallback."""
     clean = symbol.replace("/", "").replace(":", "").upper()
+    scale_factor = 1.0
+    bybit_symbol = clean
+    binance_symbol = clean
+
     if "XAU" in clean:
-        clean = "XAUTUSDT"
+        bybit_symbol = "XAUUSDT"
+        binance_symbol = "XAUTUSDT"
+    elif clean == "RAYSOLUSDT":
+        bybit_symbol = "RAYUSDT"
+        binance_symbol = "RAYUSDT"
+    elif clean == "MUBARAKUSDT":
+        bybit_symbol = "MUBARAKUSDT"
+        binance_symbol = "MUBARAKUSDT"
+    elif clean == "1000SHIBUSDT":
+        bybit_symbol = "SHIB1000USDT"
+        binance_symbol = "SHIBUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000PEPEUSDT":
+        bybit_symbol = "1000PEPEUSDT"
+        binance_symbol = "PEPEUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000BONKUSDT":
+        bybit_symbol = "1000BONKUSDT"
+        binance_symbol = "BONKUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000FLOKIUSDT":
+        bybit_symbol = "1000FLOKIUSDT"
+        binance_symbol = "FLOKIUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000CATUSDT":
+        bybit_symbol = "1000CATUSDT"
+        binance_symbol = "CATUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000RATSUSDT":
+        bybit_symbol = "1000RATSUSDT"
+        binance_symbol = "RATSUSDT"
+        scale_factor = 1000.0
+    elif clean == "1000SATSUSDT":
+        bybit_symbol = "1000SATSUSDT"
+        binance_symbol = "1000SATSUSDT"
+        scale_factor = 1.0
+    elif clean == "1MBABYDOGEUSDT":
+        bybit_symbol = "BABYDOGE6_USDT"
+        binance_symbol = "BABYDOGEUSDT"
+        scale_factor = 1000000.0
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     timeout = aiohttp.ClientTimeout(total=2.5)
 
     # 1. Bybit Linear (Fastest, zero cloud datacenter IP blocks)
     try:
-        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={clean}"
+        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
         async with session.get(url, headers=headers, timeout=timeout) as resp:
             if resp.status == 200:
                 data = await resp.json()
@@ -215,13 +258,13 @@ async def fetch_live_market_price(session, symbol: str) -> float:
 
     # 2. Binance Vision API (with User-Agent)
     try:
-        url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={clean}"
+        url = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={binance_symbol}"
         async with session.get(url, headers=headers, timeout=timeout) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 px = float(data.get("price") or 0)
                 if px > 0:
-                    return px
+                    return px * scale_factor
     except Exception:
         pass
 
