@@ -22,8 +22,8 @@ TELEGRAM_TRADING_CHANNEL_ID: str = "771305593"        # Personal DM Chat ID for 
 FILTER_BOT_TOKEN: str = os.getenv("FILTER_BOT_TOKEN", "8990708294:AAHQAUYGrFSPs7Pi2bAYNvLexheJeqZeAMM")
 
 # ── Shark Exchange Auto-Trader Settings ────────────────────────────────────────
-AUTO_TRADING_ENABLED: bool = os.getenv("AUTO_TRADING_ENABLED", "true").lower() in ("true", "1", "yes")
-PAPER_TRADING_ENABLED: bool = os.getenv("PAPER_TRADING_ENABLED", "false").lower() in ("true", "1", "yes")
+AUTO_TRADING_ENABLED: bool = True   # Live Real Money Auto-Trading on Shark Exchange
+PAPER_TRADING_ENABLED: bool = False  # User Directive: Paper trading completely paused; 100% focus on Live Trading
 SHARK_API_KEY: str         = os.getenv("SHARK_API_KEY", "052e905d55872cc219fdf28b92012287")
 SHARK_API_SECRET: str      = os.getenv("SHARK_API_SECRET", "b8c561b45bd6328ea3aa5cbb789847e4")
 SHARK_BASE_URL: str        = os.getenv("SHARK_BASE_URL", "https://api.sharkexchange.in")
