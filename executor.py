@@ -353,6 +353,7 @@ class SharkExchangeExecutor:
         self._pending_entry_orders = {}  # symbol -> {clientOrderId, placed_at, orderId, price, side, qty}
         self._known_live_positions = {}  # symbol -> dict of open positions
         self._notified_closed_ids = set()  # set of closed positionIds already notified to Telegram
+        self._tp_touch_timer = {}  # symbol -> timestamp when mark price first reached TP1 (Maker Grace Period)
         self._notified_filled_positions = set()  # set of positionIds already notified of entry fill to Telegram
         self._last_positions_fetch_ok = True
         self._last_orders_fetch_ok = True
@@ -1955,31 +1956,63 @@ class SharkExchangeExecutor:
                 if tp1 and mark_p > 0:
                     price_at_tp1 = (direction == "BUY" and mark_p >= tp1 * 0.999) or (direction == "SELL" and mark_p <= tp1 * 1.001)
 
-                # ── ACTIVE REAL-TIME TAKE-PROFIT MARKET GUARD ────────────────────────
-                # If mark price touches or crosses 1.5R TP target and position is still open:
-                # Do NOT wait passively for illiquid exchange limit orderbooks.
-                # Instantly execute a Reduce-Only MARKET close for 100% position size!
-                if tp1 and mark_p > 0 and pos_qty_abs > 0 and price_at_tp1:
-                    logger.info(
-                        f"🎯 ACTIVE TP GUARD: {sym} [{direction}] mark price {mark_p} reached 1.5R target {tp1}! "
-                        f"Instantly executing 100% MARKET profit booking (qty={pos_qty_abs})."
-                    )
-                    closed_ok = await self.close_position_market(session, sym, reason="TP1 HIT (1.5R TARGET)")
-                    if closed_ok:
-                        if state_entry:
-                            state_entry["tp1_hit"] = True
-                            state_entry["outcome"] = "TP1_HIT_100_PERCENT"
-                            from state import _load, _save
-                            st_map = _load()
-                            for k_st in list(st_map.keys()):
-                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
-                                    st_map[k_st]["tp1_hit"] = True
-                                    st_map[k_st]["outcome"] = "TP1_HIT_100_PERCENT"
-                                    _save(st_map)
-                                    break
-                        self._tp_order_count_cache.pop(sym, None)
-                        self._known_live_positions.pop(sym, None)
-                        continue
+                # ── SMART MAKER-FIRST HYBRID TP EXECUTION (FEES MINIMIZATION) ────────
+                # 1. Primary: Native LIMIT order sits on the exchange orderbook for lowest MAKER fees!
+                # 2. Maker Grace Window (30s): When price reaches TP1, we give the exchange orderbook
+                #    up to 30 seconds to fill natively as Maker, saving commissions.
+                # 3. Reversal Protection: If price reaches TP1 and then starts reversing back towards entry,
+                #    OR if 30s elapse without the LIMIT order filling, we trigger Market Fallback to lock profit.
+                if tp1 and mark_p > 0 and pos_qty_abs > 0:
+                    price_reached_tp = (direction == "BUY" and mark_p >= tp1 * 0.999) or (direction == "SELL" and mark_p <= tp1 * 1.001)
+                    if price_reached_tp:
+                        if sym not in self._tp_touch_timer:
+                            self._tp_touch_timer[sym] = time.time()
+                            logger.info(f"🎯 MAKER TP WATCH: {sym} mark price {mark_p} reached TP1 {tp1}. Waiting for Maker LIMIT fill...")
+
+                        elapsed = time.time() - self._tp_touch_timer[sym]
+                        should_fallback_market = False
+
+                        # Condition A: 30s Grace Period expired without LIMIT fill
+                        if elapsed >= 30.0:
+                            logger.warning(f"⚠️ {sym} LIMIT TP order did not fill after {elapsed:.1f}s on exchange. Activating Market Fallback to lock profit!")
+                            should_fallback_market = True
+                        
+                        if should_fallback_market:
+                            logger.info(
+                                f"🎯 TP GUARD FALLBACK: Executing 100% MARKET profit booking for {sym} [{direction}] (qty={pos_qty_abs})."
+                            )
+                            closed_ok = await self.close_position_market(session, sym, reason="TP1 HIT (1.5R TARGET)")
+                            if closed_ok:
+                                self._tp_touch_timer.pop(sym, None)
+                                if state_entry:
+                                    state_entry["tp1_hit"] = True
+                                    state_entry["outcome"] = "TP1_HIT_100_PERCENT"
+                                    from state import _load, _save
+                                    st_map = _load()
+                                    for k_st in list(st_map.keys()):
+                                        if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                            st_map[k_st]["tp1_hit"] = True
+                                            st_map[k_st]["outcome"] = "TP1_HIT_100_PERCENT"
+                                            _save(st_map)
+                                            break
+                                self._tp_order_count_cache.pop(sym, None)
+                                self._known_live_positions.pop(sym, None)
+                                continue
+                    else:
+                        # Price is not at TP1 — if it previously touched and is now pulling back > 0.4%, close to protect profit
+                        if sym in self._tp_touch_timer:
+                            touch_age = time.time() - self._tp_touch_timer[sym]
+                            is_reversing = (direction == "BUY" and mark_p < tp1 * 0.994) or (direction == "SELL" and mark_p > tp1 * 1.006)
+                            if is_reversing and touch_age > 10.0:
+                                logger.warning(f"⚠️ {sym} touched TP1 earlier but is now reversing back! Protecting profit via Market Exit.")
+                                closed_ok = await self.close_position_market(session, sym, reason="TP1 REVERSAL PROTECTION")
+                                if closed_ok:
+                                    self._tp_touch_timer.pop(sym, None)
+                                    self._tp_order_count_cache.pop(sym, None)
+                                    self._known_live_positions.pop(sym, None)
+                                    continue
+                            elif not is_reversing and touch_age > 120.0:
+                                self._tp_touch_timer.pop(sym, None)
 
                 # Self-Healing False TP1 State Correction:
                 # If state mistakenly claims tp1_hit=True, but position on exchange is still full size (pos_qty_abs >= orig_qty * 0.85)
