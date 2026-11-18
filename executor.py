@@ -1200,7 +1200,8 @@ class SharkExchangeExecutor:
                 if pos_direction == "BUY":
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    if not tp1 or tp1 <= fill_price or tp1 > (fill_price + 1.55 * risk):
+                    # User Directive: Minimum 1.5R target floor, uncapped trailing forward
+                    if not tp1 or tp1 < (fill_price + 1.49 * risk):
                         tp1 = round_price(clean_sym, fill_price + 1.5 * risk)
                     if not tp2 or tp2 <= tp1:
                         tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 4.0 * risk))
@@ -1209,7 +1210,8 @@ class SharkExchangeExecutor:
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    if not tp1 or tp1 >= fill_price or tp1 < (fill_price - 1.55 * risk):
+                    # User Directive: Minimum 1.5R target floor, uncapped trailing forward
+                    if not tp1 or tp1 > (fill_price - 1.49 * risk):
                         tp1 = round_price(clean_sym, fill_price - 1.5 * risk)
                     if not tp2 or tp2 >= tp1:
                         tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 4.0 * risk))
@@ -2078,12 +2080,12 @@ class SharkExchangeExecutor:
                         tp2 = tp2 or round_price(sym, entry_price - 5.0 * risk_step)
                         tp3 = tp2
 
-                # Active Trade TP1 Re-Alignment: Ensure TP1 never exceeds 1.55R
+                # Active Trade TP1 Re-Alignment: Ensure TP1 has minimum 1.5R floor, allowing uncapped trailing forward
                 if not (state_entry and state_entry.get("tp1_hit")):
                     if direction == "BUY":
-                        if tp1 and tp1 > (entry_price + 1.55 * risk_step):
+                        if not tp1 or tp1 < (entry_price + 1.49 * risk_step):
                             new_tp1 = round_price(sym, entry_price + 1.5 * risk_step)
-                            logger.info(f"🎯 REALIGN TP1 [BUY]: {sym} TP1 {tp1} exceeds 1.5R. Realigning to 1.5R: {new_tp1}")
+                            logger.info(f"🎯 MINIMUM 1.5R ENFORCED [BUY]: {sym} TP1 {tp1} brought to minimum 1.5R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -2093,9 +2095,9 @@ class SharkExchangeExecutor:
                                     _save(st_map)
                                     break
                     else:
-                        if tp1 and tp1 < (entry_price - 1.55 * risk_step):
+                        if not tp1 or tp1 > (entry_price - 1.49 * risk_step):
                             new_tp1 = round_price(sym, entry_price - 1.5 * risk_step)
-                            logger.info(f"🎯 REALIGN TP1 [SELL]: {sym} TP1 {tp1} exceeds 1.5R. Realigning to 1.5R: {new_tp1}")
+                            logger.info(f"🎯 MINIMUM 1.5R ENFORCED [SELL]: {sym} TP1 {tp1} brought to minimum 1.5R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -2225,8 +2227,8 @@ class SharkExchangeExecutor:
                             await self.place_tp_limits(
                                 session, sym, direction, entry_price, tp1, tp2, tp3, initial_sl=sl_val)
 
-                # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet for Live Positions
-                if state_entry and state_entry.get("tp1_hit") and pos_qty_abs > 0:
+                # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet for Live Positions ("Jitna Ja Paye")
+                if state_entry and pos_qty_abs > 0:
                     cur_px = float(pos.get("markPrice") or pos.get("currentPrice") or pos.get("lastPrice") or pos.get("indexPrice") or 0)
                     if cur_px <= 0:
                         try:
@@ -2245,36 +2247,44 @@ class SharkExchangeExecutor:
                         if direction == "BUY":
                             current_r = (cur_px - entry_price) / risk_step if risk_step > 0 else 0.0
 
-                            # Dynamic Multi-R Uncapped Trailing Ladder (Option 2: 4R, 5R, 6R+)
+                            # Dynamic Multi-R Uncapped Trailing Ladder (User Directive: "Jitna Ja Paye")
                             target_stage = 0
                             target_lock_r = 0.0
                             if current_r >= 6.0:
-                                target_stage = 5
-                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price above 6R
+                                target_stage = 6
+                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price continuously above 6R
                             elif current_r >= 5.0:
-                                target_stage = 4
+                                target_stage = 5
                                 target_lock_r = 4.0
                             elif current_r >= 4.0:
-                                target_stage = 3
+                                target_stage = 4
                                 target_lock_r = 3.0
                             elif current_r >= 3.0:
-                                target_stage = 2
+                                target_stage = 3
                                 target_lock_r = 2.0
                             elif current_r >= 2.0:
-                                target_stage = 1
+                                target_stage = 2
                                 target_lock_r = 1.0
+                            elif current_r >= 1.5:
+                                target_stage = 1
+                                target_lock_r = 0.4  # Breakeven Shield (+0.4R Cost-to-Cost Profit Floor)
 
                             prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
-                            if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
+                            if target_stage > current_stage or (target_stage == 6 and target_lock_r > prev_lock_r + 0.4):
                                 ratchet_sl = round_price(sym, entry_price + (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
                                 safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val, is_trailed=True)
                                 logger.info(f"🔥 TRAILING RATCHET [BUY]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs, is_trailed=True)
+                                
+                                # Also extend TP forward dynamically to allow uncapped ride
+                                dynamic_tp_r = max(target_lock_r + 2.0, 3.0)
+                                new_dynamic_tp = round_price(sym, entry_price + (dynamic_tp_r * risk_step))
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
+                                        st_map[k_st]["tp1"] = new_dynamic_tp
                                         st_map[k_st]["trail_stage"] = target_stage
                                         st_map[k_st]["cur_lock_r"] = target_lock_r
                                         _save(st_map)
@@ -2285,42 +2295,51 @@ class SharkExchangeExecutor:
                                     f"<b>Asset:</b> {sym} [BUY]\n"
                                     f"🚀 <b>Trend Expansion:</b> Price reached <b>+{current_r:.1f}R</b> ({format_price(cur_px)})!\n"
                                     f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+{target_lock_r:.1f}R Profit Locked)</b> on Shark Exchange.\n"
-                                    f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>"
+                                    f"🎯 <b>TP Extended to:</b> {format_price(new_dynamic_tp)} (+{dynamic_tp_r:.1f}R)\n"
+                                    f"<i>Uncapped Multi-R Trend Ride Active — 100% position trailing for maximum capture!</i>"
                                 )
 
                         elif direction == "SELL":
                             current_r = (entry_price - cur_px) / risk_step if risk_step > 0 else 0.0
 
-                            # Dynamic Multi-R Uncapped Trailing Ladder (Option 2: 4R, 5R, 6R+)
+                            # Dynamic Multi-R Uncapped Trailing Ladder (User Directive: "Jitna Ja Paye")
                             target_stage = 0
                             target_lock_r = 0.0
                             if current_r >= 6.0:
-                                target_stage = 5
-                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price above 6R
+                                target_stage = 6
+                                target_lock_r = round(current_r - 1.0, 1)  # Trails 1.0R behind price continuously above 6R
                             elif current_r >= 5.0:
-                                target_stage = 4
+                                target_stage = 5
                                 target_lock_r = 4.0
                             elif current_r >= 4.0:
-                                target_stage = 3
+                                target_stage = 4
                                 target_lock_r = 3.0
                             elif current_r >= 3.0:
-                                target_stage = 2
+                                target_stage = 3
                                 target_lock_r = 2.0
                             elif current_r >= 2.0:
-                                target_stage = 1
+                                target_stage = 2
                                 target_lock_r = 1.0
+                            elif current_r >= 1.5:
+                                target_stage = 1
+                                target_lock_r = 0.4  # Breakeven Shield (+0.4R Cost-to-Cost Profit Floor)
 
                             prev_lock_r = float(state_entry.get("cur_lock_r") or 0.0)
-                            if target_stage > current_stage or (target_stage == 5 and target_lock_r > prev_lock_r + 0.4):
+                            if target_stage > current_stage or (target_stage == 6 and target_lock_r > prev_lock_r + 0.4):
                                 ratchet_sl = round_price(sym, entry_price - (target_lock_r * risk_step))
                                 live_liq_val = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
                                 safe_sl = enforce_sl_above_liquidation(sym, entry_price, ratchet_sl, direction, self.leverage, live_liq_val, is_trailed=True)
                                 logger.info(f"🔥 TRAILING RATCHET [SELL]: {sym} reached +{current_r:.1f}R! Ratcheting SL to +{target_lock_r:.1f}R ({safe_sl}) [Stage {target_stage}]")
                                 await self.modify_stop_loss(session, sym, direction, safe_sl, pos_qty_abs, is_trailed=True)
+                                
+                                # Also extend TP forward dynamically to allow uncapped ride
+                                dynamic_tp_r = max(target_lock_r + 2.0, 3.0)
+                                new_dynamic_tp = round_price(sym, entry_price - (dynamic_tp_r * risk_step))
                                 st_map = _load()
                                 for k_st in list(st_map.keys()):
                                     if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                         st_map[k_st]["cur_sl"] = safe_sl
+                                        st_map[k_st]["tp1"] = new_dynamic_tp
                                         st_map[k_st]["trail_stage"] = target_stage
                                         st_map[k_st]["cur_lock_r"] = target_lock_r
                                         _save(st_map)
@@ -2329,9 +2348,10 @@ class SharkExchangeExecutor:
                                 await _send_alert(
                                     f"🔥 <b>SHARK AUTO-TRADER: TRAILING SL RATCHET (+{target_lock_r:.1f}R LOCKED) 🏆</b>\n\n"
                                     f"<b>Asset:</b> {sym} [SELL]\n"
-                                    f"🚀 <b>Trend Expansion:</b> Price dumped past <b>+{current_r:.1f}R</b> ({format_price(cur_px)})!\n"
+                                    f"🚀 <b>Trend Expansion:</b> Price reached <b>+{current_r:.1f}R</b> ({format_price(cur_px)})!\n"
                                     f"🛡️ <b>SL Ratcheted to:</b> <b>{format_price(safe_sl)} (+{target_lock_r:.1f}R Profit Locked)</b> on Shark Exchange.\n"
-                                    f"<i>Uncapped Multi-R Runner active — 30% position riding the trend!</i>"
+                                    f"🎯 <b>TP Extended to:</b> {format_price(new_dynamic_tp)} (+{dynamic_tp_r:.1f}R)\n"
+                                    f"<i>Uncapped Multi-R Trend Ride Active — 100% position trailing for maximum capture!</i>"
                                 )
 
                 # SL GUARD: Ensure SL exists and enforces safe liquidation floor & distance for live positions
