@@ -715,6 +715,145 @@ class SharkExchangeExecutor:
 
         return False
 
+    async def trail_position_on_new_signal(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        sig_dir: str,
+        pos_obj: dict,
+        entry: float,
+        sl: float,
+        tp1: float
+    ) -> bool:
+        """
+        TREND CONTINUATION TRAIL ENGINE (User Directive):
+        When a new signal arrives for an active open position in the SAME direction:
+        - Trails the Stop-Loss forward to the tighter/safer structural SL (locking in profit / reducing risk).
+        - Trails the Take-Profit limit order forward (extending the target deeper into the trend, min 1.5R).
+        - Preserves 100% position size on the TP limit order.
+        - Sends Telegram alert detailing the trailed SL and extended TP levels.
+        """
+        clean_sym = clean_contract_symbol(symbol)
+        pos_id = pos_obj.get("positionId")
+        pos_qty = abs(float(pos_obj.get("quantity") or pos_obj.get("positionAmount") or 0))
+        pos_entry = float(pos_obj.get("entryPrice") or 0)
+        exit_side = "SELL" if sig_dir == "BUY" else "BUY"
+
+        if pos_qty <= 0:
+            return False
+
+        try:
+            # 1. Fetch current open orders for this symbol
+            cur_orders = await self.get_open_orders(session, symbol=clean_sym)
+            sl_orders = [o for o in cur_orders if (
+                o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                or o.get("subType") == "STOP_LOSS"
+                or (o.get("placeType") == "POSITION" and o.get("stopLossPrice"))
+            ) and not (str(o.get("placeType") or "").upper() == "ORDER_FORM" and str(o.get("type") or "").upper() == "LIMIT")]
+            
+            tp_orders = [o for o in cur_orders if (
+                (o.get("type", "").upper() == "LIMIT" and o.get("placeType") == "POSITION")
+                or o.get("subType") == "TAKE_PROFIT"
+                or (o.get("reduceOnly") and o.get("type", "").upper() == "LIMIT")
+            ) and str(o.get("placeType") or "").upper() != "ORDER_FORM"]
+
+            current_sl = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
+            current_tp = float(tp_orders[0].get("price") or 0) if tp_orders else 0
+
+            clean_new_sl = round_price(clean_sym, sl)
+            clean_new_tp = round_price(clean_sym, tp1)
+
+            sl_updated = False
+            tp_updated = False
+
+            # Check if new SL is tighter/better:
+            # For BUY: new SL > current_sl (moves upward to lock profit / reduce risk)
+            # For SELL: new SL < current_sl (moves downward to lock profit / reduce risk)
+            is_better_sl = False
+            if current_sl == 0:
+                is_better_sl = True
+            elif sig_dir == "BUY" and clean_new_sl > current_sl:
+                is_better_sl = True
+            elif sig_dir == "SELL" and clean_new_sl < current_sl:
+                is_better_sl = True
+
+            if is_better_sl:
+                logger.info(f"🔄 CONTINUATION TRAIL SL: {clean_sym} [{sig_dir}] SL {current_sl} → {clean_new_sl}")
+                sl_ok = await self.modify_stop_loss(session, clean_sym, sig_dir, clean_new_sl, pos_qty, is_trailed=True)
+                if sl_ok:
+                    sl_updated = True
+
+            # Check if new TP extends deeper into the trend (at least 1.5R):
+            # For BUY: new TP > current_tp (higher target in uptrend)
+            # For SELL: new TP < current_tp (lower target in downtrend)
+            is_better_tp = False
+            if current_tp == 0:
+                is_better_tp = True
+            elif sig_dir == "BUY" and clean_new_tp > current_tp:
+                is_better_tp = True
+            elif sig_dir == "SELL" and clean_new_tp < current_tp:
+                is_better_tp = True
+
+            if is_better_tp:
+                logger.info(f"🔄 CONTINUATION TRAIL TP: {clean_sym} [{sig_dir}] TP {current_tp} → {clean_new_tp}")
+                # Cancel existing TP orders
+                for o in tp_orders:
+                    cid = o.get("clientOrderId")
+                    if cid:
+                        await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
+                
+                # Place new single 100% TP order at clean_new_tp
+                tp_payload = {
+                    "placeType": "POSITION",
+                    "positionId": pos_id,
+                    "reduceOnly": True,
+                    "type": "LIMIT",
+                    "side": exit_side,
+                    "symbol": clean_sym,
+                    "quantity": pos_qty,
+                    "price": clean_new_tp
+                }
+                st_tp, res_tp = await self.shark_post(session, "/v1/order/place-order", tp_payload)
+                if st_tp in (200, 201):
+                    tp_updated = True
+                    logger.info(f"Placed new trailed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
+
+            if sl_updated or tp_updated:
+                # Update local state
+                from state import get_latest_symbol_state, _load, _save
+                st_map = _load()
+                for k_st in list(st_map.keys()):
+                    if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
+                        if sl_updated:
+                            st_map[k_st]["cur_sl"] = clean_new_sl
+                        if tp_updated:
+                            st_map[k_st]["tp1"] = clean_new_tp
+                        _save(st_map)
+                        break
+
+                from telegram_bot import send_text_alert
+                sl_info = f"🛡️ <b>SL Trailed:</b> ${current_sl} → <b>${clean_new_sl}</b> (Risk Locked)\n" if sl_updated else f"🛡️ <b>SL:</b> ${current_sl}\n"
+                tp_info = f"🎯 <b>TP Trailed:</b> ${current_tp} → <b>${clean_new_tp}</b> (Target Extended)\n" if tp_updated else f"🎯 <b>TP:</b> ${current_tp}\n"
+                msg = (
+                    f"🔄 <b>TREND CONTINUATION: SAME COIN TRAIL UPDATE</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>Asset:</b> {clean_sym} [{sig_dir}]\n"
+                    f"<b>Entry Price:</b> ${format_price(pos_entry, clean_sym)}\n"
+                    f"{sl_info}"
+                    f"{tp_info}"
+                    f"<b>Quantity:</b> {pos_qty} (100% Position Protected)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>New continuation signal detected. SL locked in tighter & TP extended to ride the bigger trend!</i>"
+                )
+                await send_text_alert(msg)
+                return True
+            else:
+                logger.info(f"Continuation signal for {clean_sym} evaluated: current SL ({current_sl}) and TP ({current_tp}) are already optimal.")
+                return True
+        except Exception as e:
+            logger.error(f"Error in trail_position_on_new_signal for {clean_sym}: {e}")
+            return False
+
     async def get_wallet_balance_summary(self, session: aiohttp.ClientSession) -> str:
         """Queries Shark Exchange Futures Wallet Details and returns formatted Telegram string."""
         if not self.is_configured() or not session:
@@ -830,8 +969,25 @@ class SharkExchangeExecutor:
             logger.info(f"AUTO-TRADING NOT CONFIGURED: Keys or toggle not set. Skipping execution for {clean_sym}.")
             return {"status": "skipped", "reason": "Exchange executor not configured or disabled"}
 
-        # 2. Single Order Margin Shield Guard & Trend Scale-In
+        # 2. Single Order Margin Shield Guard & Trend Continuation Trailing
         try:
+            active_pos = await self.get_open_position(session, clean_sym)
+            if active_pos:
+                pos_qty = abs(float(active_pos.get("quantity") or active_pos.get("positionAmount") or 0))
+                if pos_qty > 0:
+                    pos_dir_raw = str(active_pos.get("positionType") or active_pos.get("positionSide") or active_pos.get("side") or "").upper()
+                    pos_dir = "BUY" if pos_dir_raw in ("LONG", "BUY") else "SELL"
+                    sig_dir = "BUY" if str(signal).upper() in ("BUY", "LONG") else "SELL"
+
+                    if pos_dir == sig_dir:
+                        # USER DIRECTIVE: Same coin continuation trade -> Trail SL and Trail TP forward!
+                        logger.info(f"🔄 SAME COIN CONTINUATION: {clean_sym} [{sig_dir}]. Trailing open position SL and TP forward!")
+                        await self.trail_position_on_new_signal(session, clean_sym, sig_dir, active_pos, entry, sl, tp1)
+                        return {"status": "trailed", "reason": f"Trailed active {clean_sym} position on trend continuation signal"}
+                    else:
+                        logger.info(f"Opposite signal {sig_dir} for active {pos_dir} position on {clean_sym}. Shielding active trade.")
+                        return {"status": "skipped", "reason": f"Opposite signal on active {clean_sym} position"}
+
             if await self.has_active_trade_on_exchange(session, clean_sym, signal=signal):
                 return {"status": "skipped", "reason": f"Active trade or orders already exist on Shark for {clean_sym}"}
         except Exception as e:
