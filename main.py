@@ -1393,7 +1393,7 @@ async def main_loop():
                                 if stars < 3:
                                     return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
 
-                                is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG"])
+                                is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG", "SILVER", "CL", "OIL", "COPPER", "BRONZE", "HG", "NATGAS", "WTI", "BRENT"])
                                 if rsi is not None:
                                     try:
                                         f_rsi = float(rsi)
@@ -1428,7 +1428,7 @@ async def main_loop():
 
                             if eligible_candidates and executor.is_configured():
                                 from executor import clean_contract_symbol
-                                TIER_1_SUPER_MAJORS = {"BTC", "ETH", "SOL", "BNB", "XAUT"}
+                                TIER_1_SUPER_MAJORS = {"BTC", "ETH", "SOL", "BNB", "XAUT", "XAU", "XAG", "CL", "OIL", "COPPER", "BRONZE", "HG"}
                                 TIER_2_MAJOR_ALTS   = {"AVAX", "LINK", "SUI", "NEAR", "ADA", "DOT", "LTC", "BCH", "ARB", "AAVE", "XRP", "DOGE", "SHIB", "TRX"}
 
                                 # Ranking Formula (3-Tier Coin Classification First):

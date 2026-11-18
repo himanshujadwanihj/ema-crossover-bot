@@ -229,8 +229,8 @@ def is_allowed_trading_asset(symbol: str) -> bool:
 
     clean = symbol.upper().replace("/", "").replace("_", "").replace("-", "").split(":")[0]
 
-    # 1. Commodities (Gold, Silver, Crude Oil, Natural Gas)
-    if any(c in clean for c in ["XAU", "XAUT", "GOLD", "XAG", "SILVER", "NATGAS", "CL", "OIL"]):
+    # 1. Commodities (Gold, Silver, Crude Oil, Natural Gas, Copper, Bronze)
+    if any(c in clean for c in ["XAU", "XAUT", "GOLD", "XAG", "SILVER", "NATGAS", "CL", "OIL", "WTI", "BRENT", "COPPER", "BRONZE", "HG"]):
         return True
 
     # 2. US Equities / Stocks: AUTO-TRADING STOPPED per User Directive

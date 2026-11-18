@@ -128,9 +128,9 @@ def round_price(symbol: str, price: float):
         return 0.0
     if 'BTC' in clean:
         rounded = round(p, 1)
-    elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
+    elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'OIL', 'WTI', 'BRENT', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
         rounded = round(p, 2)
-    elif 'XAG' in clean:
+    elif any(c in clean for c in ('XAG', 'SILVER', 'COPPER', 'BRONZE', 'HG')):
         rounded = round(p, 3)
     elif p >= 1000:
         rounded = round(p, 1)
@@ -286,7 +286,7 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.1, round(f_qty, 2))
     elif 'BNB' in clean_sym:
         rounded = max(0.01, round(f_qty, 2))
-    elif 'XAG' in clean_sym:
+    elif any(c in clean_sym for c in ('XAG', 'SILVER', 'CL', 'OIL', 'WTI', 'BRENT', 'COPPER', 'BRONZE', 'HG')):
         rounded = max(0.1, round(f_qty, 1))
     elif any(c in clean_sym for c in ('AAPL', 'NVDA', 'TSLA', 'MSTR', 'AMZN', 'META', 'MSFT', 'GOOGL', 'SPY', 'QQQ', 'COIN', 'AMD')):
         rounded = max(0.1, round(f_qty, 1))

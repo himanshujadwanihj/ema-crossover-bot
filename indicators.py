@@ -104,6 +104,10 @@ def get_sl_cap_percent(symbol: str) -> float:
         return 0.0080 # 0.80% max SL for Gold ($32 max at $4000)
     elif "XAG" in sym or "SILVER" in sym:
         return 0.0150 # 1.50% max SL for Silver
+    elif any(c in sym for c in ("CL", "OIL", "WTI", "BRENT", "NATGAS")):
+        return 0.0180 # 1.80% max SL for Crude Oil / Gas
+    elif any(c in sym for c in ("COPPER", "BRONZE", "HG")):
+        return 0.0180 # 1.80% max SL for Copper / Bronze
     elif "BTC" in sym:
         return 0.0120 # 1.20% max SL for BTC
     elif "ETH" in sym:
@@ -121,6 +125,10 @@ def get_min_sl_percent(symbol: str) -> float:
         return 0.0035 # 0.35% min SL for Gold (~$14 buffer at $4000)
     elif "XAG" in sym or "SILVER" in sym:
         return 0.0060 # 0.60% min SL for Silver
+    elif any(c in sym for c in ("CL", "OIL", "WTI", "BRENT", "NATGAS")):
+        return 0.0060 # 0.60% min SL for Crude Oil / Gas
+    elif any(c in sym for c in ("COPPER", "BRONZE", "HG")):
+        return 0.0060 # 0.60% min SL for Copper / Bronze
     elif "BTC" in sym:
         return 0.0050 # 0.50% min SL for BTC
     elif "ETH" in sym:
