@@ -401,6 +401,10 @@ async def evaluate_paper_trades_async(session: aiohttp.ClientSession, semaphore:
     1. 30-Minute Limit Fill Expiration rule (Auto-cancel if unfilled after 30 mins).
     2. 20-Hour Position Timeout rule (Auto-close at CTC if TP3 not reached in 20 hours).
     """
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        return
+
     async with _wallet_lock:
         wallet = load_wallet()
         resting = list(wallet.get("resting_orders", []))
@@ -1415,6 +1419,9 @@ async def generate_strategy_lookout_card(session=None) -> str:
     Generates a real-time Strategy Lookout card tracking all active open positions,
     floating PnL in ₹ INR and %, distance to TPs/SL, and remaining expiration for resting orders.
     """
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        return "<i>Mode: 🟢 REAL LIVE TRADING (Paper trading is completely disabled).</i>"
     wallet = load_wallet()
     balance = wallet.get("balance", INITIAL_CAPITAL)
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
@@ -1572,6 +1579,9 @@ async def generate_trades_ledger_card() -> str:
     Generates an institutional Exchange Ledger & Audit History card showing closed trades,
     gross profit/loss, profit factor, exchange fees paid, win rate, and outcome status.
     """
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        return "<i>Mode: 🟢 REAL LIVE TRADING (Paper trading is completely disabled).</i>"
     wallet = load_wallet()
     balance = wallet.get("balance", INITIAL_CAPITAL)
     initial_cap = wallet.get("initial_capital", INITIAL_CAPITAL)
@@ -1654,6 +1664,9 @@ async def generate_trades_ledger_card() -> str:
 
 async def send_daily_paper_trading_digest():
     """Generates and broadcasts daily performance digest card at 10:00 PM IST."""
+    from config import PAPER_TRADING_ENABLED
+    if not PAPER_TRADING_ENABLED:
+        return
     wallet = load_wallet()
     import zoneinfo
     from datetime import datetime, timezone
