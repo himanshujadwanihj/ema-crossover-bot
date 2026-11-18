@@ -281,8 +281,8 @@ async def register_paper_trade(alert_data: dict):
                     f"🔄 <b>PAPER TRADE: SL & TP TRAILED (SAME COIN SIGNAL)</b>\n"
                     f"<b>Asset:</b> {symbol} [{signal}]\n"
                     f"🛡️ <b>Previous SL:</b> {format_price(old_sl, symbol)} ➔ <b>New Trailed SL:</b> {format_price(sl, symbol)}\n"
-                    f"🎯 <b>New Targets:</b> TP1: {format_price(tp1, symbol)} (70% Book) | TP2: {format_price(tp2, symbol)} (30% Runner)\n"
-                    f"<i>Status: Fresh {signal} signal received for active position. SL & TPs updated!</i>"
+                    f"🎯 <b>New Target:</b> {format_price(tp1, symbol)} (1.5R Trailed Target)\n"
+                    f"<i>Status: Fresh {signal} signal received for active position. SL & TP updated!</i>"
                 )
                 asyncio.create_task(notify_telegram(msg))
                 return
@@ -385,7 +385,7 @@ async def register_paper_trade(alert_data: dict):
         f"📦 <b>Size:</b> {qty:.4f} contracts (~${notional_usd:.2f} USD / ₹{trade_notional_inr:,.0f} INR)\n"
         f"💰 <b>Margin Required:</b> ₹{trade_margin_inr:,.2f} INR (Free Margin: ₹{available_margin - trade_margin_inr:,.2f} INR)\n"
         f"🛡️ <b>Target Risk ({risk_pct * 100:.2f}%):</b> ₹{target_risk_inr:,.2f} INR\n"
-        f"🎯 <b>Targets:</b> TP1: {format_price(tp1, symbol)} (70% Book + +0.4R Lock) | TP2: {format_price(tp2, symbol)} (30% Runner)\n"
+        f"🎯 <b>Take-Profit Target (1.5R):</b> {format_price(tp1, symbol)} (100% Full Booking)\n"
         f"🛡️ <b>Est. Liquidation:</b> ~{format_price(liq_price, symbol)}\n"
         f"⏱️ <b>Rules:</b> 30-Min Fill Window | 20-Hour Timeout @ Market Price\n"
         f"💼 <b>Virtual Wallet Balance:</b> {balance_str}\n"
@@ -1134,7 +1134,7 @@ async def _evaluate_symbol_paper_trades(symbol: str, df, live_price: float = Non
                     f"💳 <b>Maker Fee (0.02%):</b> -₹{maker_fee:.2f} INR\n"
                     f"🛡️ <b>Est. Liq Price:</b> ~{format_price(order.get('liq_price', 0.0), symbol)}\n"
                     f"💼 <b>Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR\n"
-                    f"<i>Status: Position Active. 2-Stage TP/SL brackets armed (TP1: 70% Book | TP2: 30% Runner)!</i>\n"
+                    f"<i>Status: Position Active. 1.5R Take-Profit armed (100% Full Booking)!</i>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 )
                 asyncio.create_task(notify_telegram(msg))
@@ -1533,7 +1533,7 @@ async def generate_strategy_lookout_card(session=None) -> str:
                 f"   • Entry: {format_price(entry, sym)} | Live: {format_price(curr_px, sym)}\n"
                 f"   • {pnl_icon} Floating PnL: {pnl_sign}₹{pnl_inr:,.2f} INR ({pnl_pct:+.2f}%)\n"
                 f"   • 📦 Contracts: {rem_contracts:.4f} (~${notional_u:.2f} USD / ₹{pos_notional:,.0f} INR)\n"
-                f"   • 🎯 Targets: TP1: {format_price(tp1, sym)} | TP2: {format_price(tp2 or tp3, sym)}\n"
+                f"   • 🎯 Take-Profit: {format_price(tp1, sym)} (1.5R Target)\n"
                 f"   • 🛡️ Current SL: {format_price(sl, sym)} (Buffer: {dist_sl:.2f}%)\n"
                 f"   • 💀 Est. Liq: ~{format_price(liq_p, sym)}\n"
                 f"   • ⏱️ Duration: {dur_str}\n"

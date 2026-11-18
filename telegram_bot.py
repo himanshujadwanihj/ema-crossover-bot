@@ -515,16 +515,9 @@ def _build_single_coin_block(data, index=None):
     block += f"🎯 <b>ENTRY:</b> {format_price(entry, symbol)}\n"
     block += f"🔴 <b>STOP-LOSS:</b> {format_price(sl, symbol)}\n"
     
-    if tp1 and tp2 and (tp1 != tp2):
-        f_rr1 = float(rr1) if rr1 is not None else 2.0
-        f_rr2 = float(rr2) if rr2 is not None else 3.5
-        block += f"🟢 <b>TP1:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"
-        block += f"🚀 <b>TP2:</b> {format_price(tp2, symbol)} (1:{f_rr2:.1f} R:R)\n"
-    elif tp1:
-        f_rr1 = float(rr1) if rr1 is not None else 2.0
-        block += f"🎯 <b>TARGET:</b> {format_price(tp1, symbol)} (1:{f_rr1:.1f} R:R)\n"
-    else:
-        block += f"🎯 <b>TARGET:</b> {format_price(data.get('tp'), symbol)}\n"
+    target_tp = tp1 or data.get("tp")
+    f_rr = float(rr1) if rr1 is not None else (float(data.get("rr")) if data.get("rr") is not None else 1.5)
+    block += f"🎯 <b>TARGET (1.5R):</b> {format_price(target_tp, symbol)} (1:{f_rr:.1f} R:R)\n"
         
     # -- AI SIGNAL ANALYSIS BLOCK --
     try:

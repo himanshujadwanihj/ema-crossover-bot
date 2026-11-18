@@ -161,7 +161,7 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             tp1, tp2 = entry + (1.5 * risk), entry + (4.0 * risk)
         else:
             tp1, tp2 = entry - (1.5 * risk), entry - (4.0 * risk)
-        return sl, (tp1, tp2), (1.5, 4.0), ("1.5 R:R Target 1 (70% Book)", "4.0 R:R Target 2 (30% Runner)")
+        return sl, (tp1, tp2), (1.5, 4.0), ("1.5 R:R Target (100% Book)", "4.0 R:R Runner")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -289,23 +289,22 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             raw_tp1 = eligible_tp1_pools[0]
             tp1 = round(raw_tp1 * (1.0 - FRONT_RUN_PCT), 6)
             rr_val = round((tp1 - entry) / risk, 1)
-            lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
+            lbl1 = f"Liquidity Target ({rr_val} R:R, 100% Book)"
         else:
             tp1 = round(entry + (1.5 * risk), 6)
-            lbl1 = "1.5 R:R Target 1 (70% Book)"
+            lbl1 = "1.5 R:R Target (100% Book)"
 
         higher_bsl = [p for p in all_bsl if p >= entry + (4.0 * risk)]
         if len(higher_bsl) >= 1:
             tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
-            lbl2 = f"Major Liquidity Target 2 ({round((tp2-entry)/risk, 1)}R Runner)"
+            lbl2 = f"Major Liquidity Target ({round((tp2-entry)/risk, 1)}R)"
         else:
             tp2 = max(tp1 * 1.005, round(entry + (6.0 * risk), 6))
-            lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
+            lbl2 = "6.0 R:R Uncapped Trend Target"
 
         rr1 = (tp1 - entry) / risk
         rr2 = (tp2 - entry) / risk
 
-        # 2-Tier Strategy (70% Book at TP1, 30% Free Runner to TP2)
         return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
 
     else: # SELL
@@ -373,23 +372,22 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
             raw_tp1 = eligible_tp1_pools[0]
             tp1 = round(raw_tp1 * (1.0 + FRONT_RUN_PCT), 6)
             rr_val = round((entry - tp1) / risk, 1)
-            lbl1 = f"Liquidity Target 1 ({rr_val} R:R, 70% Book)"
+            lbl1 = f"Liquidity Target ({rr_val} R:R, 100% Book)"
         else:
             tp1 = round(entry - (1.5 * risk), 6)
-            lbl1 = "1.5 R:R Target 1 (70% Book)"
+            lbl1 = "1.5 R:R Target (100% Book)"
 
         lower_ssl = [p for p in all_ssl if p <= entry - (4.0 * risk)]
         if len(lower_ssl) >= 1:
             tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
-            lbl2 = f"Major Liquidity Target 2 ({round((entry-tp2)/risk, 1)}R Runner)"
+            lbl2 = f"Major Liquidity Target ({round((entry-tp2)/risk, 1)}R)"
         else:
             tp2 = min(tp1 * 0.995, round(entry - (6.0 * risk), 6))
-            lbl2 = "6.0 R:R Uncapped Trend Runner Target 2"
+            lbl2 = "6.0 R:R Uncapped Trend Target"
 
         rr1 = (entry - tp1) / risk
         rr2 = (entry - tp2) / risk
 
-        # 2-Tier Strategy (70% Book at TP1, 30% Free Runner to TP2)
         return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
 
 def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict = None) -> list:

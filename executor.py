@@ -1081,10 +1081,9 @@ class SharkExchangeExecutor:
                 f"<b>Margin Used:</b> ₹{self.margin_inr:,.0f} INR (~${margin_usdt:.2f} USDT)\n"
                 f"<b>Leverage:</b> {self.leverage}x Fixed\n"
                 f"<b>Notional:</b> ~${notional_usdt:.2f} USDT\n\n"
-                f"🎯 <b>TP1 (70% Book + Trail +0.4R):</b> {format_price(clean_tp1)} (Qty: {tp1_qty})\n"
-                f"🚀 <b>TP2 (30% Free Runner):</b> {format_price(clean_tp3)} (Qty: {tp3_qty})\n"
+                f"🎯 <b>Take-Profit Target (1.5R):</b> {format_price(clean_tp1)} (100% Full Booking)\n"
                 f"🛡️ <b>Stop-Loss Limit:</b> {format_price(clean_sl)}{bal_block}\n\n"
-                f"<i>Status: Entry limit resting on order book. 70/30 Profit Engine + +0.4R Lock armed.</i>"
+                f"<i>Status: Entry limit resting on order book. 1.5R Maker Limit TP armed.</i>"
             )
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(exec_card)
@@ -1426,7 +1425,7 @@ class SharkExchangeExecutor:
                     f"🎯 <b>Fill Price:</b> {px_disp}\n"
                     f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
                     f"🛡️ <b>Stop-Loss Armed:</b> {clean_sl}\n"
-                    f"🎯 <b>Targets:</b> TP1: {clean_tp1} (70% Book) | TP2: {target_tp2} (30% Runner)"
+                    f"🎯 <b>Take-Profit Target:</b> {clean_tp1} (1.5R - 100% Full Booking)"
                     f"{bal_block}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
@@ -2430,10 +2429,20 @@ class SharkExchangeExecutor:
             # Clamp with Liquidation Shield
             safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange to CTC (+0.4% Profit Floor) for remaining runner
-            logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Runner qty={runner_qty})")
+            # 3. Modify Stop-Loss order on Shark Exchange
             if runner_qty > 0:
+                logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Runner qty={runner_qty})")
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty, is_trailed=True)
+            else:
+                logger.info(f"🎯 100% TP HIT: Position fully closed for {clean_sym}. Cleaning up resting SL orders.")
+                try:
+                    open_orders = await self.get_open_orders(session, symbol=clean_sym)
+                    for o in open_orders:
+                        cid = o.get("clientOrderId")
+                        if cid and ("sl" in cid.lower() or "stop" in cid.lower()):
+                            await self.cancel_order(session, symbol=clean_sym, client_order_id=cid)
+                except Exception as e_c:
+                    logger.warning(f"Error cleaning SL after 100% TP hit for {clean_sym}: {e_c}")
 
             # 4. Update persistent state
             st_map = _load()
@@ -2449,15 +2458,24 @@ class SharkExchangeExecutor:
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             conf_tag = " [Exchange Verified]" if realized_inr > 0 else ""
-            msg = (
-                f"🎯 <b>REAL LIVE TRADE: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>Asset:</b> {clean_sym} [{direction}]\n"
-                f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
-                f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
-                f"🛡️ <b>SL Trailed to Cost-to-Cost (+0.4% Profit Floor):</b> {format_price(safe_trailed_sl)}\n"
-                f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
-                f"<i>Trade is now 100% Zero-Risk. 30% runner trailing for full trend capture!</i>{bal_block}"
-            )
+            if runner_qty <= 0:
+                msg = (
+                    f"🎯 <b>REAL LIVE TRADE: TARGET (1.5R) HIT ✅ (100% PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>Asset:</b> {clean_sym} [{direction}]\n"
+                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(tp1)}\n"
+                    f"<b>Realized Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
+                    f"<b>Status:</b> 100% position closed. Lingering SL cancelled.{bal_block}"
+                )
+            else:
+                msg = (
+                    f"🎯 <b>REAL LIVE TRADE: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>Asset:</b> {clean_sym} [{direction}]\n"
+                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
+                    f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
+                    f"🛡️ <b>SL Trailed to Cost-to-Cost (+0.4% Profit Floor):</b> {format_price(safe_trailed_sl)}\n"
+                    f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
+                    f"<i>Trade is now 100% Zero-Risk. Runner trailing for full trend capture!</i>{bal_block}"
+                )
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(msg)
 
