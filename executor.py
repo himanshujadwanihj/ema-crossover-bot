@@ -534,28 +534,13 @@ class SharkExchangeExecutor:
         if min_lot > 0 and total_qty < min_lot:
             total_qty = min_lot
 
-        if (adx is not None and adx < 20.0) or (total_qty < (2 * min_lot)):
-            # Choppy / Range Regime OR position size cannot be split into multiple valid exchange lots
-            tp1_qty = total_qty
-            tp2_qty = 0.0
-        else:
-            # Trending Regime: 70% at TP1, 30% runner at TP2
-            raw_tp1 = round_coin_qty(clean_sym, total_qty * 0.70, price=entry_price)
-            raw_tp2 = round_coin_qty(clean_sym, total_qty - raw_tp1, price=entry_price)
-            if (total_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (total_qty + 1e-6) or raw_tp2 < min_lot:
-                if (total_qty - min_lot) >= min_lot:
-                    tp2_qty = min_lot
-                    tp1_qty = round_coin_qty(clean_sym, total_qty - tp2_qty, price=entry_price)
-                else:
-                    # Cannot split into 2 valid exchange lots >= min_lot: Fall back to 1 TP (100% at TP1)
-                    tp1_qty = total_qty
-                    tp2_qty = 0.0
-            else:
-                tp1_qty = raw_tp1
-                tp2_qty = raw_tp2
-        tp3_qty = tp2_qty  # Backward compat alias
+        # USER DIRECTIVE: 100% Full Profit Booking at TP1 (1.5R Target)
+        # Eliminates runner retracement, guarantees 100% full cash profit lock into wallet.
+        tp1_qty = total_qty
+        tp2_qty = 0.0
+        tp3_qty = 0.0
 
-        return total_qty, tp1_qty, tp2_qty, tp2_qty, margin_usdt, notional_usdt
+        return total_qty, tp1_qty, 0.0, 0.0, margin_usdt, notional_usdt
 
     async def update_leverage(self, session: aiohttp.ClientSession, symbol: str, leverage: int = 10) -> bool:
         """Configures symbol leverage to 10x on Shark Exchange."""
@@ -1129,26 +1114,11 @@ class SharkExchangeExecutor:
         clean_tp2 = round_price(clean_sym, tp2)
         clean_tp3 = round_price(clean_sym, tp3) if tp3 is not None else clean_tp2
 
-        # Elite 70/30 2-TP Profit Booking Model: 70% at TP1, 30% runner at TP2
+        # 100% Full Profit Booking Model at TP1 (1.5R Target)
+        # Positions are 100% closed at 1.5R target with zero runner retracement!
         target_tp2 = clean_tp2 or clean_tp3
-        min_lot = get_exchange_min_qty(clean_sym)
-        if (adx is not None and adx < 20.0) or (actual_qty < (2 * min_lot)):
-            tp1_qty = actual_qty
-            tp2_qty = 0.0
-        else:
-            raw_tp1 = round_coin_qty(clean_sym, actual_qty * 0.70, price=clean_tp1)
-            raw_tp2 = round_coin_qty(clean_sym, actual_qty - raw_tp1, price=target_tp2)
-            if (actual_qty - raw_tp1) < min_lot or (raw_tp1 + raw_tp2) > (actual_qty + 1e-6) or raw_tp2 < min_lot:
-                if (actual_qty - min_lot) >= min_lot:
-                    tp2_qty = min_lot
-                    tp1_qty = round_coin_qty(clean_sym, actual_qty - tp2_qty, price=clean_tp1)
-                else:
-                    # Cannot split into 2 valid lots >= min_lot: Fall back to 1 TP (100% at TP1)
-                    tp1_qty = actual_qty
-                    tp2_qty = 0.0
-            else:
-                tp1_qty = raw_tp1
-                tp2_qty = raw_tp2
+        tp1_qty = actual_qty
+        tp2_qty = 0.0
         tp3_qty = 0.0
 
         # 1. Place Stop-Loss Order (Shark POSITION bracket SL)
@@ -1522,7 +1492,20 @@ class SharkExchangeExecutor:
                 pnl_str = f"+₹{pnl_inr:,.2f} INR" if pnl_inr >= 0 else f"-₹{abs(pnl_inr):,.2f} INR"
                 
                 from telegram_bot import send_text_alert
-                if "12-HR" in reason.upper() or "STALE" in reason.upper():
+                if "TP1" in reason.upper() or "TARGET" in reason.upper() or "TAKE PROFIT" in reason.upper():
+                    sign = "+" if pnl_inr >= 0 else ""
+                    msg = (
+                        f"🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅ (100% PROFIT SECURED)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>Asset:</b> {clean_sym} [{pos_dir_raw}]\n"
+                        f"<b>Entry Price:</b> ${format_price(entry_p, clean_sym)}\n"
+                        f"<b>Exit Price (Market Target):</b> ${format_price(exit_p, clean_sym)}\n"
+                        f"<b>Quantity:</b> {pos_qty_real}\n"
+                        f"<b>Total Position PnL:</b> <b>{sign}₹{pnl_inr:,.2f} INR</b> ({sign}${pnl_usdt_close:.2f} USDT) 💰\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<i>100% Position Closed at 1.5R Target on Shark Exchange! Full Cash Profit Locked in Wallet.</i>"
+                    )
+                elif "12-HR" in reason.upper() or "STALE" in reason.upper():
                     msg = (
                         f"⏳ <b>SHARK RUNNER CLOSED (12-HR STALE TRADE RULE)</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1970,7 +1953,33 @@ class SharkExchangeExecutor:
                 realized_pnl_inr = float(pos.get("realizedProfitInMarginAsset") or 0.0)
                 price_at_tp1 = False
                 if tp1 and mark_p > 0:
-                    price_at_tp1 = (direction == "BUY" and mark_p >= tp1 * 0.998) or (direction == "SELL" and mark_p <= tp1 * 1.002)
+                    price_at_tp1 = (direction == "BUY" and mark_p >= tp1 * 0.999) or (direction == "SELL" and mark_p <= tp1 * 1.001)
+
+                # ── ACTIVE REAL-TIME TAKE-PROFIT MARKET GUARD ────────────────────────
+                # If mark price touches or crosses 1.5R TP target and position is still open:
+                # Do NOT wait passively for illiquid exchange limit orderbooks.
+                # Instantly execute a Reduce-Only MARKET close for 100% position size!
+                if tp1 and mark_p > 0 and pos_qty_abs > 0 and price_at_tp1:
+                    logger.info(
+                        f"🎯 ACTIVE TP GUARD: {sym} [{direction}] mark price {mark_p} reached 1.5R target {tp1}! "
+                        f"Instantly executing 100% MARKET profit booking (qty={pos_qty_abs})."
+                    )
+                    closed_ok = await self.close_position_market(session, sym, reason="TP1 HIT (1.5R TARGET)")
+                    if closed_ok:
+                        if state_entry:
+                            state_entry["tp1_hit"] = True
+                            state_entry["outcome"] = "TP1_HIT_100_PERCENT"
+                            from state import _load, _save
+                            st_map = _load()
+                            for k_st in list(st_map.keys()):
+                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
+                                    st_map[k_st]["tp1_hit"] = True
+                                    st_map[k_st]["outcome"] = "TP1_HIT_100_PERCENT"
+                                    _save(st_map)
+                                    break
+                        self._tp_order_count_cache.pop(sym, None)
+                        self._known_live_positions.pop(sym, None)
+                        continue
 
                 # Self-Healing False TP1 State Correction:
                 # If state mistakenly claims tp1_hit=True, but position on exchange is still full size (pos_qty_abs >= orig_qty * 0.85)
