@@ -585,9 +585,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
                     "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "SUI/USDT",
                     "NEAR/USDT", "DOT/USDT", "LTC/USDT", "UNI/USDT", "AAVE/USDT",
-                    "BCH/USDT", "XAU/USD", "XAUT/USDT", "PAXG/USDT"
+                    "BCH/USDT", "XAU/USD", "XAUUSDT", "XAUT/USDT"
                 }
-                MAJOR_PREFIXES = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "SUI", "NEAR", "DOT", "LTC", "UNI", "AAVE", "BCH", "XAUT", "PAXG"]
+                MAJOR_PREFIXES = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "SUI", "NEAR", "DOT", "LTC", "UNI", "AAVE", "BCH", "XAU", "XAUT"]
                 is_super = (symbol in SUPER_MAJORS or any(m in symbol for m in MAJOR_PREFIXES))
 
                 if label in ["30M", "30m"] and not is_super:
@@ -1248,7 +1248,14 @@ async def main_loop():
 
                         if not is_weekend:
                             # Mon - Fri: ONLY Top 25 Crypto + Commodities (4) + US Equities (15)
-                            top_25_crypto = [sym for sym in all_futures_pairs if sym not in stock_symbols_set and sym not in commodities_set and not any(sym.startswith(s) for s in ["XAU", "XAG", "NATGAS", "CL", "SOXL", "SOXS", "SKHY", "KORU", "SPCX"])][:25]
+                            # User Directive: PAXG is strictly stopped / blocked. Gold trading is strictly XAUUSDT.
+                            top_25_crypto = [
+                                sym for sym in all_futures_pairs
+                                if sym not in stock_symbols_set
+                                and sym not in commodities_set
+                                and "PAXG" not in sym.upper()
+                                and not any(sym.startswith(s) for s in ["XAU", "XAG", "NATGAS", "CL", "SOXL", "SOXS", "SKHY", "KORU", "SPCX"])
+                            ][:25]
                             active_pairs = list(dict.fromkeys(top_25_crypto + METALS_LIST + US_STOCKS_LIST))
                         else:
                             # Sat - Sun: ALL Binance Futures + BTC & ETH (Commodities & US Equities remain CLOSED)
@@ -1256,6 +1263,7 @@ async def main_loop():
                             active_pairs = [
                                 sym for sym in all_futures_pairs
                                 if sym not in weekend_blocked
+                                and "PAXG" not in sym.upper()
                                 and not any(sym.startswith(s) for s in ["XAU", "XAG", "NATGAS", "CL", "OIL", "SOXL", "SOXS", "SKHY", "KORU", "SPCX", "SPY", "QQQ"])
                             ]
                             # Explicitly ensure BTC and ETH are scanned on weekends

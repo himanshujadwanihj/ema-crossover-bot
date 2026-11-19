@@ -548,6 +548,8 @@ class SharkExchangeExecutor:
     async def update_leverage(self, session: aiohttp.ClientSession, symbol: str, leverage: int = 10) -> bool:
         """Configures symbol leverage to 10x on Shark Exchange."""
         clean_sym = to_shark_symbol(symbol)
+        if "PAXG" in clean_sym.upper():
+            return False
         status, data = await self.shark_post(session, "/v1/exchange/update/leverage", {
             "contractName": clean_sym,
             "leverage": leverage
@@ -635,6 +637,8 @@ class SharkExchangeExecutor:
             return False
 
         clean_sym = to_shark_symbol(symbol)
+        if "PAXG" in clean_sym.upper():
+            return True  # Block any PAXG trade attempt
 
         # 1. Fetch Exchange State
         positions = await self.get_open_positions(session)
@@ -945,6 +949,9 @@ class SharkExchangeExecutor:
         - Submits Entry Limit Order with Stop-Loss attached.
         """
         clean_sym = to_shark_symbol(symbol)
+        if "PAXG" in clean_sym.upper():
+            logger.info(f"EXCLUSION: {clean_sym} blocked per user directive. Only XAUUSDT is allowed for Gold.")
+            return {"status": "skipped", "reason": "PAXG trading is permanently blocked. Only XAUUSDT is allowed for Gold."}
 
         # Scale prices if needed for 1000x / 1Mx multiplier contracts (e.g. 1000PEPE, 1000SHIB, 1000BONK, 1MBABYDOGE)
         multiplier = get_symbol_price_multiplier(clean_sym, entry)
