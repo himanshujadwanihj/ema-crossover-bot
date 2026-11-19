@@ -888,7 +888,7 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
 
         compression_pct = ((range_high - range_low) / curr_price) * 100.0
         min_comp = 0.50 if tf_label.upper() == "1H" else 0.40
-        max_comp = 3.50 if tf_label.upper() == "1H" else 2.20
+        max_comp = 4.25 if tf_label.upper() == "1H" else 2.20
 
         if compression_pct < min_comp:
             return {"eligible": False, "reason": f"Dead flatline (compression {compression_pct:.2f}% < {min_comp}%)"}
@@ -913,17 +913,17 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         kc_lower = kc_mid - (1.5 * atr_20)
 
         ttm_squeeze = bool((bb_lower.iloc[-1] >= kc_lower.iloc[-1]) and (bb_upper.iloc[-1] <= kc_upper.iloc[-1]))
-        max_bb_width = 3.50 if tf_label.upper() == "1H" else 2.20
+        max_bb_width = 4.00 if tf_label.upper() == "1H" else 2.20
         is_bb_pinched = bb_width_pct <= max_bb_width
 
         if not (ttm_squeeze or is_bb_pinched):
             return {"eligible": False, "reason": f"No squeeze pinch (TTM: {ttm_squeeze}, BB width: {bb_width_pct:.2f}%)"}
 
-        # ── TICK 4: SMART MONEY ACCUMULATION (OI 1H >= +0.50%) ──
+        # ── TICK 4: SMART MONEY ACCUMULATION (Neutral/Positive OI; reject only heavy dumping < -1.50%) ──
         micro = micro or {}
         oi_change_1h = float(micro.get("oi_change_1h_pct", 0.0))
-        if not is_gold_or_stock and oi_change_1h < 0.50:
-            return {"eligible": False, "reason": f"OI 1H change {oi_change_1h:+.2f}% < +0.50%"}
+        if not is_gold_or_stock and oi_change_1h < -1.50:
+            return {"eligible": False, "reason": f"Heavy OI outflow {oi_change_1h:+.2f}% < -1.50%"}
 
         # ── TICK 5: DIRECTIONAL & LEVERAGE BIAS ──
         funding_pct = float(micro.get("funding_pct", 0.0))
@@ -952,8 +952,8 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         trigger_entry = range_high * 1.001 if direction == "BUY" else range_low * 0.999
         invalidation_sl = range_low * 0.998 if direction == "BUY" else range_high * 1.002
 
-        # Coiling Quality Score
-        coiling_score = (max_comp - compression_pct) * 2.0 + min(max(oi_change_1h, 0.0), 5.0) + (2.0 if ttm_squeeze else 0.0)
+        # Coiling Quality Score (Positive OI gets bonus, flat OI remains eligible)
+        coiling_score = (max_comp - compression_pct) * 2.0 + min(max(oi_change_1h, 0.0), 5.0) * 1.5 + (2.0 if ttm_squeeze else 0.0)
 
         return {
             "eligible": True,

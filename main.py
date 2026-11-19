@@ -440,17 +440,17 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             from market_cache import is_btc_safe_for_altcoins
                             is_safe, btc_reason = is_btc_safe_for_altcoins(sq_signal, symbol, tf_data)
 
-                            if body_ratio < 0.50:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected ? Candle Body Ratio {body_ratio:.1%} < 50% (Weak expansion / long wick trap).")
+                            if body_ratio < 0.45:
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
                                 sq_signal = None
-                            elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.35:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected ? Upper rejection wick > 35% (Shooting star / whale trap).")
+                            elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.38:
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
                                 sq_signal = None
-                            elif sq_signal == 'SELL' and ((c_close - c_low) / c_range) > 0.35:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected ? Lower rejection wick > 35% (Hammer / bear trap).")
+                            elif sq_signal == 'SELL' and ((c_close - c_low) / c_range) > 0.38:
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
                                 sq_signal = None
-                            elif vol_20_sma > 0 and breakout_vol < (1.50 * vol_20_sma):
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected ? Volume {breakout_vol:.0f} < 1.5x 20-SMA {vol_20_sma:.0f} (Whale volume surge missing).")
+                            elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
                                 sq_signal = None
                             elif not is_safe:
                                 logger.info(f"FILTERED 1H SQUEEZE: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
