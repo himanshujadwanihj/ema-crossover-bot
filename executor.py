@@ -1079,7 +1079,14 @@ class SharkExchangeExecutor:
 
         status, data = await self.shark_post(session, "/v1/order/place-order", order_payload)
 
-        if status in (200, 201):
+        is_order_accepted = (
+            status in (200, 201)
+            and isinstance(data, dict)
+            and not data.get("error")
+            and (bool(data.get("id")) or bool(data.get("orderId")) or bool(data.get("clientOrderId")))
+        )
+
+        if is_order_accepted:
             order_id = data.get("orderId") or data.get("id") or "CONFIRMED"
             actual_cid = data.get("clientOrderId") or ""
             logger.info(f"SHARK ORDER PLACED SUCCESSFULLY: {clean_sym} OrderID={order_id} ClientID={actual_cid}")

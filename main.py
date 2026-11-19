@@ -1273,64 +1273,11 @@ async def main_loop():
                         
                         tasks = [scan_single_symbol_async(session, sym, semaphore) for sym in active_pairs]
                         results = await asyncio.gather(*tasks)
-                        
-                        from telegram_bot import flush_alerts
-                        await flush_alerts()
 
-                        # ── STAGE 1: WATCHLIST COILING DISPATCHER (All Ticks Verified + Anti-Spam Single-Best) ──
-                        radar_candidates = [r["radar"] for r in results if isinstance(r, dict) and isinstance(r.get("radar"), dict)]
-                        if radar_candidates:
-                            from state import is_global_radar_on_cooldown, record_global_radar_sent, record_pre_squeeze_radar, is_radar_on_cooldown
-                            # Re-verify not on symbol cooldown
-                            eligible_radars = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
-                            if eligible_radars and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
-                                # Rank by Coiling Quality Score and select ONLY the #1 single best coiled setup across the market
-                                eligible_radars.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
-                                top_radar = eligible_radars[0]
-
-                                from telegram_bot import send_pre_squeeze_radar_alert
-                                await send_pre_squeeze_radar_alert(top_radar)
-                                record_global_radar_sent()
-                                record_pre_squeeze_radar(top_radar["symbol"], top_radar)
-                                logger.info(f"📡 DISPATCHED TOP #1 WATCHLIST COILING ALERT: {top_radar['symbol']} ({top_radar['direction']}) | Score: {top_radar.get('coiling_score')}")
-                            else:
-                                # Keep track of active radars in state silently for Stage 2 breakout execution
-                                for cand in eligible_radars:
-                                    record_pre_squeeze_radar(cand["symbol"], cand)
-                        
-                        # SILENTLY EDIT PINNED 4H VOLATILITY DASHBOARD (Every 5 minutes)
-                        if time.time() - last_dashboard_update_time >= 300:
-                            try:
-                                from volatility_dashboard import update_pinned_volatility_dashboard
-                                await update_pinned_volatility_dashboard(session, semaphore)
-                                last_dashboard_update_time = time.time()
-                            except Exception as e_dash:
-                                logger.error(f"Error updating pinned volatility dashboard: {e_dash}")
-                        
-                        # DAILY PNL & PERFORMANCE DIGEST CARD (10:00 PM IST)
-                        if now_ist.hour == 22 and now_ist.minute <= 2 and not daily_digest_sent_today:
-                            try:
-                                from config import PAPER_TRADING_ENABLED
-                                if PAPER_TRADING_ENABLED:
-                                    from paper_trader import send_daily_paper_trading_digest
-                                    await send_daily_paper_trading_digest()
-                                daily_digest_sent_today = True
-                                # MINOR #4 FIX: Persist digest sent date so restart doesn't re-send
-                                try:
-                                    with open(daily_file, 'r') as _f:
-                                        _d = json.load(_f)
-                                except Exception:
-                                    _d = {}
-                                _d['digest'] = today_str
-                                with open(daily_file, 'w') as _f:
-                                    json.dump(_d, _f)
-                            except Exception as e_dig:
-                                logger.error(f"Error dispatching daily digest: {e_dig}")
-                        if now_ist.hour != 22:
-                            daily_digest_sent_today = False
-
-                        # BULK SIGNAL BATCH PROCESSOR & PRIORITY SEQUENCER:
-                        # BUG #1 FIX: Flatten the list-of-lists (each symbol returns a list of candidates now)
+                        # ═════════════════════════════════════════════════════════════════════════════
+                        # 1. IMMEDIATE LIVE TRADE EXECUTION (ZERO DELAY PRIORITY)
+                        # User Directive: First order execution on exchange, then Telegram sharing!
+                        # ═════════════════════════════════════════════════════════════════════════════
                         raw_candidates = []
                         for r in results:
                             if isinstance(r, dict):
@@ -1497,6 +1444,64 @@ async def main_loop():
                                     
                                     # Mandatory 1.5-second sequential pause between bulk trade executions
                                     await asyncio.sleep(1.5)
+
+                        # ═════════════════════════════════════════════════════════════════════════════
+                        # 2. TELEGRAM CHANNEL BROADCASTS & BACKGROUND DISPATCHERS (RUN AFTER TRADES)
+                        # ═════════════════════════════════════════════════════════════════════════════
+                        from telegram_bot import flush_alerts
+                        await flush_alerts()
+
+                        # ── STAGE 1: WATCHLIST COILING DISPATCHER (All Ticks Verified + Anti-Spam Single-Best) ──
+                        radar_candidates = [r["radar"] for r in results if isinstance(r, dict) and isinstance(r.get("radar"), dict)]
+                        if radar_candidates:
+                            from state import is_global_radar_on_cooldown, record_global_radar_sent, record_pre_squeeze_radar, is_radar_on_cooldown
+                            # Re-verify not on symbol cooldown
+                            eligible_radars = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
+                            if eligible_radars and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
+                                # Rank by Coiling Quality Score and select ONLY the #1 single best coiled setup across the market
+                                eligible_radars.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
+                                top_radar = eligible_radars[0]
+
+                                from telegram_bot import send_pre_squeeze_radar_alert
+                                await send_pre_squeeze_radar_alert(top_radar)
+                                record_global_radar_sent()
+                                record_pre_squeeze_radar(top_radar["symbol"], top_radar)
+                                logger.info(f"📡 DISPATCHED TOP #1 WATCHLIST COILING ALERT: {top_radar['symbol']} ({top_radar['direction']}) | Score: {top_radar.get('coiling_score')}")
+                            else:
+                                # Keep track of active radars in state silently for Stage 2 breakout execution
+                                for cand in eligible_radars:
+                                    record_pre_squeeze_radar(cand["symbol"], cand)
+                        
+                        # SILENTLY EDIT PINNED 4H VOLATILITY DASHBOARD (Every 5 minutes)
+                        if time.time() - last_dashboard_update_time >= 300:
+                            try:
+                                from volatility_dashboard import update_pinned_volatility_dashboard
+                                await update_pinned_volatility_dashboard(session, semaphore)
+                                last_dashboard_update_time = time.time()
+                            except Exception as e_dash:
+                                logger.error(f"Error updating pinned volatility dashboard: {e_dash}")
+                        
+                        # DAILY PNL & PERFORMANCE DIGEST CARD (10:00 PM IST)
+                        if now_ist.hour == 22 and now_ist.minute <= 2 and not daily_digest_sent_today:
+                            try:
+                                from config import PAPER_TRADING_ENABLED
+                                if PAPER_TRADING_ENABLED:
+                                    from paper_trader import send_daily_paper_trading_digest
+                                    await send_daily_paper_trading_digest()
+                                daily_digest_sent_today = True
+                                # MINOR #4 FIX: Persist digest sent date so restart doesn't re-send
+                                try:
+                                    with open(daily_file, 'r') as _f:
+                                        _d = json.load(_f)
+                                except Exception:
+                                    _d = {}
+                                _d['digest'] = today_str
+                                with open(daily_file, 'w') as _f:
+                                    json.dump(_d, _f)
+                            except Exception as e_dig:
+                                logger.error(f"Error dispatching daily digest: {e_dig}")
+                        if now_ist.hour != 22:
+                            daily_digest_sent_today = False
 
                         total_sent = len(raw_candidates)
                         elapsed = (datetime.now() - start_t).total_seconds()
