@@ -779,15 +779,21 @@ class SharkExchangeExecutor:
             sl_updated = False
             tp_updated = False
 
-            # Check if new SL is tighter/better:
-            # For BUY: new SL > current_sl (moves upward to lock profit / reduce risk)
-            # For SELL: new SL < current_sl (moves downward to lock profit / reduce risk)
+            # Cooldown guard: do not trail orders more than once every 3 minutes per symbol
+            last_trail_time = self._tp_sl_heal_lock.get(clean_sym + "_continuation_trail", 0)
+            if time.time() - last_trail_time < 180:
+                logger.info(f"Continuation trail for {clean_sym} on cooldown ({int(time.time() - last_trail_time)}s < 180s) — skipping.")
+                return True
+
+            # Check if new SL is tighter/better with minimum 0.20% improvement (avoids flickering modifications):
+            # For BUY: new SL >= current_sl * 1.002 (moves upward to lock profit / reduce risk)
+            # For SELL: new SL <= current_sl * 0.998 (moves downward to lock profit / reduce risk)
             is_better_sl = False
             if current_sl == 0:
                 is_better_sl = True
-            elif sig_dir == "BUY" and clean_new_sl > current_sl:
+            elif sig_dir == "BUY" and clean_new_sl >= current_sl * 1.002:
                 is_better_sl = True
-            elif sig_dir == "SELL" and clean_new_sl < current_sl:
+            elif sig_dir == "SELL" and clean_new_sl <= current_sl * 0.998:
                 is_better_sl = True
 
             if is_better_sl:
@@ -795,20 +801,17 @@ class SharkExchangeExecutor:
                 sl_ok = await self.modify_stop_loss(session, clean_sym, sig_dir, clean_new_sl, pos_qty, is_trailed=True)
                 if sl_ok:
                     sl_updated = True
+                    self._tp_sl_heal_lock[clean_sym + "_continuation_trail"] = time.time()
 
-            # Check if new TP extends deeper into the trend (at least 1.5R):
-            # For BUY: new TP > current_tp (higher target in uptrend)
-            # For SELL: new TP < current_tp (lower target in downtrend)
+            # USER DIRECTIVE: Single Fixed 1.5R TP target policy.
+            # Never push TP further away into the distance on continuation signals so the target gets hit!
+            # Only place TP if completely missing on exchange (current_tp == 0).
             is_better_tp = False
             if current_tp == 0:
                 is_better_tp = True
-            elif sig_dir == "BUY" and clean_new_tp > current_tp:
-                is_better_tp = True
-            elif sig_dir == "SELL" and clean_new_tp < current_tp:
-                is_better_tp = True
 
             if is_better_tp:
-                logger.info(f"🔄 CONTINUATION TRAIL TP: {clean_sym} [{sig_dir}] TP {current_tp} → {clean_new_tp}")
+                logger.info(f"🔄 CONTINUATION RESTORE MISSING TP: {clean_sym} [{sig_dir}] placing at {clean_new_tp}")
                 # Cancel existing TP orders
                 for o in tp_orders:
                     cid = o.get("clientOrderId")
@@ -829,7 +832,7 @@ class SharkExchangeExecutor:
                 st_tp, res_tp = await self.shark_post(session, "/v1/order/place-order", tp_payload)
                 if st_tp in (200, 201):
                     tp_updated = True
-                    logger.info(f"Placed new trailed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
+                    logger.info(f"Placed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
 
             if sl_updated or tp_updated:
                 # Update local state
@@ -1232,9 +1235,8 @@ class SharkExchangeExecutor:
                 if pos_direction == "BUY":
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    # User Directive: Minimum 1.5R target floor, uncapped trailing forward
-                    if not tp1 or tp1 < (fill_price + 1.49 * risk):
-                        tp1 = round_price(clean_sym, fill_price + 1.5 * risk)
+                    # User Directive: Exact 1.5R target policy
+                    tp1 = round_price(clean_sym, fill_price + 1.5 * risk)
                     if not tp2 or tp2 <= tp1:
                         tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 4.0 * risk))
                     if not tp3 or tp3 <= tp2:
@@ -1242,9 +1244,8 @@ class SharkExchangeExecutor:
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    # User Directive: Minimum 1.5R target floor, uncapped trailing forward
-                    if not tp1 or tp1 > (fill_price - 1.49 * risk):
-                        tp1 = round_price(clean_sym, fill_price - 1.5 * risk)
+                    # User Directive: Exact 1.5R target policy
+                    tp1 = round_price(clean_sym, fill_price - 1.5 * risk)
                     if not tp2 or tp2 >= tp1:
                         tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 4.0 * risk))
                     if not tp3 or tp3 >= tp2:
@@ -2322,38 +2323,42 @@ class SharkExchangeExecutor:
                                     self._tp_sl_heal_lock[sym + "_sl_adjust"] = time.time()
                                     break
 
-                # TP HEAL & SCALE-IN / 1.5R RE-ALIGN: Re-place 70/30 TPs (or 100% 1-TP) if missing, undersized, or distant (> 1.55R)
+                # TP HEAL & SCALE-IN: Re-place 100% 1-TP if missing or undersized
                 total_tp_qty = sum(self.extract_order_qty(o) for o in tp_orders)
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
                 is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.95))
 
+                # Realign distant TP (> 1.6R) strictly ONCE per position to avoid infinite cancellation/replacement loops
+                realigned_key = sym + "_tp1_realigned"
                 has_distant_tp1 = False
-                if not tp1_already_hit and pos_qty_abs > 0 and tp_orders:
-                    # Check ONLY the nearest TP limit order (TP1), never the macro runner TP2
+                if not tp1_already_hit and pos_qty_abs > 0 and tp_orders and not self._tp_sl_heal_lock.get(realigned_key):
                     valid_tp_prices = [float(o.get("price") or 0) for o in tp_orders if float(o.get("price") or 0) > 0]
                     if valid_tp_prices:
                         if direction == "BUY":
                             nearest_tp = min(valid_tp_prices)
-                            if nearest_tp > (entry_price + 1.55 * risk_step):
+                            if nearest_tp > (entry_price + 1.60 * risk_step):
                                 has_distant_tp1 = True
                         else:
                             nearest_tp = max(valid_tp_prices)
-                            if nearest_tp < (entry_price - 1.55 * risk_step):
+                            if nearest_tp < (entry_price - 1.60 * risk_step):
                                 has_distant_tp1 = True
 
                 should_heal_tp = (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and tps_hit == 0 and not tp1_already_hit
                 if should_heal_tp:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
-                    if never_healed or (time.time() - last_heal > 30):
+                    if never_healed or (time.time() - last_heal > 60):
+                        calc_tp1 = round_price(sym, entry_price + 1.5 * risk_step if direction == "BUY" else entry_price - 1.5 * risk_step)
                         reason_lbl = "1.5R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
-                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={tp1})")
+                        logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={calc_tp1})")
                         st_heal = get_latest_symbol_state(sym)
                         sl_from_order = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
                         sl_val = sl_from_order or float((st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price) if st_heal else entry_price)
                         await self.place_tp_limits(
-                            session, sym, direction, entry_price, tp1, tp2, tp3, initial_sl=sl_val)
+                            session, sym, direction, entry_price, calc_tp1, tp2, tp3, initial_sl=sl_val)
                         self._tp_sl_heal_lock[sym + "_tp"] = time.time()
+                        if has_distant_tp1:
+                            self._tp_sl_heal_lock[realigned_key] = True
                         if is_tp_undersized:
                             from state import _load, _save
                             st_map = _load()
