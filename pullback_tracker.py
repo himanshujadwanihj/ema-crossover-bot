@@ -321,19 +321,9 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         logger.info(f"FILTERED 1H RETEST: {symbol} SELL rejected - 30M closed above 1H EMA ({last_30m['close']:.4f} > {target_ema:.4f}).")
                         continue
 
-                # C. CANDLE REACTION & LOWER LOW PROTECTION (PREVENTS CATCHING FALLING KNIVES)
-                c1_high = float(prev_row['high'])
-                c1_low = float(prev_row['low'])
-                cur_high = float(row['high'])
-                cur_low = float(row['low'])
-
-                # If candle printed an active breakdown lower low below retest candle (on BUY), support failed!
-                if sig_type == "BUY" and cur_low < c1_low * 0.998:
-                    logger.info(f"FILTERED 1H RETEST: {symbol} BUY rejected - Lower Low printed below retest candle.")
-                    continue
-                elif sig_type == "SELL" and cur_high > c1_high * 1.002:
-                    logger.info(f"FILTERED 1H RETEST: {symbol} SELL rejected - Higher High printed above retest candle.")
-                    continue
+                # C. CANDLE REACTION & LOWER LOW PROTECTION:
+                # Level adherence is rigorously enforced by 30M close (above), 1H EMA tap & rejection wick (lines 244-253),
+                # and 15M micro-structure shift (below). No inverted prior-candle high/low comparison that blocks pullbacks.
 
                 # D. SOLUTION 1 - RULE 1: MICRO STRUCTURE SHIFT (CHoCH / BREAK OF STRUCTURE ON 15M)
                 # Prevents buying into dying bounces that continuously make lower highs (e.g. BNB $758 -> $752.5 -> breakdown)
