@@ -241,15 +241,19 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
 
             if trend == "BULLISH":
                 # Price came from ABOVE the EMA and must sustain ABOVE/AT the EMA (no dumping below EMA!)
-                if prev_close >= target_ema * 0.998 and cur_close >= target_ema * 0.998:
+                if prev_close >= target_ema * 0.998 and cur_close >= target_ema * 0.999:
                     lower_wick_ratio = (cur_close - row['low']) / candle_range
-                    if lower_wick_ratio >= 0.20 or cur_close > target_ema:
+                    # Strict Institutional Confirmation: Must have >= 25% lower rejection wick (buyers defending EMA)
+                    # and close in upper 65% of the candle (no selling pressure closing on lows)
+                    if lower_wick_ratio >= 0.25 and (cur_close - row['low']) >= (candle_range * 0.35):
                         is_support = True
             elif trend == "BEARISH":
                 # Price came from BELOW the EMA and must sustain BELOW/AT the EMA (no pumping above EMA!)
-                if prev_close <= target_ema * 1.002 and cur_close <= target_ema * 1.002:
+                if prev_close <= target_ema * 1.002 and cur_close <= target_ema * 1.001:
                     upper_wick_ratio = (row['high'] - cur_close) / candle_range
-                    if upper_wick_ratio >= 0.20 or cur_close < target_ema:
+                    # Strict Institutional Confirmation: Must have >= 25% upper rejection wick (sellers defending EMA)
+                    # and close in lower 65% of the candle (no buying momentum closing on highs)
+                    if upper_wick_ratio >= 0.25 and (row['high'] - cur_close) >= (candle_range * 0.35):
                         is_resistance = True
 
             if is_support:
