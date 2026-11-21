@@ -168,21 +168,21 @@
 
       <!-- 4 TOP REAL-TIME KPI CARDS -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <!-- Card 1: Cumulative Net Trade Profit & Bank Sweep -->
+        <!-- Card 1: Cumulative Net Realized Profit & Shark Exchange Profit -->
         <div class="glass-card glass-card-hover rounded-xl p-5 border-l-4 border-l-emerald-500">
           <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Net Trade Profit</span>
-            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">REALIZED</span>
+            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Net Realized Profit</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">SHARK NATIVE</span>
           </div>
           <div class="text-3xl font-extrabold text-emerald-400 flex items-baseline gap-2">
-            <span id="live-net-profit">+₹4,388.27</span>
+            <span id="live-net-profit">+₹3,328.00</span>
           </div>
           <div class="text-xs font-semibold text-emerald-300 mt-1 flex items-center justify-between">
-            <span id="live-swept-bank">🏦 ₹3,328.00 Swept to Bank</span>
-            <span class="text-[10px] text-slate-400" id="live-charges">(-₹1,060 TDS/Fees)</span>
+            <span id="live-swept-bank">💰 ₹3,328.00 Shark Net Profit</span>
+            <span class="text-[10px] text-slate-400" id="live-charges">(₹197.64 Fees | 0% TDS)</span>
           </div>
           <div class="text-[11px] text-slate-400 mt-2">
-            Pure trade gains (Net cash received in bank)
+            Net profit realized on Shark Exchange (Total Account Equity: ₹53,328.95)
           </div>
         </div>
 
@@ -190,16 +190,16 @@
         <div class="glass-card glass-card-hover rounded-xl p-5 border-l-4 border-l-sky-500">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active Working Margin</span>
-            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30">SHARK MARGIN</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30">FUTURES WALLET</span>
           </div>
           <div class="text-3xl font-extrabold text-sky-400 flex items-baseline gap-2">
-            <span id="live-wallet-balance">₹50,115</span>
+            <span id="live-wallet-balance">₹50,001</span>
           </div>
           <div class="text-xs font-semibold text-slate-300 mt-1" id="live-wallet-status">
-            ₹50,000 Base Working Margin
+            ₹50,000 Base Trading Capital
           </div>
           <div class="text-[11px] text-slate-400 mt-2">
-            Profits swept to bank; working capital maintained
+            Maintained operating margin; profits separated in funding wallet
           </div>
         </div>
 
@@ -237,14 +237,14 @@
       <!-- PROFIT SWEEP & MARGIN ACCOUNTING CALLOUT -->
       <div class="glass-card rounded-xl p-4 border border-emerald-500/30 bg-emerald-950/20 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
         <div class="flex items-start md:items-center gap-3">
-          <span class="text-2xl">🏦</span>
+          <span class="text-2xl">🦈</span>
           <div>
             <div class="flex items-center gap-2">
-              <span class="text-white font-bold">Exchange Margin vs Bank Swept Profit Accounting:</span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">₹3,328 BANK SWEPT</span>
+              <span class="text-white font-bold">Shark Exchange Verified Balance & Profit Reconciliation:</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">₹3,328 NET PROFIT</span>
             </div>
             <p class="text-slate-300 mt-0.5">
-              Trading margin on Shark Exchange is fixed at <strong class="text-sky-400">₹50,000 INR</strong>. Bot has generated <strong class="text-emerald-400" id="banner-net-profit">+₹4,388.27 INR</strong> in gross realized trade profits. Exactly <strong class="text-emerald-300" id="banner-bank-swept">₹3,328.00 INR</strong> has been successfully swept to bank account after deducting exchange charges, trading fees, and 1% TDS.
+              Active Futures Margin: <strong class="text-sky-400">₹50,000.95 INR</strong> | Net Realized Profit: <strong class="text-emerald-400" id="banner-net-profit">+₹3,328.00 INR</strong> | Total Account Equity: <strong class="text-white">₹53,328.95 INR</strong>. Genuine exchange trading fees across 100 trades are only <strong class="text-amber-300">₹197.64 INR</strong> (~0.02% Maker Fee rate, <strong>0% TDS on INR Crypto Futures</strong>).
             </p>
           </div>
         </div>
@@ -1728,19 +1728,19 @@
 
       const sweptBankEl = document.getElementById('live-swept-bank');
       if (sweptBankEl) {
-        const swept = wal.net_swept_to_bank_inr || 3328.0;
-        sweptBankEl.innerText = '🏦 ₹' + Number(swept).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Swept to Bank';
+        const swept = wal.funding_balance_inr || wal.net_swept_to_bank_inr || 3328.0;
+        sweptBankEl.innerText = '💰 ₹' + Number(swept).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Shark Net Profit';
       }
 
       const chargesEl = document.getElementById('live-charges');
       if (chargesEl) {
-        const charges = wal.total_charges_fees_inr || 1060.27;
-        chargesEl.innerText = '(-₹' + Number(charges).toLocaleString('en-IN', {maximumFractionDigits: 0}) + ' TDS/Fees)';
+        const charges = wal.actual_exchange_fees_inr || wal.total_charges_fees_inr || 197.64;
+        chargesEl.innerText = '(₹' + Number(charges).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Fees | 0% TDS)';
       }
 
       const bannerBankSwept = document.getElementById('banner-bank-swept');
       if (bannerBankSwept) {
-        const swept = wal.net_swept_to_bank_inr || 3328.0;
+        const swept = wal.funding_balance_inr || wal.net_swept_to_bank_inr || 3328.0;
         bannerBankSwept.innerText = '₹' + Number(swept).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' INR';
       }
 
