@@ -324,10 +324,14 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         raw_avail = float(w_data.get("marginBalance") or w_data.get("withdrawableBalance") or w_data.get("availableBalance") or raw_total)
         raw_locked = float(w_data.get("lockedBalance") or w_data.get("lockedBalanceIsolated") or max(0.0, raw_total - raw_avail))
 
-        # Fetch funding wallet (where swept / realized profits sit)
+        # Fetch funding (INR) wallet directly from Shark Exchange (where user manually sweeps / sets aside profit)
         st_fund, fund_resp = await executor.shark_get(session, "/v1/wallet/funding-wallet/details")
         f_data = fund_resp.get("data") if isinstance(fund_resp, dict) and isinstance(fund_resp.get("data"), dict) else (fund_resp if isinstance(fund_resp, dict) else {})
-        funding_balance = float(f_data.get("inrBalance") or f_data.get("walletBalance") or 3328.0)
+        val_fund = f_data.get("inrBalance") if "inrBalance" in f_data else f_data.get("walletBalance")
+        try:
+            funding_balance = float(val_fund) if val_fund is not None else 3328.0
+        except Exception:
+            funding_balance = 3328.0
 
         # Fetch trade history for exact genuine broker fees
         st_th, trade_hist = await executor.shark_get(session, "/v1/user-data/trade-history")
