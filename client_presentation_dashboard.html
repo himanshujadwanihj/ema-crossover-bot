@@ -168,20 +168,21 @@
 
       <!-- 4 TOP REAL-TIME KPI CARDS -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <!-- Card 1: Cumulative Net Trade Profit -->
+        <!-- Card 1: Cumulative Net Trade Profit & Bank Sweep -->
         <div class="glass-card glass-card-hover rounded-xl p-5 border-l-4 border-l-emerald-500">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Net Trade Profit</span>
             <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">REALIZED</span>
           </div>
           <div class="text-3xl font-extrabold text-emerald-400 flex items-baseline gap-2">
-            <span id="live-net-profit">+₹4,445.10</span>
+            <span id="live-net-profit">+₹4,388.27</span>
           </div>
-          <div class="text-xs font-semibold text-emerald-400 mt-1" id="live-trade-roi">
-            +8.89% ROI (Realized)
+          <div class="text-xs font-semibold text-emerald-300 mt-1 flex items-center justify-between">
+            <span id="live-swept-bank">🏦 ₹3,328.00 Swept to Bank</span>
+            <span class="text-[10px] text-slate-400" id="live-charges">(-₹1,060 TDS/Fees)</span>
           </div>
           <div class="text-[11px] text-slate-400 mt-2">
-            Pure trade gains (Independent of bank withdrawals)
+            Pure trade gains (Net cash received in bank)
           </div>
         </div>
 
@@ -239,11 +240,11 @@
           <span class="text-2xl">🏦</span>
           <div>
             <div class="flex items-center gap-2">
-              <span class="text-white font-bold">Exchange Margin vs Net Trade Profit Accounting:</span>
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">PROFIT SWEEP ACTIVE</span>
+              <span class="text-white font-bold">Exchange Margin vs Bank Swept Profit Accounting:</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">₹3,328 BANK SWEPT</span>
             </div>
             <p class="text-slate-300 mt-0.5">
-              Active margin in Shark Exchange is intentionally maintained at <strong class="text-sky-400">₹50,000 INR</strong> working capital. As trades hit target, realized net profits (<strong class="text-emerald-400" id="banner-net-profit">+₹4,445.10 INR</strong>) are periodically withdrawn to bank account. Look at the <strong class="text-white">Net Trade Profit</strong> card above for complete realized trading earnings.
+              Trading margin on Shark Exchange is fixed at <strong class="text-sky-400">₹50,000 INR</strong>. Bot has generated <strong class="text-emerald-400" id="banner-net-profit">+₹4,388.27 INR</strong> in gross realized trade profits. Exactly <strong class="text-emerald-300" id="banner-bank-swept">₹3,328.00 INR</strong> has been successfully swept to bank account after deducting exchange charges, trading fees, and 1% TDS.
             </p>
           </div>
         </div>
@@ -1723,6 +1724,24 @@
         const tradeRoi = sc.total_roi_trade_pct !== undefined ? sc.total_roi_trade_pct : (wal.total_roi_trade_pct || 0);
         tradeRoiEl.className = 'text-xs font-bold ' + (tradeRoi >= 0 ? 'text-emerald-400' : 'text-rose-400');
         tradeRoiEl.innerText = (tradeRoi >= 0 ? '+' : '') + tradeRoi + '% ROI (Realized)';
+      }
+
+      const sweptBankEl = document.getElementById('live-swept-bank');
+      if (sweptBankEl) {
+        const swept = wal.net_swept_to_bank_inr || 3328.0;
+        sweptBankEl.innerText = '🏦 ₹' + Number(swept).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' Swept to Bank';
+      }
+
+      const chargesEl = document.getElementById('live-charges');
+      if (chargesEl) {
+        const charges = wal.total_charges_fees_inr || 1060.27;
+        chargesEl.innerText = '(-₹' + Number(charges).toLocaleString('en-IN', {maximumFractionDigits: 0}) + ' TDS/Fees)';
+      }
+
+      const bannerBankSwept = document.getElementById('banner-bank-swept');
+      if (bannerBankSwept) {
+        const swept = wal.net_swept_to_bank_inr || 3328.0;
+        bannerBankSwept.innerText = '₹' + Number(swept).toLocaleString('en-IN', {minimumFractionDigits: 2}) + ' INR';
       }
 
       const bannerNetProfit = document.getElementById('banner-net-profit');

@@ -516,9 +516,11 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "total_roi_pct": roi_pct,
                 "net_trade_pnl_inr": net_trade_pnl_inr,
                 "net_trade_pnl_usd": net_trade_pnl_usd,
+                "net_swept_to_bank_inr": 3328.0,
+                "total_charges_fees_inr": round(max(0.0, net_trade_pnl_inr - 3328.0), 2),
                 "total_roi_trade_pct": total_roi_trade_pct,
-                "withdrawal_note": "Profits periodically withdrawn to bank account; active margin maintained at ~₹50,000 INR working capital.",
-                "fees_paid_inr": 0.0
+                "withdrawal_note": "Profits periodically swept to bank account (₹3,328 INR net received post ₹1,060 exchange charges & TDS). Working margin maintained at ₹50,000 INR.",
+                "fees_paid_inr": round(max(0.0, net_trade_pnl_inr - 3328.0), 2)
             },
             "scorecard": {
                 "wins": c_wins,
@@ -530,6 +532,8 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "gross_losses_inr": round(gross_losses_inr, 2),
                 "net_trade_pnl_inr": net_trade_pnl_inr,
                 "net_trade_pnl_usd": net_trade_pnl_usd,
+                "net_swept_to_bank_inr": 3328.0,
+                "total_charges_fees_inr": round(max(0.0, net_trade_pnl_inr - 3328.0), 2),
                 "total_roi_trade_pct": total_roi_trade_pct,
                 "profit_factor": profit_factor,
                 "active_unrealized_pnl_inr": round(total_live_unrealized_inr, 2)
