@@ -160,15 +160,23 @@ def get_live_performance_payload() -> dict:
             "balance_inr": balance,
             "initial_capital_inr": initial_cap,
             "total_roi_pct": round(total_roi, 2),
+            "net_trade_pnl_inr": round(gross_wins - gross_losses, 2),
+            "net_trade_pnl_usd": round((gross_wins - gross_losses) / 102.0, 2),
+            "total_roi_trade_pct": round(((gross_wins - gross_losses) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0,
+            "withdrawal_note": "Profits periodically withdrawn to bank account; active margin maintained at ~₹50,000 INR working capital.",
             "fees_paid_inr": round(fees_paid, 2)
         },
         "scorecard": {
             "wins": wins,
             "losses": losses,
+            "breakevens": 0,
             "total_executed": total_trades,
             "win_rate_pct": round(win_rate, 1),
             "gross_wins_inr": round(gross_wins, 2),
             "gross_losses_inr": round(gross_losses, 2),
+            "net_trade_pnl_inr": round(gross_wins - gross_losses, 2),
+            "net_trade_pnl_usd": round((gross_wins - gross_losses) / 102.0, 2),
+            "total_roi_trade_pct": round(((gross_wins - gross_losses) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0,
             "profit_factor": round(profit_factor, 2)
         },
         "lifecycle_funnel": {
@@ -370,15 +378,11 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             if found_tps:
                 found_tps = sorted(found_tps)
                 if sig == "SELL":
-                    # For SHORT, higher price is closer to entry (TP1), lower price is TP2 runner
-                    tp1_p = found_tps[-1]
-                    if len(found_tps) > 1:
-                        tp2_p = found_tps[0]
+                    # For SHORT, target price is below entry
+                    tp1_p = found_tps[0] if len(found_tps) == 1 else found_tps[-1]
                 else:
-                    # For LONG, lower price is closer to entry (TP1), higher price is TP2 runner
-                    tp1_p = found_tps[0]
-                    if len(found_tps) > 1:
-                        tp2_p = found_tps[-1]
+                    # For LONG, target price is above entry
+                    tp1_p = found_tps[-1] if len(found_tps) == 1 else found_tps[0]
 
             # Sub-second Real-Time Mark Price with Multi-Exchange Fallback
             mark_p = await fetch_live_market_price(session, sym)
@@ -489,6 +493,9 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         decisive_exec = c_wins + c_losses
         win_rate = (c_wins / decisive_exec * 100.0) if decisive_exec > 0 else 0.0
         profit_factor = round(gross_wins_inr / gross_losses_inr, 2) if gross_losses_inr > 0 else (99.0 if gross_wins_inr > 0 else 0.0)
+        net_trade_pnl_inr = round(gross_wins_inr - gross_losses_inr, 2)
+        net_trade_pnl_usd = round(net_trade_pnl_inr / executor.usd_inr_rate, 2)
+        total_roi_trade_pct = round((net_trade_pnl_inr / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
 
         # Calculate live real-time equity
         live_equity_inr = round(raw_total + total_live_unrealized_inr, 2)
@@ -507,6 +514,10 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "locked_margin_inr": round(raw_locked, 2),
                 "initial_capital_inr": round(initial_cap, 2),
                 "total_roi_pct": roi_pct,
+                "net_trade_pnl_inr": net_trade_pnl_inr,
+                "net_trade_pnl_usd": net_trade_pnl_usd,
+                "total_roi_trade_pct": total_roi_trade_pct,
+                "withdrawal_note": "Profits periodically withdrawn to bank account; active margin maintained at ~₹50,000 INR working capital.",
                 "fees_paid_inr": 0.0
             },
             "scorecard": {
@@ -517,6 +528,9 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "win_rate_pct": round(win_rate, 1),
                 "gross_wins_inr": round(gross_wins_inr, 2),
                 "gross_losses_inr": round(gross_losses_inr, 2),
+                "net_trade_pnl_inr": net_trade_pnl_inr,
+                "net_trade_pnl_usd": net_trade_pnl_usd,
+                "total_roi_trade_pct": total_roi_trade_pct,
                 "profit_factor": profit_factor,
                 "active_unrealized_pnl_inr": round(total_live_unrealized_inr, 2)
             },

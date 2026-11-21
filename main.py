@@ -104,7 +104,7 @@ async def run_startup_reconciliation(session: aiohttp.ClientSession, semaphore: 
                 f"• Mode: 🟢 <b>REAL LIVE TRADING (SHARK EXCHANGE)</b>\n"
                 f"• Live Broker Positions: <b>{len(pos_list)}</b>\n"
                 f"{shark_bal}\n\n"
-                "⏳ <i>70/30 Engine Online. Zero paper simulation active.</i>"
+                "⏳ <i>100% Target Engine Online. Zero paper simulation active.</i>"
             )
         await send_text_to_chat(admin_chat, recon_msg)
     except Exception as e_tg:
@@ -1129,7 +1129,7 @@ async def main_loop():
                                         f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
                                         f"{ord_str}\n"
                                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"<i>Automated Hourly Position Tracker • 70/30 Engine Active</i>"
+                                        f"<i>Automated Hourly Position Tracker • 100% Target Engine Active</i>"
                                     )
                                     from telegram_bot import send_text_alert
                                     await send_text_alert(live_lookout_card)
