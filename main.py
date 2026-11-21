@@ -569,11 +569,30 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         tp2 = round_price(symbol, entry - (2.2 * risk))
                                         cross_type = "🩸 1H Bull Trap Reversal (Long Squeeze Flush + SFP ✅)"
                                 else:
-                                    # CONTINUATION CHASER SETUP: Exact 2.2R breakdown policy per user directive
+                                    # DUAL-MODE HYBRID CONTINUATION ENGINE:
+                                    # 1. WATERFALL MOMENTUM CHASE: If extreme volume (>= 2.0x SMA), solid body (>= 58%),
+                                    #    and strong CVD delta alignment exist, CHASE IMMEDIATELY at candle close so the big dump is NEVER missed!
+                                    # 2. DISCIPLINED RETEST LIMIT: In normal/moderate volume, place a resting LIMIT order at range boundary
+                                    #    to avoid buying top / selling bottom and completely eliminate fakeout wick losses.
                                     target_r = 2.2
+                                    is_waterfall_rush = (
+                                        vol_20_sma > 0 and 
+                                        breakout_vol >= (2.0 * vol_20_sma) and 
+                                        body_ratio >= 0.58 and
+                                        cvd_aligned
+                                    )
+
                                     if sq_signal == 'BUY':
                                         retest_target = range_high * 1.0015
-                                        entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
+                                        if is_waterfall_rush:
+                                            # Immediate market chase — explosive rally in progress
+                                            entry = candle_close
+                                            logger.info(f"⚡ WATERFALL BREAKOUT RUSH: {symbol} Vol {breakout_vol/vol_20_sma:.1f}x SMA, Body {body_ratio:.1%} -> Immediate chase @ {entry}")
+                                        else:
+                                            # Disciplined pullback tap limit entry
+                                            entry = retest_target if candle_close > retest_target * 1.002 else min(candle_close, retest_target)
+                                            logger.info(f"🎯 RETEST LIMIT DISCIPLINE: {symbol} Normal volume -> Limit entry waiting at retest {entry}")
+
                                         sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
                                         if ema_26_1h:
                                             sl = min(sl, ema_26_1h - (0.25 * atr_1h))
@@ -583,10 +602,18 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry + (target_r * risk))
                                         tp2 = round_price(symbol, entry + (3.2 * risk))
-                                        cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
+                                        cross_type = "🚀 1H Waterfall Breakout (Momentum Rush + CVD ✅)" if is_waterfall_rush else ("🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)")
                                     else:
                                         retest_target = range_low * 0.9985
-                                        entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
+                                        if is_waterfall_rush:
+                                            # Immediate market chase — panic waterfall dump in progress
+                                            entry = candle_close
+                                            logger.info(f"⚡ WATERFALL BREAKDOWN RUSH: {symbol} Vol {breakout_vol/vol_20_sma:.1f}x SMA, Body {body_ratio:.1%} -> Immediate chase @ {entry}")
+                                        else:
+                                            # Disciplined pullback tap limit entry
+                                            entry = retest_target if candle_close < retest_target * 0.998 else max(candle_close, retest_target)
+                                            logger.info(f"🎯 RETEST LIMIT DISCIPLINE: {symbol} Normal volume -> Limit entry waiting at retest {entry}")
+
                                         sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
                                         if ema_26_1h:
                                             sl = max(sl, ema_26_1h + (0.25 * atr_1h))
@@ -596,7 +623,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry - (target_r * risk))
                                         tp2 = round_price(symbol, entry - (3.2 * risk))
-                                        cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
+                                        cross_type = "🩸 1H Waterfall Breakdown (Momentum Rush + CVD ✅)" if is_waterfall_rush else ("🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)")
 
                                 if sq_signal:
                                     dyn_sl = sl
