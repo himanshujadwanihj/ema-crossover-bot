@@ -577,6 +577,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
                                         if ema_26_1h:
                                             sl = min(sl, ema_26_1h - (0.25 * atr_1h))
+                                        # Max Risk Clamp: Prevent SL from exceeding 2.5% on 10x leverage
+                                        if entry and sl and (entry - sl) > (candle_close * 0.025):
+                                            sl = round_price(symbol, entry - (candle_close * 0.025))
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry + (target_r * risk))
                                         tp2 = round_price(symbol, entry + (3.2 * risk))
@@ -587,6 +590,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
                                         if ema_26_1h:
                                             sl = max(sl, ema_26_1h + (0.25 * atr_1h))
+                                        # Max Risk Clamp: Prevent SL from exceeding 2.5% on 10x leverage
+                                        if entry and sl and (sl - entry) > (candle_close * 0.025):
+                                            sl = round_price(symbol, entry + (candle_close * 0.025))
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry - (target_r * risk))
                                         tp2 = round_price(symbol, entry - (3.2 * risk))
