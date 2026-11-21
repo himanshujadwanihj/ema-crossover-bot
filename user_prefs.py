@@ -364,8 +364,8 @@ def is_alert_allowed_for_user(chat_id: str, alert_data: dict) -> bool:
     is_retest = "Retest" in cross_type
     is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
 
-    # Squeeze identification (Strict separation: Retests and Crossovers are NEVER Squeezes)
-    is_squeeze_signal = (alert_data.get("is_dedicated_squeeze", False) or "Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type or "Radar" in cross_type) and not is_retest and not is_cross
+    # Squeeze & Trap identification (Strict separation: Retests and Crossovers are NEVER Squeezes)
+    is_squeeze_signal = (alert_data.get("is_dedicated_squeeze", False) or alert_data.get("is_trap_reversal", False) or "Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type or "Trap" in cross_type or "SFP" in cross_type or "Radar" in cross_type) and not is_retest and not is_cross
 
     # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
     from config import is_weekend_trading_blocked
@@ -418,9 +418,9 @@ def is_alert_allowed_for_user(chat_id: str, alert_data: dict) -> bool:
 
     # 6. Confluence Stars (Strict 3★ or 4★ Filter)
     min_stars = int(u.get("min_stars", 3))
-    # ONLY Gold 5M/15M scalps and Pre-Squeeze Radar are exempt from star confluence.
+    # ONLY Gold 5M/15M scalps, Pre-Squeeze Radar, and Trap Reversals are exempt from star confluence.
     # All Crossovers, Retests, and Squeeze Breakouts MUST strictly satisfy user's min_stars!
-    is_exempt_from_min_stars = (is_gold_scalp_tf and gold_scalp_enabled) or ("Radar" in cross_type)
+    is_exempt_from_min_stars = (is_gold_scalp_tf and gold_scalp_enabled) or ("Radar" in cross_type) or ("Trap" in cross_type) or ("SFP" in cross_type) or alert_data.get("is_trap_reversal", False)
     if not is_exempt_from_min_stars and aligned_count < min_stars:
         return False
 

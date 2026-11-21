@@ -221,7 +221,8 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     aligned_count = sum(1 for t in ["1H", "4H", "1D", "1W"] if tf_states and tf_states.get(t, "neutral").lower() == target_trend)
     is_15m = str(tf_label).upper() in ["15M", "15MIN"]
     is_5m = str(tf_label).upper() in ["5M", "5MIN"]
-    is_squeeze_type = ("Squeeze" in cross_type) or ("Breakout" in cross_type and is_15m)
+    is_trap_type = ("Trap" in cross_type) or ("SFP" in cross_type) or kwargs.get("is_trap_reversal", False)
+    is_squeeze_type = ("Squeeze" in cross_type) or ("Breakout" in cross_type) or ("Breakdown" in cross_type) or is_trap_type
     is_gold_scalp = (symbol in ALLOWED_15M_COINS or "XAU" in symbol.upper()) and (is_15m or is_5m)
 
     if is_5m and not is_gold_scalp:
@@ -248,23 +249,31 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
                 logger.info(f"BLOCKED {tf_label} crossover for {symbol} — not in ALLOWED_15M_COINS.")
                 return False
         else:
-            if aligned_count < 3:
+            if not is_trap_type and not is_squeeze_type and aligned_count < 3:
                 logger.info(f"BLOCKED {signal} crossover for {symbol} ({tf_label}) — {aligned_count}/4 stars (minimum 3 required for HTF).")
                 return False
 
     # STRICT RSI MOMENTUM GATE:
-    # All 3-Star and 4-Star signals (Crossovers, Retests, & Breakdowns) MUST strictly satisfy healthy RSI momentum range:
-    # BUY: 42.0 <= RSI <= 62.0 (blocks exhausted assets <42 and overbought peak tops >62)
-    # SELL: 38.0 <= RSI <= 58.0 (blocks weak sellers >58 and oversold bottoms <38)
+    # All signals MUST strictly satisfy healthy RSI momentum range:
+    # Trap Reversals: BUY <= 45.0 (oversold bounce), SELL >= 55.0 (overbought flush)
+    # Trend Setups: BUY: 42.0 <= RSI <= 62.0, SELL: 38.0 <= RSI <= 58.0
     if rsi is not None:
         try:
             f_rsi = float(rsi)
-            if signal == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62] (Overbought peak/exhausted).")
-                return False
-            elif signal == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [38, 58] (Oversold bottom/exhausted < 38).")
-                return False
+            if is_trap_type:
+                if signal == "BUY" and f_rsi > 45.0:
+                    logger.info(f"🚫 BLOCKED {symbol} Bear Trap BUY ({tf_label}) — RSI {f_rsi:.1f} not oversold enough (> 45.0).")
+                    return False
+                elif signal == "SELL" and f_rsi < 55.0:
+                    logger.info(f"🚫 BLOCKED {symbol} Bull Trap SELL ({tf_label}) — RSI {f_rsi:.1f} not overbought enough (< 55.0).")
+                    return False
+            else:
+                if signal == "BUY" and not (42.0 <= f_rsi <= 62.0):
+                    logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62] (Overbought peak/exhausted).")
+                    return False
+                elif signal == "SELL" and not (38.0 <= f_rsi <= 58.0):
+                    logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [38, 58] (Oversold bottom/exhausted < 38).")
+                    return False
         except (ValueError, TypeError):
             pass
     
@@ -454,7 +463,17 @@ def _build_single_coin_block(data, index=None):
         is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
         is_squeeze = ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type) and not is_retest and not is_cross
     if is_squeeze:
-        if signal == "BUY":
+        if "Bear Trap" in cross_type:
+            sq_icon = "🚀"
+            squeeze_title = "🚀 1H BEAR TRAP REVERSAL"
+            action_desc = "🟢 BUY (LONG) — Support Reclaim SFP"
+            market_dynamic = "🪤 <b>Bear Trap Reclaim:</b> Price swept liquidity below range support, trapped breakout shorters, and reclaimed support with strong buying absorption!"
+        elif "Bull Trap" in cross_type:
+            sq_icon = "🩸"
+            squeeze_title = "🩸 1H BULL TRAP REVERSAL"
+            action_desc = "🔴 SELL (SHORT) — Resistance Flush SFP"
+            market_dynamic = "🪤 <b>Bull Trap Rejection:</b> Price swept liquidity above range resistance, trapped breakout longs, and rejected back inside range with strong selling absorption!"
+        elif signal == "BUY":
             sq_icon = "🟢"
             squeeze_title = "🚀 SHORT-SQUEEZE BREAKOUT"
             action_desc = "🟢 BUY (LONG)"

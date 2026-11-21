@@ -904,32 +904,46 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         if not is_gold_or_stock and oi_change_1h < -1.50:
             return {"eligible": False, "reason": f"Heavy OI outflow {oi_change_1h:+.2f}% < -1.50%"}
 
-        # ── TICK 5: DIRECTIONAL & LEVERAGE BIAS ──
+        # ── TICK 5: DIRECTIONAL & LEVERAGE BIAS (RSI EXHAUSTION + FUNDING + TREND) ──
         funding_pct = float(micro.get("funding_pct", 0.0))
         tf_states = tf_states or {}
         h1_trend = str(tf_states.get("1H", "neutral")).lower()
         h4_trend = str(tf_states.get("4H", "neutral")).lower()
 
-        if funding_pct <= -0.0050:
+        if 'rsi' not in df_tf or df_tf['rsi'].isna().all():
+            df_tf = _compute_indicators(df_tf)
+        c_rsi = float(df_tf['rsi'].iloc[-1]) if ('rsi' in df_tf and not pd.isna(df_tf['rsi'].iloc[-1])) else 50.0
+
+        is_oversold_reversal = c_rsi < 38.0
+        is_overbought_reversal = c_rsi > 62.0
+
+        if funding_pct <= -0.0050 or is_oversold_reversal:
             direction = "BUY"
-            squeeze_type = "SHORT SQUEEZE (Trapped Shorts)"
-        elif funding_pct >= 0.0200:
+            squeeze_type = "🚀 SHORT SQUEEZE (Oversold Sellers Trap)" if is_oversold_reversal else "🚀 SHORT SQUEEZE (Trapped Shorts)"
+        elif funding_pct >= 0.0200 or is_overbought_reversal:
             direction = "SELL"
-            squeeze_type = "LONG SQUEEZE (Trapped Longs)"
+            squeeze_type = "🩸 LONG SQUEEZE (Overbought Buyers Trap)" if is_overbought_reversal else "🩸 LONG SQUEEZE (Trapped Longs)"
         elif h1_trend == "bullish" or h4_trend == "bullish":
             direction = "BUY"
-            squeeze_type = "SHORT SQUEEZE (Bullish Base)"
+            squeeze_type = "🚀 SHORT SQUEEZE (Bullish Base)"
         elif h1_trend == "bearish" or h4_trend == "bearish":
             direction = "SELL"
-            squeeze_type = "LONG SQUEEZE (Bearish Breakdown)"
+            squeeze_type = "🩸 LONG SQUEEZE (Bearish Breakdown)"
         else:
             mid_price = (range_high + range_low) / 2.0
             direction = "BUY" if curr_price >= mid_price else "SELL"
-            squeeze_type = "SHORT SQUEEZE (Bullish Base)" if direction == "BUY" else "LONG SQUEEZE (Bearish Base)"
+            squeeze_type = "🚀 SHORT SQUEEZE (Bullish Base)" if direction == "BUY" else "🩸 LONG SQUEEZE (Bearish Base)"
 
         # ── TICK 6: ACTION LEVELS DEFINED ──
-        trigger_entry = range_high * 1.001 if direction == "BUY" else range_low * 0.999
-        invalidation_sl = range_low * 0.998 if direction == "BUY" else range_high * 1.002
+        if is_oversold_reversal:
+            trigger_entry = range_low * 1.0015  # Support reclaim trigger
+            invalidation_sl = range_low * 0.995   # Invalidation below support sweep
+        elif is_overbought_reversal:
+            trigger_entry = range_high * 0.9985 # Resistance rejection trigger
+            invalidation_sl = range_high * 1.005  # Invalidation above resistance sweep
+        else:
+            trigger_entry = range_high * 1.001 if direction == "BUY" else range_low * 0.999
+            invalidation_sl = range_low * 0.998 if direction == "BUY" else range_high * 1.002
 
         # Coiling Quality Score (Positive OI gets bonus, flat OI remains eligible)
         coiling_score = (max_comp - compression_pct) * 2.0 + min(max(oi_change_1h, 0.0), 5.0) * 1.5 + (2.0 if ttm_squeeze else 0.0)

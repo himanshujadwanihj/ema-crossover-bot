@@ -424,117 +424,180 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     radar_entry = get_active_radar(symbol)
                     has_radar = radar_entry and radar_entry.get("status") == "WATCHING"
                     
+                    c_open = float(df_1h['open'].iloc[-2])
+                    c_high = float(df_1h['high'].iloc[-2])
+                    c_low = float(df_1h['low'].iloc[-2])
+                    c_close = float(df_1h['close'].iloc[-2])
+                    c_body = abs(c_close - c_open)
+                    c_range = max(c_high - c_low, 1e-8)
+                    body_ratio = c_body / c_range
+                    lower_wick_ratio = (min(c_open, c_close) - c_low) / c_range
+                    upper_wick_ratio = (c_high - max(c_open, c_close)) / c_range
+
+                    vol_20_sma = df_1h['volume'].iloc[-22:-2].mean() if len(df_1h) >= 22 else df_1h['volume'].mean()
+                    breakout_vol = float(df_1h['volume'].iloc[-2])
+                    
+                    from indicators import _compute_indicators
+                    df_1h_ind = _compute_indicators(df_1h)
+                    sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
+                    atr_1h = float(df_1h_ind['atr'].iloc[-1]) if 'atr' in df_1h_ind and not pd.isna(df_1h_ind['atr'].iloc[-1]) else (candle_close * 0.005)
+                    ema_26_1h = float(df_1h_ind['ema_26'].iloc[-1]) if 'ema_26' in df_1h_ind and not pd.isna(df_1h_ind['ema_26'].iloc[-1]) else None
+
                     sq_signal = None
-                    # MODE A: Dedicated Pre-Squeeze Radar (if active on Radar)
-                    if has_radar:
-                        radar_trigger = float(radar_entry.get('trigger_entry', 0.0))
-                        radar_dir = str(radar_entry.get('direction', '')).upper()
-                        if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
-                            sq_signal = 'BUY'
-                        elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
-                            sq_signal = 'SELL'
-                    # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout (Decoupled from Radar)
-                    elif is_valid_consolidation:
-                        h4_trend = tf_states.get("4H") if tf_states and tf_states.get("4H") else "neutral"
-                        if candle_close <= (range_low * 0.998) and h4_trend != "bullish":
-                            # Support Breakdown: Close >= 0.20% below range floor and 4H not opposing
-                            sq_signal = 'SELL'
-                        elif candle_close >= (range_high * 1.002) and h4_trend != "bearish":
-                            # Resistance Breakout: Close >= 0.20% above range ceiling and 4H not opposing
-                            sq_signal = 'BUY'
-                        
+                    is_trap_reversal = False
+                    trap_direction = None
+
+                    # Check 15M micro-structure for reversal confirmation
+                    df_15m = tf_data.get("15M") if tf_data.get("15M") is not None else tf_data.get("15m")
+                    choch_bullish = True
+                    choch_bearish = True
+                    if df_15m is not None and len(df_15m) >= 3:
+                        choch_bullish = bool(df_15m['high'].iloc[-1] >= df_15m['high'].iloc[-2])
+                        choch_bearish = bool(df_15m['low'].iloc[-1] <= df_15m['low'].iloc[-2])
+
+                    # ─────────────────────────────────────────────────────────────
+                    # DUAL ENGINE: BRANCH A — SFP / LIQUIDITY SWEEP REVERSAL ENGINE
+                    # ─────────────────────────────────────────────────────────────
+                    if is_valid_consolidation:
+                        # 1. BEAR TRAP REVERSAL (Support Sweep + Reclaim -> BUY):
+                        if c_low < range_low:
+                            sweep_depth_pct = ((range_low - c_low) / range_low) * 100.0
+                            is_reclaimed = c_close >= (range_low * 0.999)
+                            # Rules: Sweep depth <= 2.0% (not a bloodbath), candle range <= 2.5*ATR, lower wick >= 35%, RSI < 42.0 (oversold sellers trap), 15M CHoCH
+                            if (sweep_depth_pct <= 2.0 and c_range <= (2.5 * atr_1h) and 
+                                is_reclaimed and lower_wick_ratio >= 0.35 and sq_rsi < 42.0 and choch_bullish):
+                                sq_signal = 'BUY'
+                                is_trap_reversal = True
+                                trap_direction = 'BEAR_TRAP'
+                                logger.info(f"🎯 DETECTED 1H BEAR TRAP: {symbol} swept {sweep_depth_pct:.2f}% below support, reclaimed with {lower_wick_ratio:.1%} lower wick (RSI {sq_rsi:.1f}). BUY Reversal Activated!")
+
+                        # 2. BULL TRAP REVERSAL (Resistance Sweep + Rejection -> SELL):
+                        elif c_high > range_high and not sq_signal:
+                            sweep_depth_pct = ((c_high - range_high) / range_high) * 100.0
+                            is_rejected = c_close <= (range_high * 1.001)
+                            # Rules: Sweep depth <= 2.0%, candle range <= 2.5*ATR, upper wick >= 35%, RSI > 58.0 (overbought buyers trap), 15M CHoCH
+                            if (sweep_depth_pct <= 2.0 and c_range <= (2.5 * atr_1h) and 
+                                is_rejected and upper_wick_ratio >= 0.35 and sq_rsi > 58.0 and choch_bearish):
+                                sq_signal = 'SELL'
+                                is_trap_reversal = True
+                                trap_direction = 'BULL_TRAP'
+                                logger.info(f"🎯 DETECTED 1H BULL TRAP: {symbol} swept {sweep_depth_pct:.2f}% above resistance, rejected with {upper_wick_ratio:.1%} upper wick (RSI {sq_rsi:.1f}). SELL Reversal Activated!")
+
+                    # ─────────────────────────────────────────────────────────────
+                    # DUAL ENGINE: BRANCH B — CONTINUATION BREAKDOWN / BREAKOUT CHASER
+                    # ─────────────────────────────────────────────────────────────
+                    if not sq_signal:
+                        # MODE A: Dedicated Pre-Squeeze Radar (if active on Radar)
+                        if has_radar:
+                            radar_trigger = float(radar_entry.get('trigger_entry', 0.0))
+                            radar_dir = str(radar_entry.get('direction', '')).upper()
+                            if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
+                                sq_signal = 'BUY'
+                            elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
+                                sq_signal = 'SELL'
+                        # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout
+                        elif is_valid_consolidation:
+                            h4_trend = tf_states.get("4H") if tf_states and tf_states.get("4H") else "neutral"
+                            if candle_close <= (range_low * 0.998) and h4_trend != "bullish":
+                                sq_signal = 'SELL'
+                            elif candle_close >= (range_high * 1.002) and h4_trend != "bearish":
+                                sq_signal = 'BUY'
+
+                        if sq_signal:
+                            # Chaser Validation Rules:
+                            if body_ratio < 0.45:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
+                                sq_signal = None
+                            elif sq_signal == 'BUY' and (sq_rsi > 62.0 or sq_rsi < 42.0):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum [42.0, 62.0].")
+                                sq_signal = None
+                            elif sq_signal == 'SELL' and (sq_rsi < 38.0 or sq_rsi > 58.0):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum [38.0, 58.0].")
+                                sq_signal = None
+                            elif sq_signal == 'BUY' and upper_wick_ratio > 0.38:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
+                                sq_signal = None
+                            elif sq_signal == 'SELL' and lower_wick_ratio > 0.38:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
+                                sq_signal = None
+                            elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
+                                sq_signal = None
+
                     if sq_signal:
-                        c_open = float(df_1h['open'].iloc[-2])
-                        c_high = float(df_1h['high'].iloc[-2])
-                        c_low = float(df_1h['low'].iloc[-2])
-                        c_close = float(df_1h['close'].iloc[-2])
-                        c_body = abs(c_close - c_open)
-                        c_range = max(c_high - c_low, 1e-8)
-                        body_ratio = c_body / c_range
-
-                        # Solution 3 Rule 1: Body Ratio >= 50% (Solid candle, no long opposing wicks)
-                        vol_20_sma = df_1h['volume'].iloc[-22:-2].mean() if len(df_1h) >= 22 else df_1h['volume'].mean()
-                        breakout_vol = float(df_1h['volume'].iloc[-2])
-                        
-                        from indicators import _compute_indicators
-                        df_1h_ind = _compute_indicators(df_1h)
-                        sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
-
                         from market_cache import is_btc_safe_for_altcoins
                         is_safe, btc_reason = is_btc_safe_for_altcoins(sq_signal, symbol, tf_data)
+                        if not is_safe:
+                            logger.info(f"FILTERED 1H SIGNAL: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
+                            sq_signal = None
 
-                        if body_ratio < 0.45:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
-                            sq_signal = None
-                        elif sq_signal == 'BUY' and sq_rsi > 62.0:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — RSI {sq_rsi:.1f} > 62.0 (Overbought / Bull exhaustion trap).")
-                            sq_signal = None
-                        elif sq_signal == 'SELL' and sq_rsi < 38.0:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — RSI {sq_rsi:.1f} < 38.0 (Oversold / Bear exhaustion trap).")
-                            sq_signal = None
-                        elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.38:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
-                            sq_signal = None
-                        elif sq_signal == 'SELL' and ((c_close - c_low) / c_range) > 0.38:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
-                            sq_signal = None
-                        elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
-                            sq_signal = None
-                        elif not is_safe:
-                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
-                            sq_signal = None
-                        # Breakout Freshness Guard: Reject historical breakouts older than 65 minutes
+                        # Breakout Freshness Guard: Reject historical signals older than 65 minutes
                         if sq_signal and candle_ts:
                             c_dt = _parse_iso_dt(candle_ts)
                             if c_dt and (datetime.now(timezone.utc) - c_dt).total_seconds() > 3900:
-                                logger.info(f"FILTERED STALE SQUEEZE: {symbol} 1H breakout candle was {(datetime.now(timezone.utc) - c_dt).total_seconds()/60:.1f}m ago while bot was offline.")
+                                logger.info(f"FILTERED STALE 1H SIGNAL: {symbol} 1H candle was {(datetime.now(timezone.utc) - c_dt).total_seconds()/60:.1f}m ago while bot was offline.")
                                 sq_signal = None
 
-                        unique_sq_key = f"1H_RangeBreak_{sq_signal}_{candle_ts}" if not has_radar else f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}"
+                        unique_sq_key = f"1H_TrapReversal_{trap_direction}_{candle_ts}" if is_trap_reversal else (f"1H_RangeBreak_{sq_signal}_{candle_ts}" if not has_radar else f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}")
                         if sq_signal and not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
                             micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h)
                             cvd_metrics = micro_1h.get("cvd_metrics", {})
                             cvd_aligned = cvd_metrics.get("is_aligned", True)
                             
                             if cvd_aligned:
-                                # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
-                                # USER DIRECTIVE: Exact 2.2R target policy for Breakdown Continuation trades!
-                                target_r = 2.2
-                                from indicators import _compute_indicators
-                                df_1h_ind = _compute_indicators(df_1h)
-                                ema_26_1h = float(df_1h_ind['ema_26'].iloc[-1]) if 'ema_26' in df_1h_ind and not pd.isna(df_1h_ind['ema_26'].iloc[-1]) else None
-                                atr_1h = float(df_1h_ind['atr'].iloc[-1]) if 'atr' in df_1h_ind and not pd.isna(df_1h_ind['atr'].iloc[-1]) else (candle_close * 0.005)
-
-                                if sq_signal == 'BUY':
-                                    retest_target = range_high * 1.0015
-                                    entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
-                                    sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
-                                    # Guarantee BUY SL is strictly BELOW 1H 26 EMA with 0.25*ATR buffer
-                                    if ema_26_1h:
-                                        sl = min(sl, ema_26_1h - (0.25 * atr_1h))
-                                    risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
-                                    tp1 = round_price(symbol, entry + (target_r * risk))
-                                    tp2 = round_price(symbol, entry + (3.2 * risk))
-                                    cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
+                                if is_trap_reversal:
+                                    # REVERSAL SETUP: Quick 1.5R target back to 26 EMA / Range Boundary
+                                    target_r = 1.5
+                                    if trap_direction == 'BEAR_TRAP':
+                                        entry = round_price(symbol, candle_close)
+                                        sl = round_price(symbol, float(c_low) * 0.998)
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                        if risk > (candle_close * 0.025):
+                                            logger.info(f"FILTERED REVERSAL: {symbol} Bear trap risk {risk/candle_close:.1%} > 2.5% (Wick too long).")
+                                            sq_signal = None
+                                        tp1 = round_price(symbol, entry + (target_r * risk))
+                                        tp2 = round_price(symbol, entry + (2.2 * risk))
+                                        cross_type = "🚀 1H Bear Trap Reversal (Short Squeeze Bounce + SFP ✅)"
+                                    else:
+                                        entry = round_price(symbol, candle_close)
+                                        sl = round_price(symbol, float(c_high) * 1.002)
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                        if risk > (candle_close * 0.025):
+                                            logger.info(f"FILTERED REVERSAL: {symbol} Bull trap risk {risk/candle_close:.1%} > 2.5% (Wick too long).")
+                                            sq_signal = None
+                                        tp1 = round_price(symbol, entry - (target_r * risk))
+                                        tp2 = round_price(symbol, entry - (2.2 * risk))
+                                        cross_type = "🩸 1H Bull Trap Reversal (Long Squeeze Flush + SFP ✅)"
                                 else:
-                                    retest_target = range_low * 0.9985
-                                    entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
-                                    sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
-                                    # Guarantee SELL SL is strictly ABOVE 1H 26 EMA with 0.25*ATR buffer
-                                    if ema_26_1h:
-                                        sl = max(sl, ema_26_1h + (0.25 * atr_1h))
-                                    risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
-                                    tp1 = round_price(symbol, entry - (target_r * risk))
-                                    tp2 = round_price(symbol, entry - (3.2 * risk))
-                                    cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
+                                    # CONTINUATION CHASER SETUP: Exact 2.2R breakdown policy per user directive
+                                    target_r = 2.2
+                                    if sq_signal == 'BUY':
+                                        retest_target = range_high * 1.0015
+                                        entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
+                                        sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                        if ema_26_1h:
+                                            sl = min(sl, ema_26_1h - (0.25 * atr_1h))
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                        tp1 = round_price(symbol, entry + (target_r * risk))
+                                        tp2 = round_price(symbol, entry + (3.2 * risk))
+                                        cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
+                                    else:
+                                        retest_target = range_low * 0.9985
+                                        entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
+                                        sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                        if ema_26_1h:
+                                            sl = max(sl, ema_26_1h + (0.25 * atr_1h))
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                        tp1 = round_price(symbol, entry - (target_r * risk))
+                                        tp2 = round_price(symbol, entry - (3.2 * risk))
+                                        cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
 
-                                dyn_sl = sl
-                                rr1 = target_r
-                                rr2 = 3.2
-                                lbl1 = f"{target_r}R Target"
-                                lbl2 = "3.2R Extended"
-                                sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
+                                if sq_signal:
+                                    dyn_sl = sl
+                                    rr1 = target_r
+                                    rr2 = 2.2 if is_trap_reversal else 3.2
+                                    lbl1 = f"{target_r}R Target"
+                                    lbl2 = f"{rr2}R Extended"
 
                                 from telegram_bot import queue_alert
                                 sq_queued = await queue_alert(
@@ -554,16 +617,17 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     tf_data=tf_data,
                                     is_special_list=(symbol in SPECIAL_LIST),
                                     rsi=sq_rsi,
-                                    is_dedicated_squeeze=True
+                                    is_dedicated_squeeze=True,
+                                    is_trap_reversal=is_trap_reversal
                                 )
                                 if sq_queued:
                                     mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
                                     if has_radar:
                                         mark_radar_triggered(symbol)
-                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
+                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
 
                                     # AUTO-TRADING ENROLLMENT:
-                                    # Capture 1H Squeeze Breakout candidate for Shark Exchange execution
+                                    # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
                                     sq_candidate = {
                                         "symbol": symbol,
                                         "signal": sq_signal,
@@ -573,11 +637,12 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         "tp2": tp2,
                                         "tp": tp1,
                                         "target_r": target_r,
-                                        "aligned_count": 4,  # High-conviction verified squeeze with CVD + volume
+                                        "aligned_count": 4,  # High-conviction verified setup with CVD + volume
                                         "is_3_htf_aligned": True,
                                         "is_30m_early": False,
                                         "is_special": (symbol in SPECIAL_LIST),
                                         "is_dedicated_squeeze": True,
+                                        "is_trap_reversal": is_trap_reversal,
                                         "unique_key": unique_sq_key,
                                         "candle_ts": candle_ts,
                                         "rr2": target_r,
@@ -1387,6 +1452,19 @@ async def main_loop():
                                 from config import is_allowed_trading_asset
                                 if not is_allowed_trading_asset(sym):
                                     return False, f"{sym} is outside Approved Top 25 volume crypto & commodities list."
+
+                                # USER DIRECTIVE: 1H Bear/Bull Trap Reversals Included in Auto-Trading!
+                                if c.get("is_trap_reversal"):
+                                    if rsi is not None:
+                                        try:
+                                            f_rsi = float(rsi)
+                                            if sig == "BUY" and f_rsi > 45.0:
+                                                return False, f"Bear Trap BUY rejected — RSI {f_rsi:.1f} not oversold enough (> 45.0)."
+                                            elif sig == "SELL" and f_rsi < 55.0:
+                                                return False, f"Bull Trap SELL rejected — RSI {f_rsi:.1f} not overbought enough (< 55.0)."
+                                        except (ValueError, TypeError):
+                                            pass
+                                    return True, "Eligible (1H SFP / Trap Reversal with Reclaim + Sweep Guard)"
 
                                 # USER DIRECTIVE: Squeeze Breakout Trades Included in Auto-Trading!
                                 # Dedicated 1H Squeeze Breakout: already passed institutional 6-point verification (TTM squeeze coiling + volume surge >= 1.5x + CVD aligned + body ratio >= 50% + wick cap <= 35% + BTC micro-gate)
