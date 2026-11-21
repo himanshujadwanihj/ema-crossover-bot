@@ -535,7 +535,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                 "total_charges_fees_inr": total_fees_inr,
                 "tds_inr": 0.0,
                 "total_roi_trade_pct": total_roi_trade_pct,
-                "withdrawal_note": f"Shark Exchange verified equity: ₹{live_equity_inr:,.2f} INR (₹{raw_total:,.2f} Futures Margin + ₹{funding_balance:,.2f} Net Profit in Funding Wallet). Total exchange fees across 100 trades: ₹{total_fees_inr:.2f} INR (~0.02% maker rate, 0% TDS on crypto futures).",
+                "withdrawal_note": f"Shark Exchange verified equity: ₹{live_equity_inr:,.2f} INR (₹{raw_total:,.2f} Futures Margin + ₹{funding_balance:,.2f} Net Profit in Funding Wallet).",
                 "fees_paid_inr": total_fees_inr
             },
             "scorecard": {
