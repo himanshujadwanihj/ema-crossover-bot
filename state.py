@@ -11,7 +11,7 @@ import json
 import os
 import logging
 from datetime import datetime, timezone, timedelta
-from config import clean_contract_symbol
+from config import clean_contract_symbol, to_shark_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -154,23 +154,37 @@ def get_latest_symbol_state(symbol: str) -> dict:
     Finds the LATEST state entry for a given symbol.
     Searches in REVERSE order (newest to oldest) and prioritizes
     active Shark Exchange orders (shark_order_placed=True, outcome=PENDING).
+    Uses to_shark_symbol to guarantee 1000x / 1Mx multiplier pairs (PEPE <-> 1000PEPE,
+    SHIB <-> 1000SHIB, BONK <-> 1000BONK, FLOKI <-> 1000FLOKI) match seamlessly.
     """
     clean_sym = clean_contract_symbol(symbol)
+    shark_sym = to_shark_symbol(symbol)
     state = _load()
     
+    def _matches(k: str) -> bool:
+        raw_coin = k.split("|")[0]
+        return to_shark_symbol(raw_coin) == shark_sym or clean_contract_symbol(raw_coin) == clean_sym
+
     def _prepare(key, val):
         res = dict(val)
         parts = key.split("|")
-        if len(parts) >= 3:
-            res["signal"] = parts[2]
-            res["direction"] = parts[2]
+        # If signal/direction already explicitly in state dict, preserve it
+        if "signal" not in res and len(parts) >= 3:
+            # Check if parts[2] is a recognized direction (BUY, SELL, LONG, SHORT)
+            cand_sig = parts[2].upper()
+            if cand_sig in ("BUY", "SELL", "LONG", "SHORT"):
+                res["signal"] = cand_sig
+                res["direction"] = cand_sig
+            elif len(parts) >= 4 and parts[3].upper() in ("BUY", "SELL", "LONG", "SHORT"):
+                res["signal"] = parts[3].upper()
+                res["direction"] = parts[3].upper()
         return res
 
     # Priority 1: Live Shark trade that is PENDING
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if clean_contract_symbol(k.split("|")[0]) == clean_sym:
+        if _matches(k):
             if v.get("shark_order_placed") and v.get("outcome") == "PENDING":
                 return _prepare(k, v)
                 
@@ -178,7 +192,7 @@ def get_latest_symbol_state(symbol: str) -> dict:
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if clean_contract_symbol(k.split("|")[0]) == clean_sym:
+        if _matches(k):
             if v.get("shark_order_placed"):
                 return _prepare(k, v)
                 
@@ -186,7 +200,7 @@ def get_latest_symbol_state(symbol: str) -> dict:
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if clean_contract_symbol(k.split("|")[0]) == clean_sym:
+        if _matches(k):
             return _prepare(k, v)
             
     return {}
