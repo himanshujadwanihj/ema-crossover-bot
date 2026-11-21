@@ -265,13 +265,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         if sl >= entry: sl = np.min(lows[-5:]) * 0.998
         
         # STRUCTURAL INVALIDATION GUARANTEE:
-        # A LONG SL must ALWAYS sit strictly BELOW 26 EMA with 0.25*ATR buffer!
-        # sl_cap_pct must NEVER drag SL above 26 EMA.
+        # A LONG SL must sit strictly BELOW 26 EMA with 0.25*ATR buffer,
+        # BUT MUST NEVER exceed max account risk cap (min_sl_floor)!
         if ema_26_val:
             ema_sl_bound = ema_26_val - (0.25 * atr_val if atr_val > 0 else ema_26_val * 0.0025)
             sl = min(sl, ema_sl_bound)
-        elif sl < min_sl_floor:
-            sl = min_sl_floor
+        # HARD RISK CAP: Cap SL to max permissible risk (e.g. 2.2% max)
+        sl = max(sl, min_sl_floor)
         if sl >= entry:
             sl = entry * 0.990
 
@@ -336,13 +336,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         if sl <= entry: sl = np.max(highs[-5:]) * 1.002
 
         # STRUCTURAL INVALIDATION GUARANTEE:
-        # A SHORT SL must ALWAYS sit strictly ABOVE 26 EMA with 0.25*ATR buffer!
-        # sl_cap_pct must NEVER drag SL below 26 EMA.
+        # A SHORT SL must sit strictly ABOVE 26 EMA with 0.25*ATR buffer,
+        # BUT MUST NEVER exceed max account risk cap (sl_cap_pct)!
         if ema_26_val:
             ema_sl_bound = ema_26_val + (0.25 * atr_val if atr_val > 0 else ema_26_val * 0.0025)
             sl = max(sl, ema_sl_bound)
-        elif sl > (entry * (1 + sl_cap_pct)):
-            sl = entry * (1 + sl_cap_pct)
+        # HARD RISK CAP: Cap SL to max permissible risk (e.g. 2.2% max)
+        sl = min(sl, entry * (1 + sl_cap_pct))
         if sl <= entry:
             sl = entry * 1.010
 
