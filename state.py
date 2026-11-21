@@ -267,18 +267,44 @@ def update_trade_sl(key: str, new_sl: float) -> None:
 
 def update_trade_progress(key: str, tp1_hit: bool = None, tp2_hit: bool = None, tp3_hit: bool = None, be_hit: bool = None, new_sl: float = None, tp1_hit_at: str = None, tp2_hit_at: str = None, limit_filled: bool = None, limit_filled_at: str = None, be_hit_time_shield: bool = None, **kwargs) -> None:
     state = _load()
-    if key in state and isinstance(state[key], dict):
-        if tp1_hit is not None: state[key]["tp1_hit"] = tp1_hit
-        if tp2_hit is not None: state[key]["tp2_hit"] = tp2_hit
-        if tp3_hit is not None: state[key]["tp3_hit"] = tp3_hit
-        if be_hit is not None: state[key]["be_hit"] = be_hit
-        if be_hit_time_shield is not None: state[key]["be_hit_time_shield"] = be_hit_time_shield
+    target_key = key
+    if target_key not in state or not isinstance(state[target_key], dict):
+        # Fallback: key might be using normalized symbol or variation
+        parts = key.split("|")
+        sym_raw = parts[0]
+        for k in state.keys():
+            k_parts = k.split("|")
+            if len(k_parts) >= 3 and (to_shark_symbol(k_parts[0]) == to_shark_symbol(sym_raw) or clean_contract_symbol(k_parts[0]) == clean_contract_symbol(sym_raw)):
+                target_key = k
+                break
+
+    if target_key in state and isinstance(state[target_key], dict):
+        if tp1_hit is not None: state[target_key]["tp1_hit"] = tp1_hit
+        if tp2_hit is not None: state[target_key]["tp2_hit"] = tp2_hit
+        if tp3_hit is not None: state[target_key]["tp3_hit"] = tp3_hit
+        if be_hit is not None: state[target_key]["be_hit"] = be_hit
+        if be_hit_time_shield is not None: state[target_key]["be_hit_time_shield"] = be_hit_time_shield
         if new_sl is not None:
-            state[key]["cur_sl"] = new_sl
-        if tp1_hit_at is not None: state[key]["tp1_hit_at"] = tp1_hit_at
-        if tp2_hit_at is not None: state[key]["tp2_hit_at"] = tp2_hit_at
-        if limit_filled is not None: state[key]["limit_filled"] = limit_filled
-        if limit_filled_at is not None: state[key]["limit_filled_at"] = limit_filled_at
+            state[target_key]["cur_sl"] = new_sl
+        if tp1_hit_at is not None: state[target_key]["tp1_hit_at"] = tp1_hit_at
+        if tp2_hit_at is not None: state[target_key]["tp2_hit_at"] = tp2_hit_at
+        if limit_filled is not None: state[target_key]["limit_filled"] = limit_filled
+        if limit_filled_at is not None: state[target_key]["limit_filled_at"] = limit_filled_at
+        for k, v in kwargs.items():
+            if v is not None:
+                state[target_key][k] = v
+        _save(state)
+    elif kwargs.get("shark_order_placed"):
+        # Auto-create entry if order placed on exchange to guarantee tracking is never lost
+        now_iso = datetime.now(timezone.utc).isoformat()
+        state[key] = {
+            "sent_at": now_iso,
+            "limit_placed_at": now_iso,
+            "limit_filled": limit_filled if limit_filled is not None else False,
+            "limit_filled_at": limit_filled_at,
+            "outcome": "PENDING",
+            "shark_order_placed": True
+        }
         for k, v in kwargs.items():
             if v is not None:
                 state[key][k] = v
