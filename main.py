@@ -456,11 +456,21 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         vol_20_sma = df_1h['volume'].iloc[-22:-2].mean() if len(df_1h) >= 22 else df_1h['volume'].mean()
                         breakout_vol = float(df_1h['volume'].iloc[-2])
                         
+                        from indicators import _compute_indicators
+                        df_1h_ind = _compute_indicators(df_1h)
+                        sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
+
                         from market_cache import is_btc_safe_for_altcoins
                         is_safe, btc_reason = is_btc_safe_for_altcoins(sq_signal, symbol, tf_data)
 
                         if body_ratio < 0.45:
                             logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
+                            sq_signal = None
+                        elif sq_signal == 'BUY' and sq_rsi > 62.0:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — RSI {sq_rsi:.1f} > 62.0 (Overbought / Bull exhaustion trap).")
+                            sq_signal = None
+                        elif sq_signal == 'SELL' and sq_rsi < 38.0:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — RSI {sq_rsi:.1f} < 38.0 (Oversold / Bear exhaustion trap).")
                             sq_signal = None
                         elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.38:
                             logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
@@ -1384,10 +1394,10 @@ async def main_loop():
                                     if rsi is not None:
                                         try:
                                             f_rsi = float(rsi)
-                                            if sig == "BUY" and not (40.0 <= f_rsi <= 75.0):
-                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [40.0 - 75.0]."
-                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 60.0):
-                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [25.0 - 60.0]."
+                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
+                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [42.0 - 62.0] (Bull exhaustion/overbought)."
+                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
+                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [38.0 - 58.0] (Oversold bear trap < 38.0)."
                                         except (ValueError, TypeError):
                                             pass
                                     return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"
@@ -1401,15 +1411,15 @@ async def main_loop():
                                     try:
                                         f_rsi = float(rsi)
                                         if is_gold_or_commodity:
-                                            if sig == "BUY" and not (38.0 <= f_rsi <= 75.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity BUY zone [38.0 - 75.0]."
-                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 62.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity SELL zone [25.0 - 62.0]."
+                                            if sig == "BUY" and not (40.0 <= f_rsi <= 65.0):
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity BUY zone [40.0 - 65.0]."
+                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 60.0):
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity SELL zone [38.0 - 60.0] (Oversold bear trap < 38.0)."
                                         else:
-                                            if sig == "BUY" and not (42.0 <= f_rsi <= 75.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto BUY zone [42.0 - 75.0] (Market exhausted/overbought)."
-                                            elif sig == "SELL" and not (25.0 <= f_rsi <= 58.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [25.0 - 58.0] (Weak sell momentum/oversold)."
+                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto BUY zone [42.0 - 62.0] (Overbought peak/exhausted > 62.0)."
+                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
+                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
                                     except (ValueError, TypeError):
                                         pass
                                 return True, "Eligible"

@@ -402,8 +402,8 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                 cur_rsi = float(row['rsi']) if ('rsi' in row and not pd.isna(row['rsi'])) else None
                 # Strict RSI Retest Filter (ensures healthy pullbacks, rejects falling knives)
                 if cur_rsi is not None:
-                    rsi_buy_min, rsi_buy_max = (35.0, 75.0) if tf_label in ["5M", "15M"] else (40.0, 70.0)
-                    rsi_sell_min, rsi_sell_max = (25.0, 65.0) if tf_label in ["5M", "15M"] else (30.0, 60.0)
+                    rsi_buy_min, rsi_buy_max = (40.0, 65.0) if tf_label in ["5M", "15M"] else (42.0, 62.0)
+                    rsi_sell_min, rsi_sell_max = (35.0, 60.0) if tf_label in ["5M", "15M"] else (38.0, 58.0)
                     if sig_type == "BUY" and not (rsi_buy_min <= cur_rsi <= rsi_buy_max):
                         logger.info(f"FILTERED RETEST: {symbol} BUY rejected — RSI {cur_rsi:.1f} outside healthy zone [{rsi_buy_min}, {rsi_buy_max}].")
                         continue

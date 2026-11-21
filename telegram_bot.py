@@ -253,17 +253,17 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
                 return False
 
     # STRICT RSI MOMENTUM GATE:
-    # All 3-Star and 4-Star signals (Crossovers & Retests) MUST strictly satisfy healthy RSI momentum range:
-    # BUY: 40.0 <= RSI <= 75.0 (blocks exhausted assets <40 and overbought peak tops >75)
-    # SELL: 25.0 <= RSI <= 60.0 (blocks weak sellers >60 and oversold bottoms <25)
+    # All 3-Star and 4-Star signals (Crossovers, Retests, & Breakdowns) MUST strictly satisfy healthy RSI momentum range:
+    # BUY: 42.0 <= RSI <= 62.0 (blocks exhausted assets <42 and overbought peak tops >62)
+    # SELL: 38.0 <= RSI <= 58.0 (blocks weak sellers >58 and oversold bottoms <38)
     if rsi is not None:
         try:
             f_rsi = float(rsi)
-            if signal == "BUY" and not (40.0 <= f_rsi <= 75.0):
-                logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [40, 75].")
+            if signal == "BUY" and not (42.0 <= f_rsi <= 62.0):
+                logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62] (Overbought peak/exhausted).")
                 return False
-            elif signal == "SELL" and not (25.0 <= f_rsi <= 60.0):
-                logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [25, 60].")
+            elif signal == "SELL" and not (38.0 <= f_rsi <= 58.0):
+                logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [38, 58] (Oversold bottom/exhausted < 38).")
                 return False
         except (ValueError, TypeError):
             pass

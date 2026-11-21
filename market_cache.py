@@ -115,6 +115,7 @@ def update_btc_pulse(tf_data: dict) -> None:
     global _BTC_PULSE
     try:
         df_15m = tf_data.get("15M") if tf_data.get("15M") is not None else tf_data.get("15m")
+        df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
         df_4h = tf_data.get("4H") if tf_data.get("4H") is not None else tf_data.get("4h")
         
         dumping_15m = False
@@ -132,6 +133,19 @@ def update_btc_pulse(tf_data: dict) -> None:
             elif c_close > c_open and c_close > c_ema9:
                 pumping_15m = True
 
+        btc_1h_bullish = False
+        btc_1h_bearish = False
+        if df_1h is not None and len(df_1h) >= 26:
+            df_1h_ind = _compute_indicators(df_1h)
+            c1 = df_1h_ind.iloc[-1]
+            c1_close = float(c1['close'])
+            c1_ema9 = float(c1.get('ema_9', c1_close))
+            c1_ema26 = float(c1.get('ema_26', c1_close))
+            if c1_close > c1_ema26 and c1_ema9 >= c1_ema26:
+                btc_1h_bullish = True
+            elif c1_close < c1_ema26 and c1_ema9 <= c1_ema26:
+                btc_1h_bearish = True
+
         btc_4h_ret = 0.0
         if df_4h is not None and len(df_4h) >= 2:
             btc_4h_ret = float(((df_4h['close'].iloc[-1] - df_4h['close'].iloc[-2]) / df_4h['close'].iloc[-2]) * 100.0)
@@ -139,6 +153,8 @@ def update_btc_pulse(tf_data: dict) -> None:
         _BTC_PULSE = {
             "btc_15m_dumping": dumping_15m,
             "btc_15m_pumping": pumping_15m,
+            "btc_1h_bullish": btc_1h_bullish,
+            "btc_1h_bearish": btc_1h_bearish,
             "btc_4h_ret": btc_4h_ret,
             "updated_at": datetime.now(timezone.utc)
         }
@@ -162,9 +178,13 @@ def is_btc_safe_for_altcoins(signal: str, symbol: str, alt_tf_data: dict = None)
     if sig_clean in ["BUY", "LONG"]:
         if pulse.get("btc_15m_dumping", False):
             return False, "BTC currently dumping below 15M 9 EMA"
+        if pulse.get("btc_1h_bearish", False):
+            return False, "BTC 1H Macro is Bearish (Below 26 EMA) — Altcoin Longs prohibited"
     elif sig_clean in ["SELL", "SHORT"]:
         if pulse.get("btc_15m_pumping", False):
             return False, "BTC currently pumping above 15M 9 EMA"
+        if pulse.get("btc_1h_bullish", False):
+            return False, "BTC 1H Macro is Bullish (Above 26 EMA) — Altcoin Shorts prohibited"
 
     # Rule 2: Altcoin Relative Strength (vs BTC 4H)
     if sig_clean in ["BUY", "LONG"] and alt_tf_data:

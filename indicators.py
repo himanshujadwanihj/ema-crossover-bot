@@ -419,12 +419,12 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
     body_ratio_thresh = cfg.get('BODY_RATIO', 0.25)
     expansion_valid = (candle_body / candle_range) >= body_ratio_thresh
 
-    # RSI Precision Momentum Check
+    # RSI Precision Momentum Check (Prevents entering at exhausted overbought peaks or oversold bottoms)
     rsi_val = row.get('rsi', 50.0)
-    rsi_min = cfg.get('RSI_MIN', 45.0)
-    rsi_max = cfg.get('RSI_MAX', 75.0)
-    rsi_bullish = True if pd.isna(rsi_val) else (rsi_min <= rsi_val <= rsi_max)
-    rsi_bearish = True if pd.isna(rsi_val) else ((100 - rsi_max) <= rsi_val <= (100 - rsi_min))
+    rsi_min = cfg.get('RSI_MIN', 42.0)
+    rsi_max = cfg.get('RSI_MAX', 62.0)
+    rsi_bullish = True if pd.isna(rsi_val) else (42.0 <= rsi_val <= 62.0)
+    rsi_bearish = True if pd.isna(rsi_val) else (38.0 <= rsi_val <= 58.0)
 
     # 200 SMA Baseline Filter (Price must be above 200 SMA for BUY, below for SELL)
     sma_200 = row.get('sma_200')
@@ -491,12 +491,12 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             if rsi_bullish:
                 add_signal("9/26 EMA Cross", "BUY")
             else:
-                logger.debug(f"BUY 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [{rsi_min}, {rsi_max}]")
+                logger.debug(f"BUY 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [42.0, 62.0]")
         elif prev['ema_9'] >= prev['ema_26'] and row['ema_9'] < row['ema_26']:
             if rsi_bearish:
                 add_signal("9/26 EMA Cross", "SELL")
             else:
-                logger.debug(f"SELL 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [{100-rsi_max}, {100-rsi_min}]")
+                logger.debug(f"SELL 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [38.0, 58.0]")
         
     return signals
 

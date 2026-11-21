@@ -224,14 +224,14 @@ async def register_paper_trade(alert_data: dict):
         try:
             f_rsi = float(rsi)
             if is_gold_or_stock:
-                if signal == 'BUY' and (38.0 <= f_rsi <= 75.0):
+                if signal == 'BUY' and (40.0 <= f_rsi <= 65.0):
                     has_rsi_boost = True
-                elif signal == 'SELL' and (25.0 <= f_rsi <= 62.0):
+                elif signal == 'SELL' and (38.0 <= f_rsi <= 60.0):
                     has_rsi_boost = True
             else:
-                if signal == 'BUY' and (42.0 <= f_rsi <= 75.0):
+                if signal == 'BUY' and (42.0 <= f_rsi <= 62.0):
                     has_rsi_boost = True
-                elif signal == 'SELL' and (25.0 <= f_rsi <= 58.0):
+                elif signal == 'SELL' and (38.0 <= f_rsi <= 58.0):
                     has_rsi_boost = True
         except (ValueError, TypeError):
             pass
@@ -239,7 +239,7 @@ async def register_paper_trade(alert_data: dict):
         has_rsi_boost = True
 
     if not has_rsi_boost:
-        bounds_label = "[BUY 38-75, SELL 25-62]" if is_gold_or_stock else "[BUY 42-75, SELL 25-58]"
+        bounds_label = "[BUY 40-65, SELL 38-60]" if is_gold_or_stock else "[BUY 42-62, SELL 38-58]"
         logger.info(
             f"PAPER TRADER BLOCKED {symbol} {signal} ({cross_type}) — "
             f"RSI={f_rsi if f_rsi is not None else 'None'} outside required RSI Boost bounds {bounds_label}. "

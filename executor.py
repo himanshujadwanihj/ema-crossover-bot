@@ -1026,6 +1026,21 @@ class SharkExchangeExecutor:
 
             if await self.has_active_trade_on_exchange(session, clean_sym, signal=signal):
                 return {"status": "skipped", "reason": f"Active trade or orders already exist on Shark for {clean_sym}"}
+
+            # Portfolio Directional Exposure Cap: Max 4 active trades in the same direction (Max 4 SHORTs / Max 4 LONGs)
+            # Prevents systemic portfolio wipeout when a flash BTC reversal squeezes 10+ altcoins at once
+            open_positions = await self.get_open_positions(session)
+            sig_side = "BUY" if str(signal).upper() in ("BUY", "LONG") else "SELL"
+            same_dir_count = 0
+            for op in open_positions:
+                op_qty = abs(float(op.get("quantity") or op.get("positionAmount") or 0))
+                if op_qty > 0:
+                    op_side = str(op.get("positionType") or op.get("positionSide") or op.get("side") or "").upper()
+                    if (sig_side == "BUY" and op_side in ("LONG", "BUY")) or (sig_side == "SELL" and op_side in ("SHORT", "SELL")):
+                        same_dir_count += 1
+            if same_dir_count >= 4:
+                logger.warning(f"DIRECTIONAL EXPOSURE CAP: Already {same_dir_count} active {sig_side} positions on exchange. Skipping new {clean_sym} {sig_side} to prevent correlated portfolio cascade.")
+                return {"status": "skipped", "reason": f"Directional Exposure Cap reached ({same_dir_count} active {sig_side} trades)"}
         except Exception as e:
             logger.error(f"Error checking exchange state for {clean_sym}: {e}")
 
