@@ -399,140 +399,150 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 
                 seconds_since_close = (datetime.now(timezone.utc) - candle_dt).total_seconds()
                 if 0 <= seconds_since_close <= 3660:
+                    recent_12 = df_1h.iloc[-14:-2] if len(df_1h) >= 14 else df_1h.iloc[:-2]
+                    range_high = float(recent_12['high'].max())
+                    range_low = float(recent_12['low'].min())
+                    candle_close = float(df_1h['close'].iloc[-2])
+                    candle_ts = str(df_1h.index[-2])
+
+                    range_width_pct = (range_high - range_low) / max(range_low, 1e-8)
+                    # Valid consolidation range is 0.8% to 8.5% (prevents wild swinging chop from qualifying)
+                    is_valid_consolidation = (0.008 <= range_width_pct <= 0.085)
+
                     from state import get_active_radar, mark_radar_triggered
                     from fetcher import fetch_futures_microstructure_async
                     radar_entry = get_active_radar(symbol)
                     has_radar = radar_entry and radar_entry.get("status") == "WATCHING"
                     
-                    # STRICT SQUEEZE RULE (User Directive):
-                    # Squeeze breakout requires an active verified coiling base on Radar!
-                    # Do not fire random uncoiled coins in an uptrend/downtrend.
+                    sq_signal = None
+                    # MODE A: Dedicated Pre-Squeeze Radar (if active on Radar)
                     if has_radar:
-                        recent_12 = df_1h.iloc[-14:-2] if len(df_1h) >= 14 else df_1h.iloc[:-2]
-                        range_high = float(recent_12['high'].max())
-                        range_low = float(recent_12['low'].min())
-                        candle_close = float(df_1h['close'].iloc[-2])
-                        candle_ts = str(df_1h.index[-2])
-                        
                         radar_trigger = float(radar_entry.get('trigger_entry', 0.0))
                         radar_dir = str(radar_entry.get('direction', '')).upper()
-                        
-                        sq_signal = None
-                        # SOLUTION 3 - RULE 1: STRONG CANDLE BODY ACCEPTANCE (No Wicks, >= 0.20% clean clearance)
                         if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
                             sq_signal = 'BUY'
                         elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
                             sq_signal = 'SELL'
+                    # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout (Decoupled from Radar)
+                    elif is_valid_consolidation:
+                        h4_trend = tf_states.get("4H") if tf_states and tf_states.get("4H") else "neutral"
+                        if candle_close <= (range_low * 0.998) and h4_trend != "bullish":
+                            # Support Breakdown: Close >= 0.20% below range floor and 4H not opposing
+                            sq_signal = 'SELL'
+                        elif candle_close >= (range_high * 1.002) and h4_trend != "bearish":
+                            # Resistance Breakout: Close >= 0.20% above range ceiling and 4H not opposing
+                            sq_signal = 'BUY'
                         
-                        if sq_signal:
-                            c_open = float(df_1h['open'].iloc[-2])
-                            c_high = float(df_1h['high'].iloc[-2])
-                            c_low = float(df_1h['low'].iloc[-2])
-                            c_close = float(df_1h['close'].iloc[-2])
-                            c_body = abs(c_close - c_open)
-                            c_range = max(c_high - c_low, 1e-8)
-                            body_ratio = c_body / c_range
+                    if sq_signal:
+                        c_open = float(df_1h['open'].iloc[-2])
+                        c_high = float(df_1h['high'].iloc[-2])
+                        c_low = float(df_1h['low'].iloc[-2])
+                        c_close = float(df_1h['close'].iloc[-2])
+                        c_body = abs(c_close - c_open)
+                        c_range = max(c_high - c_low, 1e-8)
+                        body_ratio = c_body / c_range
 
-                            # Solution 3 Rule 1: Body Ratio >= 50% (Solid candle, no long opposing wicks)
-                            vol_20_sma = df_1h['volume'].iloc[-22:-2].mean() if len(df_1h) >= 22 else df_1h['volume'].mean()
-                            breakout_vol = float(df_1h['volume'].iloc[-2])
+                        # Solution 3 Rule 1: Body Ratio >= 50% (Solid candle, no long opposing wicks)
+                        vol_20_sma = df_1h['volume'].iloc[-22:-2].mean() if len(df_1h) >= 22 else df_1h['volume'].mean()
+                        breakout_vol = float(df_1h['volume'].iloc[-2])
+                        
+                        from market_cache import is_btc_safe_for_altcoins
+                        is_safe, btc_reason = is_btc_safe_for_altcoins(sq_signal, symbol, tf_data)
+
+                        if body_ratio < 0.45:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
+                            sq_signal = None
+                        elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.38:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
+                            sq_signal = None
+                        elif sq_signal == 'SELL' and ((c_close - c_low) / c_range) > 0.38:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
+                            sq_signal = None
+                        elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
+                            sq_signal = None
+                        elif not is_safe:
+                            logger.info(f"FILTERED 1H SQUEEZE: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
+                            sq_signal = None
+                        # Breakout Freshness Guard: Reject historical breakouts older than 65 minutes
+                        if sq_signal and candle_ts:
+                            c_dt = _parse_iso_dt(candle_ts)
+                            if c_dt and (datetime.now(timezone.utc) - c_dt).total_seconds() > 3900:
+                                logger.info(f"FILTERED STALE SQUEEZE: {symbol} 1H breakout candle was {(datetime.now(timezone.utc) - c_dt).total_seconds()/60:.1f}m ago while bot was offline.")
+                                sq_signal = None
+
+                        unique_sq_key = f"1H_RangeBreak_{sq_signal}_{candle_ts}" if not has_radar else f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}"
+                        if sq_signal and not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
+                            micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h)
+                            cvd_metrics = micro_1h.get("cvd_metrics", {})
+                            cvd_aligned = cvd_metrics.get("is_aligned", True)
                             
-                            from market_cache import is_btc_safe_for_altcoins
-                            is_safe, btc_reason = is_btc_safe_for_altcoins(sq_signal, symbol, tf_data)
+                            if cvd_aligned:
+                                # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
+                                # Instead of chasing the candle_close top, anchor limit entry near broken range boundary
+                                if sq_signal == 'BUY':
+                                    retest_target = range_high * 1.0015
+                                    entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
+                                    sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                    cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
+                                else:
+                                    retest_target = range_low * 0.9985
+                                    entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
+                                    sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                    cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
 
-                            if body_ratio < 0.45:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
-                                sq_signal = None
-                            elif sq_signal == 'BUY' and ((c_high - c_close) / c_range) > 0.38:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
-                                sq_signal = None
-                            elif sq_signal == 'SELL' and ((c_close - c_low) / c_range) > 0.38:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
-                                sq_signal = None
-                            elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
-                                sq_signal = None
-                            elif not is_safe:
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
-                                sq_signal = None
-                            # Breakout Freshness Guard: Reject historical breakouts older than 65 minutes
-                            if sq_signal and candle_ts:
-                                c_dt = _parse_iso_dt(candle_ts)
-                                if c_dt and (datetime.now(timezone.utc) - c_dt).total_seconds() > 3900:
-                                    logger.info(f"FILTERED STALE SQUEEZE: {symbol} 1H breakout candle was {(datetime.now(timezone.utc) - c_dt).total_seconds()/60:.1f}m ago while bot was offline.")
-                                    sq_signal = None
-
-                            unique_sq_key = f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}"
-                            if sq_signal and not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
-                                micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h)
-                                cvd_metrics = micro_1h.get("cvd_metrics", {})
-                                cvd_aligned = cvd_metrics.get("is_aligned", True)
+                                from indicators import find_liquidity_pool_targets, _compute_indicators
+                                dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
                                 
-                                if cvd_aligned:
-                                    # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
-                                    # Instead of chasing the candle_close top, anchor limit entry near broken range boundary
-                                    if sq_signal == 'BUY':
-                                        retest_target = range_high * 1.0015
-                                        entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
-                                        sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
-                                        cross_type = "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
-                                    else:
-                                        retest_target = range_low * 0.9985
-                                        entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
-                                        sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
-                                        cross_type = "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
+                                df_1h_ind = _compute_indicators(df_1h)
+                                sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
 
-                                    from indicators import find_liquidity_pool_targets, _compute_indicators
-                                    dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
-                                    
-                                    df_1h_ind = _compute_indicators(df_1h)
-                                    sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
-
-                                    from telegram_bot import queue_alert
-                                    sq_queued = await queue_alert(
-                                        symbol=symbol,
-                                        tf_label="1H",
-                                        signal=sq_signal,
-                                        entry=entry,
-                                        sl=dyn_sl,
-                                        tp=tp1,
-                                        tf_states=tf_states,
-                                        cross_type=cross_type,
-                                        candle_time=candle_ts,
-                                        macro_struct=macro_struct,
-                                        tp1=tp1, tp2=tp2,
-                                        rr1=rr1, rr2=rr2,
-                                        lbl1=lbl1, lbl2=lbl2,
-                                        tf_data=tf_data,
-                                        is_special_list=(symbol in SPECIAL_LIST),
-                                        rsi=sq_rsi,
-                                        is_dedicated_squeeze=True
-                                    )
-                                    if sq_queued:
-                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2)
+                                from telegram_bot import queue_alert
+                                sq_queued = await queue_alert(
+                                    symbol=symbol,
+                                    tf_label="1H",
+                                    signal=sq_signal,
+                                    entry=entry,
+                                    sl=dyn_sl,
+                                    tp=tp1,
+                                    tf_states=tf_states,
+                                    cross_type=cross_type,
+                                    candle_time=candle_ts,
+                                    macro_struct=macro_struct,
+                                    tp1=tp1, tp2=tp2,
+                                    rr1=rr1, rr2=rr2,
+                                    lbl1=lbl1, lbl2=lbl2,
+                                    tf_data=tf_data,
+                                    is_special_list=(symbol in SPECIAL_LIST),
+                                    rsi=sq_rsi,
+                                    is_dedicated_squeeze=True
+                                )
+                                if sq_queued:
+                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2)
+                                    if has_radar:
                                         mark_radar_triggered(symbol)
-                                        logger.info(f"💥 DEDICATED 1H SQUEEZE BREAKOUT TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
+                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
 
-                                        # AUTO-TRADING ENROLLMENT:
-                                        # Capture 1H Squeeze Breakout candidate for Shark Exchange execution
-                                        sq_candidate = {
-                                            "symbol": symbol,
-                                            "signal": sq_signal,
-                                            "entry": entry,
-                                            "sl": dyn_sl,
-                                            "tp1": tp1,
-                                            "tp2": tp2,
-                                            "tp": tp1,
-                                            "aligned_count": 4,  # High-conviction verified squeeze with CVD + volume
-                                            "is_3_htf_aligned": True,
-                                            "is_30m_early": False,
-                                            "is_special": (symbol in SPECIAL_LIST),
-                                            "is_dedicated_squeeze": True,
-                                            "unique_key": unique_sq_key,
-                                            "candle_ts": candle_ts,
-                                            "rr2": rr2 or 2.0,
-                                            "rsi": sq_rsi,
-                                        }
+                                    # AUTO-TRADING ENROLLMENT:
+                                    # Capture 1H Squeeze Breakout candidate for Shark Exchange execution
+                                    sq_candidate = {
+                                        "symbol": symbol,
+                                        "signal": sq_signal,
+                                        "entry": entry,
+                                        "sl": dyn_sl,
+                                        "tp1": tp1,
+                                        "tp2": tp2,
+                                        "tp": tp1,
+                                        "aligned_count": 4,  # High-conviction verified squeeze with CVD + volume
+                                        "is_3_htf_aligned": True,
+                                        "is_30m_early": False,
+                                        "is_special": (symbol in SPECIAL_LIST),
+                                        "is_dedicated_squeeze": True,
+                                        "unique_key": unique_sq_key,
+                                        "candle_ts": candle_ts,
+                                        "rr2": rr2 or 2.0,
+                                        "rsi": sq_rsi,
+                                    }
             except Exception as e_sq_eng:
                 logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
 
