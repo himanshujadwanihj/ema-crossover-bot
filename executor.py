@@ -1599,6 +1599,87 @@ class SharkExchangeExecutor:
 
         return False
 
+    async def modify_take_profit(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        direction: str,
+        new_tp: float,
+        qty: float = None
+    ) -> bool:
+        """
+        Modifies/replaces the take-profit LIMIT order on Shark Exchange:
+        1. Queries open orders to find the old TP limit order(s).
+        2. Queries open position to get positionId and actual quantity.
+        3. Cancels old TP limit order(s) via DELETE /v1/order/delete-order.
+        4. Places new TP order with placeType: 'POSITION' at new_tp.
+        """
+        clean_sym = clean_contract_symbol(symbol)
+        exit_side = "SELL" if direction.upper() in ("BUY", "LONG") else "BUY"
+        clean_new_tp = round_price(clean_sym, new_tp)
+
+        if not self.is_configured() or not session:
+            return False
+
+        try:
+            # 1. Fetch current open orders to locate existing TP order(s)
+            open_orders = await self.get_open_orders(session, symbol=clean_sym)
+            tp_orders = [
+                o for o in open_orders
+                if (
+                    str(o.get("type") or "").upper() == "LIMIT"
+                    and (o.get("placeType") == "POSITION" or o.get("reduceOnly") is True or o.get("subType") == "PRIMARY")
+                    and str(o.get("side") or "").upper() == exit_side
+                )
+            ]
+
+            # 2. Get active position for positionId and actual qty
+            pos = await self.get_open_position(session, clean_sym)
+            if not pos:
+                logger.error(f"CRITICAL: Cannot modify TP for {clean_sym} — position not found. Aborting.")
+                return False
+
+            pos_id = pos.get("positionId")
+            if not pos_id:
+                logger.error(f"CRITICAL: positionId is None for {clean_sym}. Aborting TP update.")
+                return False
+
+            actual_qty = abs(float(pos.get("quantity") or pos.get("positionAmount") or (qty or 0)))
+            clean_qty = round_coin_qty(clean_sym, actual_qty, price=clean_new_tp)
+
+            # 3. Cancel old TP orders
+            for o in tp_orders:
+                cid = o.get("clientOrderId")
+                if cid:
+                    del_status, del_res = await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
+                    if del_status in (200, 201):
+                        logger.info(f"Cancelled old TP clientOrderId {cid} for {clean_sym} before placing new one.")
+                    else:
+                        logger.warning(f"Failed to cancel old TP order {cid} for {clean_sym}: {del_res}")
+
+            # 4. Place new TP order
+            tp_payload = {
+                "placeType": "POSITION",
+                "positionId": pos_id,
+                "reduceOnly": True,
+                "type": "LIMIT",
+                "side": exit_side,
+                "symbol": clean_sym,
+                "quantity": clean_qty,
+                "price": clean_new_tp
+            }
+            st, res = await self.shark_post(session, "/v1/order/place-order", tp_payload)
+            if st in (200, 201):
+                logger.info(f"Successfully placed updated TP for {clean_sym} at {clean_new_tp} qty={clean_qty}")
+                return True
+            else:
+                logger.warning(f"Could not place updated TP for {clean_sym}: {res}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error modifying take profit for {clean_sym}: {e}")
+            return False
+
     async def cancel_all_open_orders(self, session: aiohttp.ClientSession, symbol: str) -> bool:
         """Cancels open ENTRY orders. Protects SL/TPs if a position is active."""
         clean_sym = clean_contract_symbol(symbol)

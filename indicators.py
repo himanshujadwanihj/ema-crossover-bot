@@ -138,12 +138,13 @@ def get_min_sl_percent(symbol: str) -> float:
     else:
         return 0.0080 # 0.80% min SL for Altcoins
 
-def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, default_sl: float, symbol: str = "ALT/USDT", tf_data: dict = None) -> tuple:
+def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, default_sl: float, symbol: str = "ALT/USDT", tf_data: dict = None, target_r: float = 1.5) -> tuple:
     """
-    Finds dynamic 3-Tier Take-Profit Targets (TP1, TP2, TP3) and SL using ascending Liquidity Pools (BSL/SSL) and Swing Highs/Lows.
-    Enforces Asset-Specific Hard Stop-Loss Caps (BTC <= 0.48%, ETH <= 0.80%, SOL <= 2.20%, Altcoins <= 2.50%).
-    Enforces Minimum Stop-Loss Floor (Altcoins >= 0.80%) to prevent razor-thin noise stops.
-    Returns (sl, (tp1, tp2, tp3), (rr1, rr2, rr3), (lbl1, lbl2, lbl3))
+    Finds dynamic Take-Profit Targets (TP1: target_r, TP2: 3.2R) and SL using 26 EMA structural invalidation and swing extremes.
+    USER DIRECTIVE:
+    - EMA Retests & Crossovers: exact 1.5R Target
+    - 1H Breakouts & Breakdowns: exact 2.2R Target
+    Returns (sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2))
     """
     import numpy as np
     
@@ -157,11 +158,12 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         sl = max(default_sl, min_sl_floor) if signal == "BUY" else min(default_sl, entry + max_sl_dist)
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
+        from executor import round_price
         if signal == "BUY":
-            tp1, tp2 = entry + (1.5 * risk), entry + (4.0 * risk)
+            tp1, tp2 = round_price(symbol, entry + (target_r * risk)), round_price(symbol, entry + (3.2 * risk))
         else:
-            tp1, tp2 = entry - (1.5 * risk), entry - (4.0 * risk)
-        return sl, (tp1, tp2), (1.5, 4.0), ("1.5 R:R Target (100% Book)", "4.0 R:R Runner")
+            tp1, tp2 = round_price(symbol, entry - (target_r * risk)), round_price(symbol, entry - (3.2 * risk))
+        return sl, (tp1, tp2), (target_r, 3.2), (f"{target_r}R Target (100% Book)", "3.2R Extended")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -283,37 +285,18 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: High-Probability 1.5R TP1 (70% Book) + Trailing Multi-R Runner
-        # Search for Liquidity Pools / Order Blocks between 1.30R and 1.55R.
-        # Front-run buffer: 0.20% below the order block / fractal resistance high for maximum fill probability.
-        FRONT_RUN_PCT = 0.0020
-        min_tp1_target = entry + (1.30 * risk)
-        max_tp1_target = entry + (1.55 * risk)
+        # USER DIRECTIVE: Exact target_r Take Profit as per SL (1.5R for EMA Retest/Crossover, 2.2R for Breakout/Breakdown)
+        from executor import round_price
+        clean_tp1 = round_price(symbol, entry + (target_r * risk))
+        clean_tp2 = round_price(symbol, entry + (3.2 * risk))
         
-        all_bsl = sorted(list(set(bsl_levels + internal_bsl + refine_bsl)))
-        eligible_tp1_pools = [p for p in all_bsl if (p * (1.0 - FRONT_RUN_PCT)) >= min_tp1_target and (p * (1.0 - FRONT_RUN_PCT)) <= max_tp1_target]
-        
-        if eligible_tp1_pools:
-            raw_tp1 = eligible_tp1_pools[0]
-            tp1 = round(raw_tp1 * (1.0 - FRONT_RUN_PCT), 6)
-            rr_val = round((tp1 - entry) / risk, 1)
-            lbl1 = f"Liquidity Target ({rr_val} R:R, 100% Book)"
-        else:
-            tp1 = round(entry + (1.5 * risk), 6)
-            lbl1 = "1.5 R:R Target (100% Book)"
+        lbl1 = f"{target_r} R:R Target (100% Book)"
+        lbl2 = "3.2 R:R Extended Target"
 
-        higher_bsl = [p for p in all_bsl if p >= entry + (4.0 * risk)]
-        if len(higher_bsl) >= 1:
-            tp2 = round(higher_bsl[0] * (1.0 - FRONT_RUN_PCT), 6)
-            lbl2 = f"Major Liquidity Target ({round((tp2-entry)/risk, 1)}R)"
-        else:
-            tp2 = max(tp1 * 1.005, round(entry + (6.0 * risk), 6))
-            lbl2 = "6.0 R:R Uncapped Trend Target"
+        rr1 = round(abs(clean_tp1 - entry) / risk, 2)
+        rr2 = round(abs(clean_tp2 - entry) / risk, 2)
 
-        rr1 = (tp1 - entry) / risk
-        rr2 = (tp2 - entry) / risk
-
-        return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
+        return sl, (clean_tp1, clean_tp2), (rr1, rr2), (lbl1, lbl2)
 
     else: # SELL
         # ATR-Based Dynamic Stop-Loss (1.5x ATR above entry)
@@ -373,37 +356,18 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         risk = abs(entry - sl)
         if risk == 0: risk = entry * 0.01
         
-        # USER DIRECTIVE: High-Probability 1.5R TP1 (70% Book) + Trailing Multi-R Runner
-        # Search for Liquidity Pools / Order Blocks between 1.30R and 1.55R below entry.
-        # Front-run buffer: 0.20% above the order block / fractal support low for maximum fill probability.
-        FRONT_RUN_PCT = 0.0020
-        min_tp1_target = entry - (1.30 * risk)  # 1.30R below entry (closer)
-        max_tp1_target = entry - (1.55 * risk)  # 1.55R below entry (further)
+        # USER DIRECTIVE: Exact target_r Take Profit as per SL (1.5R for EMA Retest/Crossover, 2.2R for Breakout/Breakdown)
+        from executor import round_price
+        clean_tp1 = round_price(symbol, entry - (target_r * risk))
+        clean_tp2 = round_price(symbol, entry - (3.2 * risk))
         
-        all_ssl = sorted(list(set(ssl_levels + internal_ssl + refine_ssl)), reverse=True)
-        eligible_tp1_pools = [p for p in all_ssl if (p * (1.0 + FRONT_RUN_PCT)) <= min_tp1_target and (p * (1.0 + FRONT_RUN_PCT)) >= max_tp1_target]
-        
-        if eligible_tp1_pools:
-            raw_tp1 = eligible_tp1_pools[0]
-            tp1 = round(raw_tp1 * (1.0 + FRONT_RUN_PCT), 6)
-            rr_val = round((entry - tp1) / risk, 1)
-            lbl1 = f"Liquidity Target ({rr_val} R:R, 100% Book)"
-        else:
-            tp1 = round(entry - (1.5 * risk), 6)
-            lbl1 = "1.5 R:R Target (100% Book)"
+        lbl1 = f"{target_r} R:R Target (100% Book)"
+        lbl2 = "3.2 R:R Extended Target"
 
-        lower_ssl = [p for p in all_ssl if p <= entry - (4.0 * risk)]
-        if len(lower_ssl) >= 1:
-            tp2 = round(lower_ssl[0] * (1.0 + FRONT_RUN_PCT), 6)
-            lbl2 = f"Major Liquidity Target ({round((entry-tp2)/risk, 1)}R)"
-        else:
-            tp2 = min(tp1 * 0.995, round(entry - (6.0 * risk), 6))
-            lbl2 = "6.0 R:R Uncapped Trend Target"
+        rr1 = round(abs(entry - clean_tp1) / risk, 2)
+        rr2 = round(abs(entry - clean_tp2) / risk, 2)
 
-        rr1 = (entry - tp1) / risk
-        rr2 = (entry - tp2) / risk
-
-        return sl, (tp1, tp2), (round(rr1, 2), round(rr2, 2)), (lbl1, lbl2)
+        return sl, (clean_tp1, clean_tp2), (rr1, rr2), (lbl1, lbl2)
 
 def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict = None) -> list:
     """
