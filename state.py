@@ -193,21 +193,21 @@ def get_latest_symbol_state(symbol: str) -> dict:
 
 
 
-def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0) -> None:
+def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0, target_r: float = 1.5) -> None:
     state = _load()
     key = _make_key(symbol, tf, signal, candle_ts)
     risk = abs(entry - sl) if (entry and sl) else (entry * 0.01 if entry else 1.0)
     
-    eff_tp1 = tp1 if (tp1 and tp1 != entry) else (entry + 1.2 * risk if signal == "BUY" else entry - 1.2 * risk)
-    eff_tp2 = tp2 if (tp2 and tp2 != eff_tp1) else (entry + 2.2 * risk if signal == "BUY" else entry - 2.2 * risk)
-    eff_tp3 = tp3 if (tp3 and tp3 != eff_tp2) else (entry + 3.2 * risk if signal == "BUY" else entry - 3.2 * risk)
+    eff_tp1 = tp1 if (tp1 and tp1 != entry) else (entry + target_r * risk if signal == "BUY" else entry - target_r * risk)
+    eff_tp2 = tp2 if (tp2 and tp2 != eff_tp1) else (entry + (target_r + 1.0) * risk if signal == "BUY" else entry - (target_r + 1.0) * risk)
+    eff_tp3 = tp3 if (tp3 and tp3 != eff_tp2) else (entry + (target_r + 2.0) * risk if signal == "BUY" else entry - (target_r + 2.0) * risk)
 
     if signal == "BUY":
-        if eff_tp2 <= eff_tp1: eff_tp2 = max(eff_tp1 * 1.005, entry + (2.2 * risk))
-        if eff_tp3 <= eff_tp2: eff_tp3 = max(eff_tp2 * 1.005, entry + (3.2 * risk))
+        if eff_tp2 <= eff_tp1: eff_tp2 = max(eff_tp1 * 1.005, entry + ((target_r + 1.0) * risk))
+        if eff_tp3 <= eff_tp2: eff_tp3 = max(eff_tp2 * 1.005, entry + ((target_r + 2.0) * risk))
     else:
-        if eff_tp2 >= eff_tp1: eff_tp2 = min(eff_tp1 * 0.995, entry - (2.2 * risk))
-        if eff_tp3 >= eff_tp2: eff_tp3 = min(eff_tp2 * 0.995, entry - (3.2 * risk))
+        if eff_tp2 >= eff_tp1: eff_tp2 = min(eff_tp1 * 0.995, entry - ((target_r + 1.0) * risk))
+        if eff_tp3 >= eff_tp2: eff_tp3 = min(eff_tp2 * 0.995, entry - ((target_r + 2.0) * risk))
 
     now_iso = datetime.now(timezone.utc).isoformat()
     state[key] = {
@@ -219,6 +219,7 @@ def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 
         "sl": sl,
         "initial_sl": sl,
         "cur_sl": sl,
+        "target_r": target_r,
         "tp": eff_tp1,
         "tp1": eff_tp1,
         "tp2": eff_tp2,

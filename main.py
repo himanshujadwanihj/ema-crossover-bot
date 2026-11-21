@@ -479,20 +479,31 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             
                             if cvd_aligned:
                                 # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
-                                # Instead of chasing the candle_close top, anchor limit entry near broken range boundary
+                                # USER DIRECTIVE: Exact 2.2R target policy for Breakdown Continuation trades!
+                                target_r = 2.2
                                 if sq_signal == 'BUY':
                                     retest_target = range_high * 1.0015
                                     entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
                                     sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                    risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                    tp1 = round_price(symbol, entry + (target_r * risk))
+                                    tp2 = round_price(symbol, entry + (3.2 * risk))
                                     cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)"
                                 else:
                                     retest_target = range_low * 0.9985
                                     entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
                                     sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                    risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
+                                    tp1 = round_price(symbol, entry - (target_r * risk))
+                                    tp2 = round_price(symbol, entry - (3.2 * risk))
                                     cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
 
                                 from indicators import find_liquidity_pool_targets, _compute_indicators
-                                dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df_1h, sq_signal, entry, sl, symbol=symbol, tf_data=tf_data)
+                                dyn_sl = sl
+                                rr1 = target_r
+                                rr2 = 3.2
+                                lbl1 = f"{target_r}R Target"
+                                lbl2 = "3.2R Extended"
                                 
                                 df_1h_ind = _compute_indicators(df_1h)
                                 sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
@@ -518,10 +529,10 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     is_dedicated_squeeze=True
                                 )
                                 if sq_queued:
-                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2)
+                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
                                     if has_radar:
                                         mark_radar_triggered(symbol)
-                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN TRIGGERED for {symbol} ({sq_signal}) @ {entry}")
+                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
 
                                     # AUTO-TRADING ENROLLMENT:
                                     # Capture 1H Squeeze Breakout candidate for Shark Exchange execution
@@ -533,6 +544,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         "tp1": tp1,
                                         "tp2": tp2,
                                         "tp": tp1,
+                                        "target_r": target_r,
                                         "aligned_count": 4,  # High-conviction verified squeeze with CVD + volume
                                         "is_3_htf_aligned": True,
                                         "is_30m_early": False,
@@ -540,7 +552,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         "is_dedicated_squeeze": True,
                                         "unique_key": unique_sq_key,
                                         "candle_ts": candle_ts,
-                                        "rr2": rr2 or 2.0,
+                                        "rr2": target_r,
                                         "rsi": sq_rsi,
                                     }
             except Exception as e_sq_eng:

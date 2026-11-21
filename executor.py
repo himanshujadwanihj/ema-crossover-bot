@@ -1109,6 +1109,10 @@ class SharkExchangeExecutor:
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
 
+            risk_step_est = abs(clean_entry - clean_sl) if (clean_entry and clean_sl and clean_entry != clean_sl) else (clean_entry * 0.015)
+            r_ratio_est = round(abs(clean_tp1 - clean_entry) / max(risk_step_est, 1e-8), 1) if (clean_tp1 and clean_entry) else 1.5
+            r_label = f"{r_ratio_est:.1f}R" if abs(r_ratio_est - 1.5) > 0.1 else "1.5R"
+
             exec_card = (
                 f"🦈 <b>REAL LIVE TRADE: LIMIT ORDER PLACED (SHARK EXCHANGE)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{side}]\n"
@@ -1117,9 +1121,9 @@ class SharkExchangeExecutor:
                 f"<b>Margin Used:</b> ₹{self.margin_inr:,.0f} INR (~${margin_usdt:.2f} USDT)\n"
                 f"<b>Leverage:</b> {self.leverage}x Fixed\n"
                 f"<b>Notional:</b> ~${notional_usdt:.2f} USDT\n\n"
-                f"🎯 <b>Take-Profit Target (1.5R):</b> {format_price(clean_tp1)} (100% Full Booking)\n"
+                f"🎯 <b>Take-Profit Target ({r_label}):</b> {format_price(clean_tp1)} (100% Full Booking)\n"
                 f"🛡️ <b>Stop-Loss Limit:</b> {format_price(clean_sl)}{bal_block}\n\n"
-                f"<i>Status: Entry limit resting on order book. 1.5R Maker Limit TP armed.</i>"
+                f"<i>Status: Entry limit resting on order book. {r_label} Maker Limit TP armed.</i>"
             )
             from telegram_bot import send_text_alert as _send_alert
             await _send_alert(exec_card)
@@ -1230,26 +1234,31 @@ class SharkExchangeExecutor:
                 live_liq = float(pos.get("liquidationPrice") or pos.get("liqPrice") or pos.get("forceClosePrice") or 0)
                 actual_sl = enforce_sl_above_liquidation(clean_sym, fill_price, actual_sl, pos_direction, self.leverage, live_liq)
 
+                # User Directive: Dynamic target policy (2.2R for Breakdown continuation, 1.5R for standard)
+                from state import get_latest_symbol_state
+                st_entry_check = get_latest_symbol_state(clean_sym)
+                target_r = 1.5
+                if st_entry_check:
+                    target_r = float(st_entry_check.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_entry_check.get("unique_key", "")) or "Squeeze" in str(st_entry_check.get("unique_key", "")) else 1.5))
+
                 # Validate & recalculate TPs if state TPs clash with live position direction (e.g. stale signal in state)
                 risk = abs(fill_price - actual_sl) if (actual_sl and actual_sl != fill_price) else (fill_price * 0.015)
                 if pos_direction == "BUY":
                     if actual_sl >= fill_price:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    # User Directive: Exact 1.5R target policy
-                    tp1 = round_price(clean_sym, fill_price + 1.5 * risk)
+                    tp1 = round_price(clean_sym, fill_price + target_r * risk)
                     if not tp2 or tp2 <= tp1:
-                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 4.0 * risk))
+                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 3.5 * risk))
                     if not tp3 or tp3 <= tp2:
-                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 4.0 * risk))
+                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 3.5 * risk))
                 else:  # SHORT
                     if actual_sl <= fill_price:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    # User Directive: Exact 1.5R target policy
-                    tp1 = round_price(clean_sym, fill_price - 1.5 * risk)
+                    tp1 = round_price(clean_sym, fill_price - target_r * risk)
                     if not tp2 or tp2 >= tp1:
-                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 4.0 * risk))
+                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 3.5 * risk))
                     if not tp3 or tp3 >= tp2:
-                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 4.0 * risk))
+                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 3.5 * risk))
 
                 # Update state so downstream monitoring uses correct direction TPs
                 from state import update_trade_progress, get_latest_symbol_state
@@ -2113,12 +2122,16 @@ class SharkExchangeExecutor:
                         tp2 = tp2 or round_price(sym, entry_price - 5.0 * risk_step)
                         tp3 = tp2
 
-                # Active Trade TP1 Re-Alignment: Ensure TP1 has minimum 1.5R floor, allowing uncapped trailing forward
+                # Active Trade TP1 Re-Alignment: Ensure TP1 has minimum target floor (2.2R for Breakdown continuation, 1.5R standard)
+                target_r = 1.5
+                if state_entry:
+                    target_r = float(state_entry.get("target_r") or (2.2 if "1H_RangeBreak" in str(state_entry.get("unique_key", "")) or "Squeeze" in str(state_entry.get("unique_key", "")) else 1.5))
+
                 if not (state_entry and state_entry.get("tp1_hit")):
                     if direction == "BUY":
-                        if not tp1 or tp1 < (entry_price + 1.49 * risk_step):
-                            new_tp1 = round_price(sym, entry_price + 1.5 * risk_step)
-                            logger.info(f"🎯 MINIMUM 1.5R ENFORCED [BUY]: {sym} TP1 {tp1} brought to minimum 1.5R: {new_tp1}")
+                        if not tp1 or tp1 < (entry_price + (target_r - 0.02) * risk_step):
+                            new_tp1 = round_price(sym, entry_price + target_r * risk_step)
+                            logger.info(f"🎯 MINIMUM {target_r}R ENFORCED [BUY]: {sym} TP1 {tp1} brought to minimum {target_r}R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -2128,9 +2141,9 @@ class SharkExchangeExecutor:
                                     _save(st_map)
                                     break
                     else:
-                        if not tp1 or tp1 > (entry_price - 1.49 * risk_step):
-                            new_tp1 = round_price(sym, entry_price - 1.5 * risk_step)
-                            logger.info(f"🎯 MINIMUM 1.5R ENFORCED [SELL]: {sym} TP1 {tp1} brought to minimum 1.5R: {new_tp1}")
+                        if not tp1 or tp1 > (entry_price - (target_r - 0.02) * risk_step):
+                            new_tp1 = round_price(sym, entry_price - target_r * risk_step)
+                            logger.info(f"🎯 MINIMUM {target_r}R ENFORCED [SELL]: {sym} TP1 {tp1} brought to minimum {target_r}R: {new_tp1}")
                             tp1 = new_tp1
                             from state import _load, _save
                             st_map = _load()
@@ -2328,19 +2341,25 @@ class SharkExchangeExecutor:
                 tp1_already_hit = bool(state_entry and state_entry.get("tp1_hit"))
                 is_tp_undersized = (not tp1_already_hit and pos_qty_abs > 0 and current_tp_count > 0 and total_tp_qty > 0 and total_tp_qty < (pos_qty_abs * 0.95))
 
-                # Realign distant TP (> 1.6R) strictly ONCE per position to avoid infinite cancellation/replacement loops
+                # Realign distant TP strictly ONCE per position to avoid infinite cancellation/replacement loops
+                # Target floor: 2.2R for Breakdown continuation, 1.5R for standard
                 realigned_key = sym + "_tp1_realigned"
                 has_distant_tp1 = False
+                st_heal = get_latest_symbol_state(sym)
+                target_r = 1.5
+                if st_heal:
+                    target_r = float(st_heal.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_heal.get("unique_key", "")) or "Squeeze" in str(st_heal.get("unique_key", "")) else 1.5))
+
                 if not tp1_already_hit and pos_qty_abs > 0 and tp_orders and not self._tp_sl_heal_lock.get(realigned_key):
                     valid_tp_prices = [float(o.get("price") or 0) for o in tp_orders if float(o.get("price") or 0) > 0]
                     if valid_tp_prices:
                         if direction == "BUY":
                             nearest_tp = min(valid_tp_prices)
-                            if nearest_tp > (entry_price + 1.60 * risk_step):
+                            if nearest_tp > (entry_price + (target_r + 0.15) * risk_step):
                                 has_distant_tp1 = True
                         else:
                             nearest_tp = max(valid_tp_prices)
-                            if nearest_tp < (entry_price - 1.60 * risk_step):
+                            if nearest_tp < (entry_price - (target_r + 0.15) * risk_step):
                                 has_distant_tp1 = True
 
                 should_heal_tp = (current_tp_count == 0 or is_tp_undersized or has_distant_tp1) and pos_qty_abs > 0 and tps_hit == 0 and not tp1_already_hit
@@ -2348,8 +2367,8 @@ class SharkExchangeExecutor:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
                     if never_healed or (time.time() - last_heal > 60):
-                        calc_tp1 = round_price(sym, entry_price + 1.5 * risk_step if direction == "BUY" else entry_price - 1.5 * risk_step)
-                        reason_lbl = "1.5R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
+                        calc_tp1 = round_price(sym, entry_price + target_r * risk_step if direction == "BUY" else entry_price - target_r * risk_step)
+                        reason_lbl = f"{target_r}R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
                         logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={calc_tp1})")
                         st_heal = get_latest_symbol_state(sym)
                         sl_from_order = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
@@ -2496,9 +2515,15 @@ class SharkExchangeExecutor:
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             conf_tag = " [Exchange Verified]" if realized_inr > 0 else ""
+
+            target_r = 1.5
+            if state_entry:
+                target_r = float(state_entry.get("target_r") or (2.2 if "1H_RangeBreak" in str(state_entry.get("unique_key", "")) or "Squeeze" in str(state_entry.get("unique_key", "")) else 1.5))
+            target_r_str = f"{target_r:.1f}R" if abs(target_r - 1.5) > 0.1 else "1.5R"
+
             if runner_qty <= 0:
                 msg = (
-                    f"🎯 <b>REAL LIVE TRADE: TARGET (1.5R) HIT ✅ (100% PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 <b>REAL LIVE TRADE: TARGET ({target_r_str}) HIT ✅ (100% PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<b>Asset:</b> {clean_sym} [{direction}]\n"
                     f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(tp1)}\n"
                     f"<b>Realized Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
