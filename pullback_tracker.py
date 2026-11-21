@@ -155,6 +155,12 @@ def get_full_watchlist():
 async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bool:
     if not tf_data: return False
 
+    # DAILY RISK CIRCUIT BREAKER: 10 consecutive SLs -> 60-min pause
+    from state import is_trading_paused
+    is_cb_paused, cb_rem_secs, cb_reason = is_trading_paused()
+    if is_cb_paused:
+        return False
+
     # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
     from config import is_weekend_trading_blocked
     if is_weekend_trading_blocked(symbol):

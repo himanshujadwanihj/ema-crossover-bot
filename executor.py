@@ -994,6 +994,13 @@ class SharkExchangeExecutor:
             logger.info(f"AUTO-TRADE EXCLUSION: {symbol} is a US Stock token. Skipping auto-trade per user directive. Telegram alert only.")
             return {"status": "skipped", "reason": f"{symbol} is a US stock (auto-trade disabled per directive, alerts only)"}
 
+        # 3. DAILY RISK CIRCUIT BREAKER: 10 Consecutive SLs -> 60-min pause
+        from state import is_trading_paused
+        is_paused, rem_secs, pause_reason = is_trading_paused()
+        if is_paused:
+            logger.warning(f"⏸️ CIRCUIT BREAKER ACTIVE: Blocked execution for {clean_sym}. {pause_reason} ({rem_secs/60:.1f}m remaining).")
+            return {"status": "skipped", "reason": f"Circuit Breaker Active ({rem_secs/60:.1f}m remaining): {pause_reason}"}
+
         if not self.is_configured():
             logger.info(f"AUTO-TRADING NOT CONFIGURED: Keys or toggle not set. Skipping execution for {clean_sym}.")
             return {"status": "skipped", "reason": "Exchange executor not configured or disabled"}
@@ -1990,8 +1997,10 @@ class SharkExchangeExecutor:
                             be_shield_hit = bool(st_sym and (st_sym.get("be_hit_time_shield") or st_sym.get("be_hit")))
 
                             pnl_note = ""
+                            is_sl_outcome = False
                             if pnl_inr < -15.0:
                                 status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
+                                is_sl_outcome = True
                             elif abs(pnl_inr) <= 15.0:
                                 status_txt = "🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC) 🤝</b>"
                             elif tp2_was_hit or pnl_inr > 15.0:
@@ -2004,6 +2013,15 @@ class SharkExchangeExecutor:
                                     status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
                             else:
                                 status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
+                                is_sl_outcome = True
+
+                            # DAILY RISK CIRCUIT BREAKER: 10 consecutive SLs -> 60-min pause
+                            from state import record_trade_result
+                            cb_triggered, cb_state = record_trade_result(is_sl=is_sl_outcome, symbol=c_sym, pnl=pnl_inr, pause_minutes=60, max_consecutive_sl=10)
+                            if cb_triggered:
+                                from telegram_bot import send_circuit_breaker_alert
+                                await send_circuit_breaker_alert(cb_state["paused_until"], cb_state["consecutive_sl_count"], c_sym)
+
                             sign = "+" if pnl_inr >= 0 else ""
                             alert_msg = (
                                 f"{status_txt}\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

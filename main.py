@@ -347,6 +347,16 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         
             if outcome:
                 update_trade_outcome(key, outcome)
+                # DAILY RISK CIRCUIT BREAKER: 10 consecutive SLs -> 60-min pause
+                if outcome in ("SL", "LOSS"):
+                    from state import record_trade_result
+                    cb_trig, cb_st = record_trade_result(is_sl=True, symbol=symbol, pause_minutes=60, max_consecutive_sl=10)
+                    if cb_trig:
+                        from telegram_bot import send_circuit_breaker_alert
+                        await send_circuit_breaker_alert(cb_st["paused_until"], cb_st["consecutive_sl_count"], symbol)
+                elif outcome in ("WIN", "TP1", "TP2", "TP3"):
+                    from state import record_trade_result
+                    record_trade_result(is_sl=False, symbol=symbol)
                 # Disabled cancel_all_open_orders: Shark natively cleans up POSITION-attached orders on close.
                 # Note: Win & Loss outcome summary alerts and scoreboards disabled per user directive.
                 # Only Crossover Signal Alert and Entry Hit Alert remain active.
@@ -1235,6 +1245,14 @@ async def main_loop():
                         if is_shock_active:
                             logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Skipping scan cycle...")
                             await asyncio.sleep(15)
+                            continue
+
+                        # DAILY RISK CIRCUIT BREAKER: 10 consecutive SLs -> 60-min pause
+                        from state import is_trading_paused
+                        is_cb_paused, cb_rem_secs, cb_reason = is_trading_paused()
+                        if is_cb_paused:
+                            logger.warning(f"⏸️ CIRCUIT BREAKER ACTIVE: 10 consecutive SLs hit ({cb_rem_secs/60:.1f}m remaining). Skipping scan cycle...")
+                            await asyncio.sleep(20)
                             continue
                         
                         logger.info("Starting Multi-Crossover scan...")

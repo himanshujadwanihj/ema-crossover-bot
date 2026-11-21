@@ -1570,3 +1570,46 @@ async def send_pre_squeeze_radar_alert(radar_data: dict):
         await dispatch_filtered_alert(f_alert_data, text)
     except Exception as e_f:
         logger.error(f"Error dispatching radar to filter subscribers: {e_f}")
+
+
+async def send_circuit_breaker_alert(paused_until_ts: float, streak_count: int, trigger_symbol: str = "") -> None:
+    """
+    Sends high-priority Telegram alert when 10 consecutive SLs occur in a day,
+    pausing trading for 60 minutes.
+    """
+    try:
+        import zoneinfo
+        tz_ist = zoneinfo.ZoneInfo("Asia/Kolkata")
+    except Exception:
+        tz_ist = timezone(timedelta(hours=5, minutes=30))
+    
+    resume_dt = datetime.fromtimestamp(paused_until_ts, tz=tz_ist)
+    resume_str = resume_dt.strftime("%I:%M %p IST")
+
+    sym_txt = f"🪙 Trigger Coin: <b>{trigger_symbol}</b>\n" if trigger_symbol else ""
+    msg = (
+        f"🚨 <b>RISK CIRCUIT BREAKER TRIGGERED</b> 🚨\n\n"
+        f"⚠️ <b>10 Consecutive Stop Losses Hit in a Day!</b>\n"
+        f"{sym_txt}"
+        f"🛑 Consecutive Loss Streak: <b>{streak_count} Trades</b>\n\n"
+        f"⏸️ <b>TRADING IS PAUSED FOR 60 MINUTES</b>\n"
+        f"⏰ Trading Resumes At: <code>{resume_str}</code>\n\n"
+        f"🛡️ <i>Capital Preservation Shield: All new scanner entries, crossovers, and breakout limit orders are frozen for 60 minutes. Active positions remain protected by exchange TP/SL brackets.</i>"
+    )
+    try:
+        await send_text_alert(msg)
+    except Exception as e:
+        logger.error(f"Failed to send circuit breaker alert: {e}")
+
+
+async def send_circuit_breaker_resumed_alert() -> None:
+    """Sends notification when 60-min circuit breaker cooldown completes."""
+    msg = (
+        f"✅ <b>CIRCUIT BREAKER COOLDOWN COMPLETE</b>\n\n"
+        f"▶️ <b>Trading and scanning have officially RESUMED.</b>\n"
+        f"🔍 Scanner is active 24/7 across all monitored pairs."
+    )
+    try:
+        await send_text_alert(msg)
+    except Exception as e:
+        logger.error(f"Failed to send circuit breaker resumed alert: {e}")

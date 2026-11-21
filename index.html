@@ -164,8 +164,23 @@
           <span class="text-lg">🛡️</span>
           <div>
             <strong class="text-emerald-400">Fresh Execution Rules:</strong>
-            All trades enter via strict Limit Orders at 10x leverage with dynamic 2.0% free margin sizing (~₹1,000 per trade on ₹50K). 30-min unfilled limit orders are automatically cancelled with zero loss. Trades book 100% full profit at Target (1.5R for standard retests, 2.2R for breakdown continuation) with zero runner retracement risk.
+            All trades enter via strict Limit Orders at 10x leverage with dynamic 2.0% free margin sizing (~₹1,000 per trade on ₹50K). 30-min unfilled limit orders are automatically cancelled with zero loss. Trades book 100% full profit at Target (1.5R for standard retests/crossovers, 2.2R for breakdown continuation). <strong>Risk Circuit Breaker:</strong> If 10 consecutive SLs occur in a day, trading is automatically paused for 60 minutes for capital preservation.
           </div>
+        </div>
+      </div>
+
+      <!-- DAILY RISK CIRCUIT BREAKER STATUS BANNER -->
+      <div id="cb-banner" class="hidden glass-card rounded-xl p-4 border border-amber-500/40 bg-amber-500/10 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl animate-pulse">⏸️</span>
+          <div>
+            <div class="text-sm font-bold text-amber-400">Risk Circuit Breaker Active: Trading Paused</div>
+            <div class="text-xs text-slate-300" id="cb-banner-desc">10 consecutive SLs hit today. System paused for 60 minutes for capital preservation. Active positions remain protected by brackets.</div>
+          </div>
+        </div>
+        <div class="text-right">
+          <span class="text-xs text-slate-400">Cooldown Remaining:</span>
+          <div class="text-base font-mono font-bold text-amber-300" id="cb-banner-timer">60m 00s</div>
         </div>
       </div>
 
@@ -1760,6 +1775,28 @@
 
     function renderLiveDashboard(data) {
       if (!data) return;
+
+      // 0. Circuit Breaker Banner
+      const cb = data.circuit_breaker || {};
+      const cbBanner = document.getElementById('cb-banner');
+      if (cbBanner) {
+        if (cb.is_paused) {
+          cbBanner.classList.remove('hidden');
+          const timerEl = document.getElementById('cb-banner-timer');
+          if (timerEl) {
+            const remSecs = Math.max(0, cb.remaining_seconds || 0);
+            const m = Math.floor(remSecs / 60);
+            const s = Math.floor(remSecs % 60);
+            timerEl.innerText = `${m}m ${s < 10 ? '0' : ''}${s}s`;
+          }
+          const descEl = document.getElementById('cb-banner-desc');
+          if (descEl && cb.reason) {
+            descEl.innerText = `${cb.reason}. System paused for 60 minutes for capital preservation. Active positions remain protected by brackets.`;
+          }
+        } else {
+          cbBanner.classList.add('hidden');
+        }
+      }
 
       const sc = data.scorecard || {};
       const wal = data.wallet || {};

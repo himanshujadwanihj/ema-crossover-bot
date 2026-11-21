@@ -151,6 +151,10 @@ def get_live_performance_payload() -> dict:
             "cancelled_at": closed_at
         })
 
+    from state import is_trading_paused, get_circuit_breaker_status
+    is_cb_paused, cb_rem_secs, cb_reason = is_trading_paused()
+    cb_status = get_circuit_breaker_status()
+
     return {
         "status": "online",
         "engine": "AlphaSniper 9/26 EMA Momentum + 1H Retest Engine",
@@ -178,6 +182,16 @@ def get_live_performance_payload() -> dict:
             "net_trade_pnl_usd": round((gross_wins - gross_losses) / 102.0, 2),
             "total_roi_trade_pct": round(((gross_wins - gross_losses) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0,
             "profit_factor": round(profit_factor, 2)
+        },
+        "circuit_breaker": {
+            "is_paused": is_cb_paused,
+            "remaining_seconds": round(cb_rem_secs, 0),
+            "remaining_minutes": round(cb_rem_secs / 60.0, 1),
+            "reason": cb_reason,
+            "consecutive_sl_count": cb_status.get("consecutive_sl_count", 0),
+            "total_sl_today": cb_status.get("total_sl_today", 0),
+            "total_tp_today": cb_status.get("total_tp_today", 0),
+            "date": cb_status.get("date", "")
         },
         "lifecycle_funnel": {
             "active_in_trade_count": len(active),
@@ -517,12 +531,26 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         # Calculate live real-time equity: Futures Wallet Margin + Funding Wallet Profit + Floating Unrealized PnL
         live_equity_inr = round(raw_total + funding_balance + total_live_unrealized_inr, 2)
 
+        from state import is_trading_paused, get_circuit_breaker_status
+        is_cb_paused, cb_rem_secs, cb_reason = is_trading_paused()
+        cb_status = get_circuit_breaker_status()
+
         payload = {
             "status": "online",
             "mode": "REAL LIVE TRADING (SHARK EXCHANGE)",
             "engine": "AlphaSniper 9/26 EMA Momentum + 1H Retest Engine (Shark Exchange Native)",
             "timestamp_utc": now_utc.isoformat(),
             "timestamp_ist": now_ist.strftime("%d %b %Y, %I:%M:%S %p IST"),
+            "circuit_breaker": {
+                "is_paused": is_cb_paused,
+                "remaining_seconds": round(cb_rem_secs, 0),
+                "remaining_minutes": round(cb_rem_secs / 60.0, 1),
+                "reason": cb_reason,
+                "consecutive_sl_count": cb_status.get("consecutive_sl_count", 0),
+                "total_sl_today": cb_status.get("total_sl_today", 0),
+                "total_tp_today": cb_status.get("total_tp_today", 0),
+                "date": cb_status.get("date", "")
+            },
             "wallet": {
                 "balance_inr": round(raw_total, 2),
                 "funding_balance_inr": round(funding_balance, 2),

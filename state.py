@@ -513,3 +513,110 @@ def mark_radar_triggered(symbol: str) -> None:
         radars[sym]["status"] = "TRIGGERED"
         radars[sym]["triggered_at"] = datetime.now(timezone.utc).isoformat()
         _save(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY RISK CIRCUIT BREAKER: 10 CONSECUTIVE STOP-LOSSES -> 60-MIN PAUSE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_today_ist_str() -> str:
+    """Returns today's date in YYYY-MM-DD format in Indian Standard Time (IST)."""
+    try:
+        import zoneinfo
+        tz_ist = zoneinfo.ZoneInfo("Asia/Kolkata")
+    except Exception:
+        tz_ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(tz_ist).strftime("%Y-%m-%d")
+
+
+def get_circuit_breaker_status() -> dict:
+    """
+    Retrieves the current circuit breaker status.
+    Automatically resets counters when a new calendar day begins.
+    """
+    state = _load()
+    cb = state.get("_CIRCUIT_BREAKER_STATE")
+    today_str = get_today_ist_str()
+    if not isinstance(cb, dict) or cb.get("date") != today_str:
+        cb = {
+            "date": today_str,
+            "consecutive_sl_count": 0,
+            "total_sl_today": 0,
+            "total_tp_today": 0,
+            "paused_until": 0.0,
+            "pause_reason": "",
+            "last_trigger_symbol": "",
+            "trigger_history": cb.get("trigger_history", []) if isinstance(cb, dict) else []
+        }
+        state["_CIRCUIT_BREAKER_STATE"] = cb
+        _save(state)
+    return cb
+
+
+def is_trading_paused() -> tuple:
+    """
+    Checks if trading is currently paused due to circuit breaker (10 consecutive SLs).
+    Returns (is_paused: bool, remaining_seconds: float, reason: str).
+    """
+    cb = get_circuit_breaker_status()
+    paused_until = float(cb.get("paused_until") or 0.0)
+    now_ts = time.time()
+    if now_ts < paused_until:
+        rem = paused_until - now_ts
+        reason = cb.get("pause_reason") or f"10 Consecutive SLs Hit ({cb.get('consecutive_sl_count', 10)} streak)"
+        return True, rem, reason
+    return False, 0.0, ""
+
+
+def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_minutes: int = 60, max_consecutive_sl: int = 10) -> tuple:
+    """
+    Records a trade outcome (SL or TP/WIN) for the daily circuit breaker.
+    - If SL: increments consecutive_sl_count. If >= max_consecutive_sl (10), pauses trading for pause_minutes (60 min).
+    - If WIN/TP/BE: resets consecutive_sl_count to 0.
+    Returns (circuit_breaker_triggered: bool, cb_state: dict).
+    """
+    state = _load()
+    cb = get_circuit_breaker_status()
+    now_ts = time.time()
+    triggered = False
+
+    if is_sl:
+        cb["consecutive_sl_count"] = int(cb.get("consecutive_sl_count", 0)) + 1
+        cb["total_sl_today"] = int(cb.get("total_sl_today", 0)) + 1
+        cb["last_trigger_symbol"] = symbol
+
+        # Check threshold (10 consecutive SLs)
+        if cb["consecutive_sl_count"] >= max_consecutive_sl:
+            cb["paused_until"] = now_ts + (pause_minutes * 60)
+            cb["pause_reason"] = f"Circuit Breaker: {cb['consecutive_sl_count']} Consecutive SLs Hit in a Day"
+            cb.setdefault("trigger_history", []).append({
+                "time_iso": datetime.now(timezone.utc).isoformat(),
+                "consecutive_sl_count": cb["consecutive_sl_count"],
+                "trigger_symbol": symbol,
+                "paused_until_ts": cb["paused_until"],
+                "pause_minutes": pause_minutes
+            })
+            triggered = True
+            logger.warning(
+                f"🚨 CIRCUIT BREAKER TRIGGERED: {cb['consecutive_sl_count']} consecutive SLs hit today. "
+                f"Trading PAUSED for {pause_minutes} minutes until {datetime.fromtimestamp(cb['paused_until']).strftime('%H:%M:%S')}!"
+            )
+    else:
+        # Win or Breakeven resets consecutive streak!
+        cb["consecutive_sl_count"] = 0
+        cb["total_tp_today"] = int(cb.get("total_tp_today", 0)) + 1
+
+    state["_CIRCUIT_BREAKER_STATE"] = cb
+    _save(state)
+    return triggered, cb
+
+
+def resume_trading_manually() -> None:
+    """Manually unpauses circuit breaker if desired."""
+    state = _load()
+    cb = get_circuit_breaker_status()
+    cb["paused_until"] = 0.0
+    cb["pause_reason"] = "Manual Resume"
+    cb["consecutive_sl_count"] = 0
+    state["_CIRCUIT_BREAKER_STATE"] = cb
+    _save(state)
