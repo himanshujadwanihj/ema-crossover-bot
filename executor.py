@@ -5,14 +5,12 @@ executor.py — Automated Trade Execution & Order Bracket Engine for Shark Excha
 Enforces Master Production Strategy:
 1. Fixed 10x Leverage on all executed trades.
 2. Dynamic 2.0% Available (Free) Margin Sizing per trade (Min ₹500 floor).
-3. 2-Tier Target Bracket Structure:
+3. Single Target Bracket Structure (User Directive: 100% Full Profit Booking at TP1):
    - 1 Entry Limit Order at Entry Price (30-min fill timeout).
-   - TP1 (70% Qty) with 0.35% Order Block Front-Running Buffer (Min 1:2.0 RR).
-   - TP2 (30% Qty Runner) at Macro Liquidity Expansion (Min 1:3.0 RR).
-   - 1 Stop-Loss STOP_LIMIT Order placed strictly below 26 EMA with 0.25*ATR buffer.
-4. Step Trailing Stop-Loss Engine:
-   - TP1 Hit: SL Order moved to Cost-to-Cost (Breakeven Shield) for remaining 30% Qty.
-   - 12-Hour Stale Runner Rule: Closes 30% runner at market if 12h elapse without hitting TP2/SL.
+   - TP1 (100% Full Position Quantity) @ exact Target R (1.5R for retest/cross/reversal, 2.2R for breakdown/breakout).
+   - 1 Stop-Loss STOP_LIMIT Order placed strictly with 26 EMA buffer (+0.25*ATR).
+4. 100% Cash-In-Wallet Exit:
+   - Positions close 100% at TP1 with zero runner retracement and zero trailing giveback.
    - 20-Hour Position Timeout: Squares off stagnant trades at live market price.
 5. Strict Single Order Margin Shield:
    - Maximum 1 active order or open position per coin across exchange.
@@ -2544,10 +2542,9 @@ class SharkExchangeExecutor:
         if initial_qty <= 0:
             initial_qty = real_qty if real_qty > 0 else 1.0
 
-        if tp1_qty <= 0:
-            tp1_qty = round_coin_qty(clean_sym, initial_qty * 0.70, price=tp1)
-        if tp3_qty <= 0:
-            tp3_qty = round_coin_qty(clean_sym, initial_qty - tp1_qty, price=tp3 or tp1)
+        # USER DIRECTIVE: 100% Full Profit Booking at TP1 (No 70/30, No Runner Retracement)
+        tp1_qty = initial_qty
+        tp3_qty = 0.0
 
         def calc_pnl(qty, exit_px, entry_px, side):
             """Real PnL = qty × (exit - entry) for LONG, qty × (entry - exit) for SHORT"""

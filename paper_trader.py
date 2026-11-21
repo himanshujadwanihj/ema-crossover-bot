@@ -617,87 +617,42 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                 asyncio.create_task(notify_telegram(msg))
             return True, True
 
-        # 3. TAKE-PROFIT BRACKETS CHECK
-        updated = False
-        # TP1 (70% Booked or 100% in Chop Regime)
+        # 3. TAKE-PROFIT BRACKETS CHECK (100% Full Profit Booking at TP1 per User Directive)
         if not pos["tp1_hit"] and p_high >= tp1:
             pos["tp1_hit"] = True
             pos["tp1_hit_at"] = now_utc.isoformat()
 
-            if is_ranging:
-                # 100% Position closed at TP1 in chop regime
-                tp1_gross = pos_notional * ((tp1 - entry) / entry)
-                taker_fee = pos_notional * TAKER_FEE_RATE
-                tp1_net = tp1_gross - taker_fee
-                pos["tp1_realized_pnl"] = tp1_net
-                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
-                wallet["balance"] += tp1_net
-                wallet["realized_pnl"] += tp1_net
-                wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
-                pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                pos["remaining_qty"] = 0.0
-                wallet["wins"] += 1
-                wallet["total_trades"] += 1
-                pos["status"] = "FULL_WIN_TP1_CHOP"
-                pos["closed_at"] = now_utc.isoformat()
-                closed.append(pos)
+            # 100% Position closed at TP1
+            tp1_gross = pos_notional * ((tp1 - entry) / entry)
+            taker_fee = pos_notional * TAKER_FEE_RATE
+            tp1_net = tp1_gross - taker_fee
+            pos["tp1_realized_pnl"] = tp1_net
+            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
+            wallet["balance"] += tp1_net
+            wallet["realized_pnl"] += tp1_net
+            wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
+            pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
+            pos["remaining_qty"] = 0.0
+            wallet["wins"] += 1
+            wallet["total_trades"] += 1
+            pos["status"] = "FULL_WIN_TP1_100_PCT"
+            pos["closed_at"] = now_utc.isoformat()
+            closed.append(pos)
 
-                roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
-                msg = (
-                    f"🏆 <b>PAPER TARGET HIT — FULL WIN (RANGE REGIME) 🚀{tick_tag}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<b>Asset:</b> {symbol} [BUY]\n"
-                    f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
-                    f"<b>Realized PnL (100%):</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
-                    f"💡 <b>Market Regime:</b> Choppy/Range (ADX {adx_val:.1f} < 20) — 100% Cashed Out Safely!\n"
-                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                if not pos.get("closed_alert_sent"):
-                    pos["closed_alert_sent"] = True
-                    asyncio.create_task(notify_telegram(msg))
-                return True, True
-            else:
-                # Trending: 70% Booked at TP1, 30% Runner
-                tp1_gross = (pos_notional * 0.70) * ((tp1 - entry) / entry)
-                taker_fee = (pos_notional * 0.70) * TAKER_FEE_RATE
-                tp1_net = tp1_gross - taker_fee
-                pos["tp1_realized_pnl"] = tp1_net
-                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
-                wallet["balance"] += tp1_net
-                wallet["realized_pnl"] += tp1_net
-                wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
-                pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                pos["remaining_qty"] = pos.get("initial_qty", pos.get("qty", 0.0)) * 0.30
-
-                # Compute CTC + 0.4% / +0.4R Profit-Lock SL
-                risk = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-                profit_lock_sl = max(entry * 1.004, entry + (0.40 * risk))
-                if profit_lock_sl >= tp1:
-                    profit_lock_sl = entry + (0.20 * risk)
-                profit_lock_sl = max(profit_lock_sl, entry * 1.004)
-
-                # Clamp with liquidation shield
-                profit_lock_sl = enforce_sl_above_liquidation(symbol, entry, profit_lock_sl, signal, LEVERAGE, liq)
-                pos["current_sl"] = profit_lock_sl
-                pos["profit_lock_sl"] = profit_lock_sl
-                updated = True
-
-                roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
-                msg = (
-                    f"🎯 <b>PAPER TP1 HIT ✅ (70% Booked){tick_tag}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<b>Asset:</b> {symbol} [BUY]\n"
-                    f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
-                    f"<b>Realized PnL:</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
-                    f"🛡️ <b>SL Trailed to +0.4R Profit-Lock ({format_price(profit_lock_sl, symbol)})</b>\n"
-                    f"🚀 <b>Remaining 30% Runner:</b> Risk-free aiming for TP2 {format_price(target_tp3, symbol)}!\n"
-                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                if not pos.get("tp1_alert_sent"):
-                    pos["tp1_alert_sent"] = True
-                    asyncio.create_task(notify_telegram(msg))
+            roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
+            msg = (
+                f"🏆 <b>PAPER TARGET HIT — 100% FULL WIN 🚀{tick_tag}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Asset:</b> {symbol} [BUY]\n"
+                f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
+                f"<b>Realized PnL (100%):</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
+                f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            if not pos.get("closed_alert_sent"):
+                pos["closed_alert_sent"] = True
+                asyncio.create_task(notify_telegram(msg))
+            return True, True
 
         # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (BUY - Option 2: 4R, 5R, 6R+)
         if pos.get("tp1_hit", False) and not pos.get("tp3_hit", False):
@@ -877,87 +832,42 @@ def _process_pos_price_triggers(pos: dict, wallet: dict, closed: list, p_high: f
                 asyncio.create_task(notify_telegram(msg))
             return True, True
 
-        # 3. TAKE-PROFIT BRACKETS CHECK FOR SELL
-        updated = False
-        # TP1 (70% Booked or 100% in Chop Regime)
+        # 3. TAKE-PROFIT BRACKETS CHECK FOR SELL (100% Full Profit Booking at TP1 per User Directive)
         if not pos["tp1_hit"] and p_low <= tp1:
             pos["tp1_hit"] = True
             pos["tp1_hit_at"] = now_utc.isoformat()
 
-            if is_ranging:
-                # 100% Position closed at TP1 in chop regime
-                tp1_gross = pos_notional * ((entry - tp1) / entry)
-                taker_fee = pos_notional * TAKER_FEE_RATE
-                tp1_net = tp1_gross - taker_fee
-                pos["tp1_realized_pnl"] = tp1_net
-                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
-                wallet["balance"] += tp1_net
-                wallet["realized_pnl"] += tp1_net
-                wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
-                pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                pos["remaining_qty"] = 0.0
-                wallet["wins"] += 1
-                wallet["total_trades"] += 1
-                pos["status"] = "FULL_WIN_TP1_CHOP"
-                pos["closed_at"] = now_utc.isoformat()
-                closed.append(pos)
+            # 100% Position closed at TP1
+            tp1_gross = pos_notional * ((entry - tp1) / entry)
+            taker_fee = pos_notional * TAKER_FEE_RATE
+            tp1_net = tp1_gross - taker_fee
+            pos["tp1_realized_pnl"] = tp1_net
+            pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
+            wallet["balance"] += tp1_net
+            wallet["realized_pnl"] += tp1_net
+            wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
+            pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
+            pos["remaining_qty"] = 0.0
+            wallet["wins"] += 1
+            wallet["total_trades"] += 1
+            pos["status"] = "FULL_WIN_TP1_100_PCT"
+            pos["closed_at"] = now_utc.isoformat()
+            closed.append(pos)
 
-                roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
-                msg = (
-                    f"🏆 <b>PAPER TARGET HIT — FULL WIN (RANGE REGIME) 🚀{tick_tag}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<b>Asset:</b> {symbol} [SELL]\n"
-                    f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
-                    f"<b>Realized PnL (100%):</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
-                    f"💡 <b>Market Regime:</b> Choppy/Range (ADX {adx_val:.1f} < 20) — 100% Cashed Out Safely!\n"
-                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                if not pos.get("closed_alert_sent"):
-                    pos["closed_alert_sent"] = True
-                    asyncio.create_task(notify_telegram(msg))
-                return True, True
-            else:
-                # Trending: 70% Booked at TP1, 30% Runner
-                tp1_gross = (pos_notional * 0.70) * ((entry - tp1) / entry)
-                taker_fee = (pos_notional * 0.70) * TAKER_FEE_RATE
-                tp1_net = tp1_gross - taker_fee
-                pos["tp1_realized_pnl"] = tp1_net
-                pos["cumulative_pnl"] = pos.get("cumulative_pnl", 0.0) + tp1_net
-                wallet["balance"] += tp1_net
-                wallet["realized_pnl"] += tp1_net
-                wallet["total_fees_paid"] = wallet.get("total_fees_paid", 0.0) + taker_fee
-                pos["fee_paid"] = pos.get("fee_paid", 0.0) + taker_fee
-                pos["remaining_qty"] = pos.get("initial_qty", pos.get("qty", 0.0)) * 0.30
-
-                # Compute CTC - 0.4% / -0.4R Profit-Lock SL
-                risk = abs(entry - initial_sl) if (initial_sl and initial_sl != entry) else (entry * 0.015)
-                profit_lock_sl = min(entry * 0.996, entry - (0.40 * risk))
-                if profit_lock_sl <= tp1:
-                    profit_lock_sl = entry - (0.20 * risk)
-                profit_lock_sl = min(profit_lock_sl, entry * 0.996)
-
-                # Clamp with liquidation shield
-                profit_lock_sl = enforce_sl_above_liquidation(symbol, entry, profit_lock_sl, signal, LEVERAGE, liq)
-                pos["current_sl"] = profit_lock_sl
-                pos["profit_lock_sl"] = profit_lock_sl
-                updated = True
-
-                roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
-                msg = (
-                    f"🎯 <b>PAPER TP1 HIT ✅ (70% Booked){tick_tag}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<b>Asset:</b> {symbol} [SELL]\n"
-                    f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
-                    f"<b>Realized PnL:</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
-                    f"🛡️ <b>SL Trailed to +0.4R Profit-Lock ({format_price(profit_lock_sl, symbol)})</b>\n"
-                    f"🚀 <b>Remaining 30% Runner:</b> Risk-free aiming for TP2 {format_price(target_tp3, symbol)}!\n"
-                    f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                if not pos.get("tp1_alert_sent"):
-                    pos["tp1_alert_sent"] = True
-                    asyncio.create_task(notify_telegram(msg))
+            roi_pct = ((wallet["balance"] - wallet["initial_capital"]) / wallet["initial_capital"]) * 100.0
+            msg = (
+                f"🏆 <b>PAPER TARGET HIT — 100% FULL WIN 🚀{tick_tag}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Asset:</b> {symbol} [SELL]\n"
+                f"🎯 <b>Target:</b> {format_price(tp1, symbol)}\n"
+                f"<b>Realized PnL (100%):</b> +₹{tp1_net:,.2f} INR (Fee: ₹{taker_fee:.2f})\n"
+                f"💼 <b>Updated Wallet Balance:</b> ₹{wallet['balance']:,.2f} INR ({roi_pct:+.2f}%)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            if not pos.get("closed_alert_sent"):
+                pos["closed_alert_sent"] = True
+                asyncio.create_task(notify_telegram(msg))
+            return True, True
 
         # Point 2: Multi-Stage 'Anti-Giveback' Stepped Trailing Engine Ratchet (SELL - Option 2: 4R, 5R, 6R+)
         if pos.get("tp1_hit", False) and not pos.get("tp3_hit", False):
