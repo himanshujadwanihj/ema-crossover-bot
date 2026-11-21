@@ -249,7 +249,7 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         elif default_sl and default_sl < entry:
             ema_26_val = default_sl
 
-        if ema_26_val and ema_26_val < entry:
+        if ema_26_val:
             ema_sl = ema_26_val - (0.25 * atr_val) if atr_val > 0 else (ema_26_val * 0.9975)
             # Guarantee SL is below both recent swing and 26 EMA baseline
             candidate_sl = min(sweep_sl, ema_sl)
@@ -261,7 +261,15 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         sl = min(candidate_sl, min_sl_dist_floor)
 
         if sl >= entry: sl = np.min(lows[-5:]) * 0.998
-        if sl < min_sl_floor: sl = min_sl_floor
+        
+        # STRUCTURAL INVALIDATION GUARANTEE:
+        # A LONG SL must ALWAYS sit strictly BELOW 26 EMA with 0.25*ATR buffer!
+        # sl_cap_pct must NEVER drag SL above 26 EMA.
+        if ema_26_val:
+            ema_sl_bound = ema_26_val - (0.25 * atr_val if atr_val > 0 else ema_26_val * 0.0025)
+            sl = min(sl, ema_sl_bound)
+        elif sl < min_sl_floor:
+            sl = min_sl_floor
         if sl >= entry:
             sl = entry * 0.990
 
@@ -331,7 +339,7 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         elif default_sl and default_sl > entry:
             ema_26_val = default_sl
 
-        if ema_26_val and ema_26_val > entry:
+        if ema_26_val:
             ema_sl = ema_26_val + (0.25 * atr_val) if atr_val > 0 else (ema_26_val * 1.0025)
             # Guarantee SL is above both recent swing and 26 EMA baseline
             candidate_sl = max(sweep_sl, ema_sl)
@@ -343,8 +351,15 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         sl = max(candidate_sl, max_sl_dist_ceiling)
 
         if sl <= entry: sl = np.max(highs[-5:]) * 1.002
-        max_sl_cap = entry * (1 + sl_cap_pct)
-        if sl > max_sl_cap: sl = max_sl_cap
+
+        # STRUCTURAL INVALIDATION GUARANTEE:
+        # A SHORT SL must ALWAYS sit strictly ABOVE 26 EMA with 0.25*ATR buffer!
+        # sl_cap_pct must NEVER drag SL below 26 EMA.
+        if ema_26_val:
+            ema_sl_bound = ema_26_val + (0.25 * atr_val if atr_val > 0 else ema_26_val * 0.0025)
+            sl = max(sl, ema_sl_bound)
+        elif sl > (entry * (1 + sl_cap_pct)):
+            sl = entry * (1 + sl_cap_pct)
         if sl <= entry:
             sl = entry * 1.010
 

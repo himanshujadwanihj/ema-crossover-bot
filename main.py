@@ -481,10 +481,18 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 # UPGRADE 2 (Ike Trading Rule): Breakout Level Retest / Pullback Entry Engine
                                 # USER DIRECTIVE: Exact 2.2R target policy for Breakdown Continuation trades!
                                 target_r = 2.2
+                                from indicators import _compute_indicators
+                                df_1h_ind = _compute_indicators(df_1h)
+                                ema_26_1h = float(df_1h_ind['ema_26'].iloc[-1]) if 'ema_26' in df_1h_ind and not pd.isna(df_1h_ind['ema_26'].iloc[-1]) else None
+                                atr_1h = float(df_1h_ind['atr'].iloc[-1]) if 'atr' in df_1h_ind and not pd.isna(df_1h_ind['atr'].iloc[-1]) else (candle_close * 0.005)
+
                                 if sq_signal == 'BUY':
                                     retest_target = range_high * 1.0015
                                     entry = min(candle_close, retest_target) if candle_close < range_high * 1.004 else retest_target
                                     sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                    # Guarantee BUY SL is strictly BELOW 1H 26 EMA with 0.25*ATR buffer
+                                    if ema_26_1h:
+                                        sl = min(sl, ema_26_1h - (0.25 * atr_1h))
                                     risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                     tp1 = round_price(symbol, entry + (target_r * risk))
                                     tp2 = round_price(symbol, entry + (3.2 * risk))
@@ -493,19 +501,19 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     retest_target = range_low * 0.9985
                                     entry = max(candle_close, retest_target) if candle_close > range_low * 0.996 else retest_target
                                     sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                    # Guarantee SELL SL is strictly ABOVE 1H 26 EMA with 0.25*ATR buffer
+                                    if ema_26_1h:
+                                        sl = max(sl, ema_26_1h + (0.25 * atr_1h))
                                     risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                     tp1 = round_price(symbol, entry - (target_r * risk))
                                     tp2 = round_price(symbol, entry - (3.2 * risk))
                                     cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)"
 
-                                from indicators import find_liquidity_pool_targets, _compute_indicators
                                 dyn_sl = sl
                                 rr1 = target_r
                                 rr2 = 3.2
                                 lbl1 = f"{target_r}R Target"
                                 lbl2 = "3.2R Extended"
-                                
-                                df_1h_ind = _compute_indicators(df_1h)
                                 sq_rsi = float(df_1h_ind['rsi'].iloc[-2]) if 'rsi' in df_1h_ind and not pd.isna(df_1h_ind['rsi'].iloc[-2]) else 50.0
 
                                 from telegram_bot import queue_alert
