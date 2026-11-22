@@ -157,7 +157,7 @@ def get_live_performance_payload() -> dict:
 
     return {
         "status": "online",
-        "engine": "AlphaSniper 9/26 EMA Momentum + 1H Retest Engine",
+        "engine": "AlphaSniper Proprietary Institutional Quantitative Engine",
         "timestamp_utc": now_utc.isoformat(),
         "timestamp_ist": now_ist.strftime("%d %b %Y, %I:%M:%S %p IST"),
         "wallet": {
@@ -538,7 +538,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         payload = {
             "status": "online",
             "mode": "REAL LIVE TRADING (SHARK EXCHANGE)",
-            "engine": "AlphaSniper 9/26 EMA Momentum + 1H Retest Engine (Shark Exchange Native)",
+            "engine": "AlphaSniper Proprietary Institutional Quantitative Engine (Shark Exchange Native)",
             "timestamp_utc": now_utc.isoformat(),
             "timestamp_ist": now_ist.strftime("%d %b %Y, %I:%M:%S %p IST"),
             "circuit_breaker": {
