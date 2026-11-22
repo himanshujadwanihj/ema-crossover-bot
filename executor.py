@@ -839,6 +839,7 @@ class SharkExchangeExecutor:
                     logger.info(f"Placed trailed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
 
             if sl_updated or tp_updated:
+                self._tp_sl_heal_lock[clean_sym + "_continuation_trail"] = time.time()
                 # Update local state
                 from state import get_latest_symbol_state, _load, _save
                 st_map = _load()

@@ -1585,14 +1585,29 @@ async def main_loop():
                                     sig = cand["signal"]
                                     stars = cand.get("aligned_count", 0)
 
-                                    # Verify duplicate check before submitting order (allows trend scale-in if TP1 already booked)
-                                    if await executor.has_active_trade_on_exchange(session, sym, signal=sig):
+                                    # USER DIRECTIVE: Same coin continuation trailing guard
+                                    # If an active open position already exists in the SAME direction, pass to executor to trail SL & TP forward!
+                                    # If opposite direction or duplicate resting entry order exists, shield to avoid duplicate exposure.
+                                    active_pos = await executor.get_open_position(session, sym)
+                                    is_same_dir_continuation = False
+                                    if active_pos:
+                                        pos_qty = abs(float(active_pos.get("quantity") or active_pos.get("positionAmount") or 0))
+                                        if pos_qty > 0:
+                                            pos_dir_raw = str(active_pos.get("positionType") or active_pos.get("positionSide") or active_pos.get("side") or "").upper()
+                                            pos_dir = "BUY" if pos_dir_raw in ("LONG", "BUY") else "SELL"
+                                            sig_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
+                                            if pos_dir == sig_dir:
+                                                is_same_dir_continuation = True
+
+                                    # Verify duplicate check before submitting order (bypassed if same-direction continuation trailing)
+                                    if not is_same_dir_continuation and await executor.has_active_trade_on_exchange(session, sym, signal=sig):
                                         dup_reason = f"Active trade or resting order already exists on Shark Exchange for {sym}. Single Order Margin Shield prevents duplicate overlapping positions."
                                         logger.info(f"Skipping {sym} — {dup_reason}")
                                         await notify_signal_rejection(sym, sig, dup_reason, cand=cand)
                                         continue
 
-                                    logger.info(f"⚡ BULK TRADE EXECUTE: {sym} [{sig}] ({stars}/4 Stars Priority)")
+                                    action_desc = "CONTINUATION TRAIL SL/TP" if is_same_dir_continuation else "BULK TRADE EXECUTE"
+                                    logger.info(f"⚡ {action_desc}: {sym} [{sig}] ({stars}/4 Stars Priority)")
                                     
                                     shark_res = await executor.execute_signal_trade(
                                         session, sym, sig, cand["entry"], cand["sl"], 
@@ -1607,6 +1622,8 @@ async def main_loop():
                                         t_qty = shark_res.get("total_qty", 0)
                                         update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
                                         logger.info(f"Marked shark_order_placed=True for {state_key}")
+                                    elif shark_res and shark_res.get("status") == "trailed":
+                                        logger.info(f"✅ Position for {sym} successfully trailed SL/TP on continuation signal.")
                                     elif shark_res and shark_res.get("status") in ("skipped", "error"):
                                         fail_reason = shark_res.get("reason", "Broker execution rejected")
                                         await notify_signal_rejection(sym, sig, f"Shark Broker: {fail_reason}", cand=cand)
