@@ -595,7 +595,7 @@ def get_circuit_breaker_status() -> dict:
 
 def is_trading_paused() -> tuple:
     """
-    Checks if trading is currently paused due to circuit breaker (10 consecutive SLs).
+    Checks if trading is currently paused due to circuit breaker (5 consecutive SLs).
     Returns (is_paused: bool, remaining_seconds: float, reason: str).
     """
     cb = get_circuit_breaker_status()
@@ -603,15 +603,15 @@ def is_trading_paused() -> tuple:
     now_ts = time.time()
     if now_ts < paused_until:
         rem = paused_until - now_ts
-        reason = cb.get("pause_reason") or f"10 Consecutive SLs Hit ({cb.get('consecutive_sl_count', 10)} streak)"
+        reason = cb.get("pause_reason") or f"5 Consecutive SLs Hit ({cb.get('consecutive_sl_count', 5)} streak)"
         return True, rem, reason
     return False, 0.0, ""
 
 
-def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_minutes: int = 60, max_consecutive_sl: int = 10) -> tuple:
+def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_minutes: int = 60, max_consecutive_sl: int = 5) -> tuple:
     """
     Records a trade outcome (SL or TP/WIN) for the daily circuit breaker.
-    - If SL: increments consecutive_sl_count. If >= max_consecutive_sl (10), pauses trading for pause_minutes (60 min).
+    - If SL: increments consecutive_sl_count. If >= max_consecutive_sl (5), pauses trading for pause_minutes (60 min).
     - If WIN/TP/BE: resets consecutive_sl_count to 0.
     Returns (circuit_breaker_triggered: bool, cb_state: dict).
     """

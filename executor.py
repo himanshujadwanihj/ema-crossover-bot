@@ -2020,9 +2020,9 @@ class SharkExchangeExecutor:
                                 status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
                                 is_sl_outcome = True
 
-                            # DAILY RISK CIRCUIT BREAKER: 10 consecutive SLs -> 60-min pause
+                            # DAILY RISK CIRCUIT BREAKER: 5 consecutive SLs -> 60-min pause
                             from state import record_trade_result
-                            cb_triggered, cb_state = record_trade_result(is_sl=is_sl_outcome, symbol=c_sym, pnl=pnl_inr, pause_minutes=60, max_consecutive_sl=10)
+                            cb_triggered, cb_state = record_trade_result(is_sl=is_sl_outcome, symbol=c_sym, pnl=pnl_inr, pause_minutes=60, max_consecutive_sl=5)
                             if cb_triggered:
                                 from telegram_bot import send_circuit_breaker_alert
                                 await send_circuit_breaker_alert(cb_state["paused_until"], cb_state["consecutive_sl_count"], c_sym)
@@ -2215,6 +2215,35 @@ class SharkExchangeExecutor:
                 live_sl_order_p = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
                 initial_sl_val = live_sl_order_p or (float(state_entry.get("initial_sl") or 0) if state_entry else 0)
                 risk_step = abs(entry_price - initial_sl_val) if (initial_sl_val > 0 and initial_sl_val != entry_price) else (entry_price * 0.015)
+
+                # USER DIRECTIVE: Stealth Breakeven Lock at +1.20% Unrealized Profit
+                # Ensures no winning trade can ever reverse into an SL loss
+                if mark_p > 0 and entry_price > 0 and pos_qty_abs > 0:
+                    unrealized_pct = ((mark_p - entry_price) / entry_price * 100) if direction == "BUY" else ((entry_price - mark_p) / entry_price * 100)
+                    is_sl_behind_entry = (direction == "BUY" and live_sl_order_p < entry_price) or (direction == "SELL" and (live_sl_order_p > entry_price or live_sl_order_p == 0))
+                    
+                    if unrealized_pct >= 1.20 and is_sl_behind_entry:
+                        be_cooldown_key = f"{sym}_stealth_be"
+                        last_be_t = self._tp_sl_heal_lock.get(be_cooldown_key, 0)
+                        if time.time() - last_be_t > 300: # 5 min cooldown
+                            ctc_sl = round_price(sym, entry_price * 1.0005) if direction == "BUY" else round_price(sym, entry_price * 0.9995)
+                            logger.info(f"🛡️ STEALTH BREAKEVEN LOCK: {sym} reached +{unrealized_pct:.2f}% profit. Moving SL from {live_sl_order_p} -> CTC ({ctc_sl})")
+                            be_ok = await self.modify_stop_loss(session, sym, direction, ctc_sl, pos_qty_abs, is_trailed=True)
+                            if be_ok:
+                                self._tp_sl_heal_lock[be_cooldown_key] = time.time()
+                                live_sl_order_p = ctc_sl
+                                from telegram_bot import send_text_alert
+                                be_msg = (
+                                    f"🛡️ <b>SHARK STEALTH BREAKEVEN LOCK ACTIVATED 🤝</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"<b>Asset:</b> {sym} [{direction}]\n"
+                                    f"<b>Entry Price:</b> ${entry_price}\n"
+                                    f"<b>Current Price:</b> ${mark_p} (<b>+{unrealized_pct:.2f}% Profit</b>)\n"
+                                    f"<b>New Stop-Loss:</b> <b>${ctc_sl}</b> (Cost-to-Cost Secured)\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"<i>Trade is now completely Risk-Free. Loss is 100% impossible!</i>"
+                                )
+                                await send_text_alert(be_msg)
 
                 if not tp1 or not tp2 or not tp3:
                     if direction == "BUY":
