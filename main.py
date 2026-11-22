@@ -1682,27 +1682,6 @@ async def main_loop():
                                             if pos_dir == sig_dir:
                                                 is_same_dir_continuation = True
 
-                                    # USER DIRECTIVE: Directional Basket Exposure Shield (Max 3 same-direction positions)
-                                    # Prevents synchronized multi-altcoin drawdowns
-                                    if not is_same_dir_continuation:
-                                        all_shark_pos = await executor.get_open_positions(session)
-                                        cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
-                                        same_dir_count = 0
-                                        active_same_syms = []
-                                        for p_check in all_shark_pos:
-                                            p_q = abs(float(p_check.get("quantity") or p_check.get("positionAmount") or 0))
-                                            if p_q > 0:
-                                                p_dr = str(p_check.get("positionType") or p_check.get("positionSide") or p_check.get("side") or "").upper()
-                                                p_d = "BUY" if p_dr in ("LONG", "BUY") else "SELL"
-                                                if p_d == cand_dir:
-                                                    same_dir_count += 1
-                                                    active_same_syms.append(executor.clean_sym(p_check))
-                                        if same_dir_count >= 3:
-                                            basket_reason = f"Directional Basket Limit Reached (Already {same_dir_count} active {cand_dir} positions: {', '.join(active_same_syms)}). Suppressed to prevent correlated portfolio drawdown."
-                                            logger.info(f"Skipping {sym} — {basket_reason}")
-                                            await notify_signal_rejection(sym, sig, basket_reason, cand=cand)
-                                            continue
-
                                     # Verify duplicate check before submitting order (bypassed if same-direction continuation trailing)
                                     if not is_same_dir_continuation and await executor.has_active_trade_on_exchange(session, sym, signal=sig):
                                         dup_reason = f"Active trade or resting order already exists on Shark Exchange for {sym}. Single Order Margin Shield prevents duplicate overlapping positions."
