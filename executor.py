@@ -801,15 +801,21 @@ class SharkExchangeExecutor:
                     sl_updated = True
                     self._tp_sl_heal_lock[clean_sym + "_continuation_trail"] = time.time()
 
-            # USER DIRECTIVE: Single Fixed 1.5R TP target policy.
-            # Never push TP further away into the distance on continuation signals so the target gets hit!
-            # Only place TP if completely missing on exchange (current_tp == 0).
+            # USER DIRECTIVE (Updated):
+            # When a new continuation signal arrives, ALWAYS update/trail both SL AND TP:
+            # - For BUY: new TP >= current_tp * 1.002 (extends target upwards into trend)
+            # - For SELL: new TP <= current_tp * 0.998 (extends target downwards into trend)
+            # - If TP is missing (current_tp == 0), restore it immediately.
             is_better_tp = False
             if current_tp == 0:
                 is_better_tp = True
+            elif sig_dir == "BUY" and clean_new_tp >= current_tp * 1.002:
+                is_better_tp = True
+            elif sig_dir == "SELL" and clean_new_tp <= current_tp * 0.998:
+                is_better_tp = True
 
             if is_better_tp:
-                logger.info(f"🔄 CONTINUATION RESTORE MISSING TP: {clean_sym} [{sig_dir}] placing at {clean_new_tp}")
+                logger.info(f"🔄 CONTINUATION TRAIL TP: {clean_sym} [{sig_dir}] TP {current_tp} → {clean_new_tp}")
                 # Cancel existing TP orders
                 for o in tp_orders:
                     cid = o.get("clientOrderId")
@@ -830,7 +836,7 @@ class SharkExchangeExecutor:
                 st_tp, res_tp = await self.shark_post(session, "/v1/order/place-order", tp_payload)
                 if st_tp in (200, 201):
                     tp_updated = True
-                    logger.info(f"Placed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
+                    logger.info(f"Placed trailed 100% TP for {clean_sym} at {clean_new_tp} qty={pos_qty}")
 
             if sl_updated or tp_updated:
                 # Update local state
