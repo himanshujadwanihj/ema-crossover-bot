@@ -347,16 +347,19 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         
             if outcome:
                 update_trade_outcome(key, outcome)
-                # DAILY RISK CIRCUIT BREAKER: 5 consecutive SLs -> 60-min pause
-                if outcome in ("SL", "LOSS"):
-                    from state import record_trade_result
-                    cb_trig, cb_st = record_trade_result(is_sl=True, symbol=symbol, pause_minutes=60, max_consecutive_sl=5)
-                    if cb_trig:
-                        from telegram_bot import send_circuit_breaker_alert
-                        await send_circuit_breaker_alert(cb_st["paused_until"], cb_st["consecutive_sl_count"], symbol)
-                elif outcome in ("WIN", "TP1", "TP2", "TP3"):
-                    from state import record_trade_result
-                    record_trade_result(is_sl=False, symbol=symbol)
+                # DAILY RISK CIRCUIT BREAKER: Only track if live auto-trading is NOT active.
+                # (When live trading is active, executor.py is the 100% authoritative real broker source).
+                from config import AUTO_TRADING_ENABLED
+                if not AUTO_TRADING_ENABLED:
+                    if outcome in ("SL", "LOSS"):
+                        from state import record_trade_result
+                        cb_trig, cb_st = record_trade_result(is_sl=True, symbol=symbol, pause_minutes=60, max_consecutive_sl=5)
+                        if cb_trig:
+                            from telegram_bot import send_circuit_breaker_alert
+                            await send_circuit_breaker_alert(cb_st["paused_until"], cb_st["consecutive_sl_count"], symbol)
+                    elif outcome in ("WIN", "TP1", "TP2", "TP3"):
+                        from state import record_trade_result
+                        record_trade_result(is_sl=False, symbol=symbol)
                 # Disabled cancel_all_open_orders: Shark natively cleans up POSITION-attached orders on close.
                 # Note: Win & Loss outcome summary alerts and scoreboards disabled per user directive.
                 # Only Crossover Signal Alert and Entry Hit Alert remain active.
