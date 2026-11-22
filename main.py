@@ -877,6 +877,13 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     "rr2": rr2 or 1.5,
                     "adx": cross.get("adx"),
                     "rsi": rsi,
+                    "volume": cross.get("volume"),
+                    "volume_sma": cross.get("volume_sma"),
+                    "macd_line": cross.get("macd_line"),
+                    "macd_signal_val": cross.get("macd_signal"),
+                    "body_ratio": cross.get("body_ratio"),
+                    "tf_label": label,
+                    "cross_type": cross_type,
                 }
                 # BUG #1 FIX: Append instead of returning immediately.
                 # Collects signals from ALL timeframes (1H + 4H + 1D all captured).
@@ -1013,14 +1020,31 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
     rsi_str = f" | 📊 <b>RSI:</b> <code>{float(rsi_val):.1f}</code>" if rsi_val is not None else ""
     entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{entry_p}</code>" if entry_p else ""
     
+    score_val = cand.get("quality_score") or (cand.get("analysis") or {}).get("score")
+    score_verdict = (cand.get("analysis") or {}).get("verdict")
+    comps = (cand.get("analysis") or {}).get("components") or {}
+    
+    score_block = ""
+    if score_val is not None:
+        comp_lines = ""
+        if comps:
+            comp_lines = (
+                f"\n📊 <b>Score Breakdown:</b>\n"
+                f"  • HTF Trend: <code>{comps.get('htf', 0)}/20</code> | RSI: <code>{comps.get('rsi', 0)}/20</code>\n"
+                f"  • Volume Surge: <code>{comps.get('volume', 0)}/15</code> | ADX Trend: <code>{comps.get('adx', 0)}/15</code>\n"
+                f"  • MACD: <code>{comps.get('macd', 0)}/10</code> | Candle Body: <code>{comps.get('body', 0)}/10</code>\n"
+                f"  • Session: <code>{comps.get('session', 0)}/10</code>"
+            )
+        score_block = f"\n🧠 <b>AI Quality Score:</b> <code>{score_val}/100</code> ({score_verdict}){comp_lines}"
+
     msg = (
         f"🛡️ <b>SHARK AUTO-TRADE FILTER NOTICE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 <b>Pair:</b> <code>{symbol}</code> [<b>{signal.upper()}</b>]\n"
-        f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{entry_str}\n"
-        f"🚫 <b>Execution Status:</b> Order Not Placed\n"
+        f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{entry_str}{score_block}\n"
+        f"🚫 <b>Execution Status:</b> Order Suppressed by Shield\n"
         f"📋 <b>Exact Reason:</b> {reason}\n\n"
-        f"💡 <i>Signal was sent to Scanner Channel for manual review, but auto-order was suppressed by the safety shield.</i>\n"
+        f"💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
@@ -1533,7 +1557,44 @@ async def main_loop():
                                                 return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
                                     except (ValueError, TypeError):
                                         pass
-                                return True, "Eligible"
+                                # STRICT USER DIRECTIVE: Multi-Factor AI Quality Score >= 75 Hard Gate
+                                from signal_analyser import analyse_signal
+                                f_rsi_val = None
+                                if rsi is not None:
+                                    try:
+                                        f_rsi_val = float(rsi)
+                                    except (ValueError, TypeError):
+                                        pass
+
+                                analysis = analyse_signal(
+                                    symbol=sym,
+                                    signal=sig,
+                                    rsi=f_rsi_val,
+                                    adx=c.get("adx"),
+                                    volume=c.get("volume"),
+                                    volume_sma=c.get("volume_sma"),
+                                    macd_line=c.get("macd_line"),
+                                    macd_signal_val=c.get("macd_signal_val"),
+                                    body_ratio=c.get("body_ratio"),
+                                    aligned_count=stars,
+                                    tf_label=c.get("tf_label", "1H"),
+                                    cross_type=c.get("cross_type", ""),
+                                )
+                                quality_score = int(analysis.get("score", 0))
+                                verdict = analysis.get("verdict", "N/A")
+                                c["quality_score"] = quality_score
+                                c["analysis"] = analysis
+
+                                if quality_score < 75:
+                                    comps = analysis.get("components", {})
+                                    comp_summary = (
+                                        f"HTF:{comps.get('htf',0)}/20, RSI:{comps.get('rsi',0)}/20, "
+                                        f"Vol:{comps.get('volume',0)}/15, ADX:{comps.get('adx',0)}/15, "
+                                        f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
+                                    )
+                                    return False, f"Multi-Factor Score is {quality_score}/100 (< 75 required | {verdict} | Breakdown: {comp_summary})"
+
+                                return True, f"Eligible (3★+ Confluence, RSI Healthy, Score: {quality_score}/100)"
 
                             eligible_candidates = []
                             for c in raw_candidates:
@@ -1607,7 +1668,7 @@ async def main_loop():
                                         continue
 
                                     action_desc = "CONTINUATION TRAIL SL/TP" if is_same_dir_continuation else "BULK TRADE EXECUTE"
-                                    logger.info(f"⚡ {action_desc}: {sym} [{sig}] ({stars}/4 Stars Priority)")
+                                    logger.info(f"⚡ {action_desc}: {sym} [{sig}] ({stars}/4 Stars Priority | AI Score: {cand.get('quality_score', 'N/A')}/100)")
                                     
                                     shark_res = await executor.execute_signal_trade(
                                         session, sym, sig, cand["entry"], cand["sl"], 

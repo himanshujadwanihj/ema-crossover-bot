@@ -448,6 +448,13 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                 )
                 
                 if first_cand is None:
+                    c_open = float(row.get('open', 0))
+                    c_close = float(row.get('close', 0))
+                    c_high = float(row.get('high', 0))
+                    c_low = float(row.get('low', 0))
+                    c_range = max(c_high - c_low, 1e-8)
+                    b_ratio = abs(c_close - c_open) / c_range
+
                     first_cand = {
                         "symbol": symbol,
                         "signal": sig_type,
@@ -465,6 +472,13 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         "candle_ts": dedup_ts,
                         "rr2": rr2 or 1.5,
                         "rsi": cur_rsi,
+                        "volume": float(row.get('volume', 0)) if 'volume' in row else None,
+                        "volume_sma": float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None,
+                        "macd_line": float(row.get('macd_line', 0)) if 'macd_line' in row else None,
+                        "macd_signal_val": float(row.get('macd_signal', 0)) if 'macd_signal' in row else None,
+                        "body_ratio": b_ratio,
+                        "tf_label": tf_label,
+                        "cross_type": f"{ema_name} {action_name}",
                     }
         except Exception as e:
             logger.error(f"Error in pullback tracker for {symbol}: {e}")

@@ -466,6 +466,13 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
         def_sl = buy_sl if sig_type == "BUY" else sell_sl
 
         dyn_sl, (tp1, tp2), (rr1, rr2), (lbl1, lbl2) = find_liquidity_pool_targets(df, sig_type, opt_entry, def_sl, symbol=symbol, tf_data=tf_data)
+        c_open = float(row.get('open', 0))
+        c_close = float(row.get('close', 0))
+        c_high = float(row.get('high', 0))
+        c_low = float(row.get('low', 0))
+        c_range = max(c_high - c_low, 1e-8)
+        body_ratio = abs(c_close - c_open) / c_range
+
         signals.append({
             "type": cross_name,
             "signal": sig_type,
@@ -479,6 +486,11 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             "lbl2": lbl2,
             "rsi": float(rsi_val) if not pd.isna(rsi_val) else None,
             "adx": float(adx_val) if not pd.isna(adx_val) else 25.0,
+            "volume": float(row.get('volume', 0)),
+            "volume_sma": float(row.get('vol_sma_20', 0)),
+            "macd_line": float(row.get('macd_line', 0)),
+            "macd_signal": float(row.get('macd_signal', 0)),
+            "body_ratio": body_ratio,
             # Backward compatibility single fields
             "tp": tp1,
             "rr": rr1,
