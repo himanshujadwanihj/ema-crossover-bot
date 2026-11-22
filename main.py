@@ -1018,6 +1018,8 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
     
     stars_str = f"{stars}/4 Stars" if stars > 0 else "Signal"
     rsi_str = f" | 📊 <b>RSI:</b> <code>{float(rsi_val):.1f}</code>" if rsi_val is not None else ""
+    funding_val = cand.get("funding_pct")
+    funding_str = f" | ⚡ <b>Funding:</b> <code>{funding_val:+.4f}%</code>" if funding_val is not None else ""
     entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{entry_p}</code>" if entry_p else ""
     
     score_val = cand.get("quality_score") or (cand.get("analysis") or {}).get("score")
@@ -1041,7 +1043,7 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
         f"🛡️ <b>SHARK AUTO-TRADE FILTER NOTICE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 <b>Pair:</b> <code>{symbol}</code> [<b>{signal.upper()}</b>]\n"
-        f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{entry_str}{score_block}\n"
+        f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{funding_str}{entry_str}{score_block}\n"
         f"🚫 <b>Execution Status:</b> Order Suppressed by Shield\n"
         f"📋 <b>Exact Reason:</b> {reason}\n\n"
         f"💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>\n"
@@ -1469,7 +1471,7 @@ async def main_loop():
                                     raw_candidates.append(r["trade"])
                         if raw_candidates:
                             from executor import executor
-                            def _check_auto_trade_eligibility(c):
+                            async def _check_auto_trade_eligibility(c):
                                 sym = c.get("symbol", "")
                                 sym_upper = sym.upper()
                                 sig = c.get("signal", "BUY").upper()
@@ -1594,11 +1596,31 @@ async def main_loop():
                                     )
                                     return False, f"Multi-Factor Score is {quality_score}/100 (< 75 required | {verdict} | Breakdown: {comp_summary})"
 
-                                return True, f"Eligible (3★+ Confluence, RSI Healthy, Score: {quality_score}/100)"
+                                # USER DIRECTIVE: Funding Rate Squeeze Shield (Live Binance Microstructure)
+                                # Shields against crowded trades (Short Squeezes & Long Liquidations)
+                                is_commodity_sym = any(x in sym_clean for x in ["XAU", "GOLD", "XAUT", "XAG", "CL", "OIL", "NATGAS"])
+                                if not is_commodity_sym and not c.get("is_trap_reversal"):
+                                    try:
+                                        from fetcher import fetch_futures_microstructure_async
+                                        micro_data = await fetch_futures_microstructure_async(session, sym, signal=sig)
+                                        funding_pct = float(micro_data.get("funding_pct", 0.01))
+                                        c["funding_pct"] = funding_pct
+
+                                        # 1. SHORT Squeeze Shield: If funding is heavily negative (< -0.04%), retail is overcrowded short!
+                                        if sig == "SELL" and funding_pct <= -0.040:
+                                            return False, f"Funding Rate is heavily negative ({funding_pct:+.4f}%). Retail overcrowded SHORT — high risk of Short Squeeze trap."
+
+                                        # 2. LONG Liquidation Shield: If funding is heavily positive (> +0.05%), retail is overcrowded long!
+                                        if sig == "BUY" and funding_pct >= 0.050:
+                                            return False, f"Funding Rate is heavily positive ({funding_pct:+.4f}%). Retail overcrowded LONG — high risk of Long Liquidation cascade."
+                                    except Exception as e_fr:
+                                        logger.debug(f"Funding rate check bypassed for {sym}: {e_fr}")
+
+                                return True, f"Eligible (3★+ Confluence, RSI Healthy, Score: {quality_score}/100, Funding Clean)"
 
                             eligible_candidates = []
                             for c in raw_candidates:
-                                is_ok, reason = _check_auto_trade_eligibility(c)
+                                is_ok, reason = await _check_auto_trade_eligibility(c)
                                 if is_ok:
                                     eligible_candidates.append(c)
                                 else:
