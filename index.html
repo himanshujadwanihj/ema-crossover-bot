@@ -84,7 +84,7 @@
         </div>
 
         <div class="flex flex-wrap md:flex-col items-start md:items-end gap-1.5 text-right">
-          <div class="text-xs text-slate-400">Target Asset Universe: <span class="text-white font-medium">Top 25 Volume Crypto + Gold</span></div>
+          <div class="text-xs text-slate-400">Target Asset Universe: <span class="text-white font-medium">Top 25 Crypto + Commodities (Gold, NatGas, Crude, Silver)</span></div>
           <div class="text-xs text-slate-400">Sizing Model: <span class="text-emerald-400 font-mono font-medium">2.0% Dynamic Free Margin</span></div>
           <div class="text-xs text-slate-400">Leverage: <span class="text-sky-400 font-mono font-medium">10x Isolated (Capped)</span></div>
         </div>
@@ -1217,6 +1217,71 @@
             <li class="flex items-center gap-2"><span class="text-emerald-400">✔</span> Confirmed by volume surge and liquidity absorption before entering</li>
             <li class="flex items-center gap-2"><span class="text-emerald-400">✔</span> Stop-loss mathematically anchored at opposite boundary of the coiling base</li>
           </ul>
+        </div>
+      </div>
+
+      <!-- ACTIVE TRADED ASSET UNIVERSE -->
+      <div class="glass-card rounded-xl p-6 border border-slate-800">
+        <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-2">
+          <div>
+            <h3 class="text-lg font-bold text-white flex items-center gap-2">
+              <span>🌐</span> Active Traded Asset Universe
+            </h3>
+            <p class="text-xs text-slate-400">Strictly focused on high-liquidity contracts on Shark Exchange with zero low-cap meme/shitcoin exposure.</p>
+          </div>
+          <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 w-fit">
+            ✓ Top 25 Crypto + 4 Major Commodities Active
+          </span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+          <!-- Commodity 1: Gold -->
+          <div class="p-4 bg-slate-900/60 rounded-xl border border-amber-500/30 hover:border-amber-500/60 transition-all">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-amber-400 text-sm">🥇 Gold (XAUUSDT)</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">CFD / Forex</span>
+            </div>
+            <div class="text-slate-300 leading-relaxed">
+              London & NY Spot Gold feed benchmarked to TradingView OANDA CFD. Multi-timeframe trend scalps (5M, 15M, 1H).
+            </div>
+            <div class="mt-2.5 text-[11px] text-slate-400 font-mono">Lot Size: 0.005 | Decimals: 2</div>
+          </div>
+
+          <!-- Commodity 2: Natural Gas -->
+          <div class="p-4 bg-slate-900/60 rounded-xl border border-sky-500/30 hover:border-sky-500/60 transition-all">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-sky-400 text-sm">⛽ NatGas (NATGASUSDT)</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300">High Momentum</span>
+            </div>
+            <div class="text-slate-300 leading-relaxed">
+              NYMEX Henry Hub benchmark futures (NG=F) + CFD pricing. High-beta volatility breakouts and swing retests.
+            </div>
+            <div class="mt-2.5 text-[11px] text-slate-400 font-mono">Lot Size: 1.0 | Decimals: 3</div>
+          </div>
+
+          <!-- Commodity 3: Crude Oil -->
+          <div class="p-4 bg-slate-900/60 rounded-xl border border-emerald-500/30 hover:border-emerald-500/60 transition-all">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-emerald-400 text-sm">🛢️ Crude Oil (CLUSDT)</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300">WTI Benchmark</span>
+            </div>
+            <div class="text-slate-300 leading-relaxed">
+              WTI Light Sweet Crude (CL=F) and OANDA spot crude feed. Clean macro trending behavior on 1H/4H cycles.
+            </div>
+            <div class="mt-2.5 text-[11px] text-slate-400 font-mono">Lot Size: 0.1 | Decimals: 2</div>
+          </div>
+
+          <!-- Commodity 4: Silver -->
+          <div class="p-4 bg-slate-900/60 rounded-xl border border-slate-400/30 hover:border-slate-400/60 transition-all">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-slate-200 text-sm">🥈 Silver (XAGUSDT)</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-500/20 text-slate-300">Precious Metal</span>
+            </div>
+            <div class="text-slate-300 leading-relaxed">
+              COMEX Silver benchmark futures (SI=F) + institutional CFD feed. Correlated precious metal momentum engine.
+            </div>
+            <div class="mt-2.5 text-[11px] text-slate-400 font-mono">Lot Size: 0.1 | Decimals: 3</div>
+          </div>
         </div>
       </div>
 
