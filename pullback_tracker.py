@@ -455,6 +455,11 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     c_range = max(c_high - c_low, 1e-8)
                     b_ratio = abs(c_close - c_open) / c_range
 
+                    # Use prev_row volume (closed candle) since current row is a live forming candle
+                    p_vol = float(prev_row.get('volume', 0)) if 'volume' in prev_row else (float(row.get('volume', 0)) if 'volume' in row else None)
+                    p_vol_sma = float(prev_row.get('vol_sma_20', 0)) if 'vol_sma_20' in prev_row else (float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None)
+                    adx_val = float(prev_row.get('adx', row.get('adx', 25.0))) if ('adx' in prev_row and not pd.isna(prev_row['adx'])) else (float(row.get('adx', 25.0)) if ('adx' in row and not pd.isna(row['adx'])) else 25.0)
+
                     first_cand = {
                         "symbol": symbol,
                         "signal": sig_type,
@@ -472,8 +477,9 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         "candle_ts": dedup_ts,
                         "rr2": rr2 or 1.5,
                         "rsi": cur_rsi,
-                        "volume": float(row.get('volume', 0)) if 'volume' in row else None,
-                        "volume_sma": float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None,
+                        "adx": adx_val,
+                        "volume": p_vol,
+                        "volume_sma": p_vol_sma,
                         "macd_line": float(row.get('macd_line', 0)) if 'macd_line' in row else None,
                         "macd_signal_val": float(row.get('macd_signal', 0)) if 'macd_signal' in row else None,
                         "body_ratio": b_ratio,
