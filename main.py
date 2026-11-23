@@ -849,6 +849,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 from telegram_bot import queue_alert
                 is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, rr1=rr1, rr2=rr2, lbl1=lbl1, lbl2=lbl2, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
                 if not is_queued:
+                    # Mark candle sent so it doesn't endlessly re-process the exact same completed candle every 5 seconds
+                    mark_sent(symbol, unique_key, signal, candle_ts, entry=entry, sl=sl, tp=tp, tp1=tp1, tp2=tp2)
                     continue
                 
                 is_3_htf_aligned = (
@@ -1549,20 +1551,16 @@ async def main_loop():
                                 if stars < 3:
                                     return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
 
-                                is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG", "SILVER", "CL", "OIL", "COPPER", "BRONZE", "HG", "NATGAS", "WTI", "BRENT"])
+                                # STRICT RSI MOMENTUM GATE (Same across Crypto & Commodities per user directive):
+                                # BUY: 42.0 <= RSI <= 62.0 (filters late overbought tops > 62)
+                                # SELL: 38.0 <= RSI <= 58.0 (filters late oversold bottoms < 38)
                                 if rsi is not None:
                                     try:
                                         f_rsi = float(rsi)
-                                        if is_gold_or_commodity:
-                                            if sig == "BUY" and not (40.0 <= f_rsi <= 65.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity BUY zone [40.0 - 65.0]."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 60.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity SELL zone [38.0 - 60.0] (Oversold bear trap < 38.0)."
-                                        else:
-                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto BUY zone [42.0 - 62.0] (Overbought peak/exhausted > 62.0)."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
+                                        if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
+                                            return False, f"RSI {f_rsi:.1f} is outside healthy BUY zone [42.0 - 62.0] (Overbought peak/exhausted > 62.0)."
+                                        elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
+                                            return False, f"RSI {f_rsi:.1f} is outside healthy SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
                                     except (ValueError, TypeError):
                                         pass
                                 # STRICT USER DIRECTIVE: Multi-Factor AI Quality Score >= 75 Hard Gate
