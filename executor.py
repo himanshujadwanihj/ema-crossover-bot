@@ -1761,6 +1761,10 @@ class SharkExchangeExecutor:
 
             clean_qty = round_coin_qty(clean_sym, qty)
 
+            # FIRST cancel resting open orders so Shark Exchange releases the reserved reduce-only quantity lock
+            await self.cancel_all_open_orders(session, clean_sym)
+            await asyncio.sleep(0.5)
+
             payload = {
                 "placeType": "POSITION",
                 "positionId": pos_id,
@@ -1773,7 +1777,6 @@ class SharkExchangeExecutor:
             st, res = await self.shark_post(session, "/v1/order/place-order", payload)
             if st in (200, 201):
                 logger.info(f"Position for {clean_sym} closed at MARKET on Shark Exchange ({reason}).")
-                await self.cancel_all_open_orders(session, clean_sym)
                 
                 exit_p = float(pos.get("markPrice") or pos.get("lastPrice") or pos.get("entryPrice") or 0)
                 entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
@@ -1826,6 +1829,9 @@ class SharkExchangeExecutor:
                 return True
             else:
                 logger.error(f"Failed to close position at market for {clean_sym}: {res}")
+                if "exceeds remaining position size" in str(res).lower() or "3025" in str(res):
+                    logger.warning(f"Position size already reduced or closed on exchange for {clean_sym}. Purging resting orders.")
+                    await self.cancel_all_open_orders(session, clean_sym)
                 return False
         except Exception as e:
             logger.error(f"Error in close_position_market for {clean_sym}: {e}")
