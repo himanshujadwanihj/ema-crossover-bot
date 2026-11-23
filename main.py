@@ -1379,12 +1379,10 @@ async def main_loop():
                                     json.dump({'morning': _morning_notified_date, 'night': _night_notified_date}, f)
                             except: pass
                             
-                        # BTC Volatility Shock Shield Check
+                        # BTC Volatility Shock Shield Check (Protects crypto from whipsaws; commodities exempt per user directive)
                         is_shock_active, shock_rem = await check_btc_volatility_shock(session, semaphore)
                         if is_shock_active:
-                            logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Skipping scan cycle...")
-                            await asyncio.sleep(15)
-                            continue
+                            logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Altcoins paused; commodities/stocks scanning normally...")
 
                         # DAILY RISK CIRCUIT BREAKER: 5 consecutive SLs -> 60-min pause
                         from state import is_trading_paused
@@ -1461,6 +1459,13 @@ async def main_loop():
                                 if major not in active_pairs:
                                     active_pairs.insert(0, major)
                         
+                        if is_shock_active:
+                            from market_cache import is_commodity_symbol, is_stock_symbol
+                            active_pairs = [sym for sym in active_pairs if is_commodity_symbol(sym) or is_stock_symbol(sym)]
+                            if not active_pairs:
+                                await asyncio.sleep(15)
+                                continue
+
                         tasks = [scan_single_symbol_async(session, sym, semaphore) for sym in active_pairs]
                         results = await asyncio.gather(*tasks)
 
