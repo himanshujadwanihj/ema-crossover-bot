@@ -129,7 +129,7 @@ def round_price(symbol: str, price: float):
         rounded = round(p, 1)
     elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'OIL', 'WTI', 'BRENT', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
         rounded = round(p, 2)
-    elif any(c in clean for c in ('XAG', 'SILVER', 'COPPER', 'BRONZE', 'HG')):
+    elif any(c in clean for c in ('XAG', 'SILVER', 'COPPER', 'BRONZE', 'HG', 'NATGAS')):
         rounded = round(p, 3)
     elif p >= 1000:
         rounded = round(p, 1)
@@ -281,6 +281,8 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.02, round(f_qty, 3))
     elif any(c in clean_sym for c in ('XAU', 'PAXG')):
         rounded = max(0.005, round(f_qty, 3))
+    elif any(c in clean_sym for c in ('NATGAS',)):
+        rounded = max(1, int(round(f_qty)))
     elif 'SOL' in clean_sym:
         rounded = max(0.1, round(f_qty, 2))
     elif 'BNB' in clean_sym:

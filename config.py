@@ -68,7 +68,10 @@ US_STOCK_TOKENS: list = [
 # User Directive: 5M and 15M standard scalps are strictly reserved for Gold only!
 # All other coins on 15M are exclusively reserved for Squeeze Breakouts.
 ALLOWED_15M_COINS: set = {
-    "XAU/USD", "XAUT/USDT", "XAUTUSDT"
+    "XAU/USD", "XAU/USDT", "XAUUSDT", "XAUT/USDT", "XAUTUSDT",
+    "NATGAS/USDT", "NATGASUSDT", "NATGAS/USD", "NATGASUSD",
+    "CL/USDT", "CLUSDT", "CL/USD", "CLUSD",
+    "XAG/USDT", "XAGUSDT", "XAG/USD", "XAGUSD"
 }
 
 # ── EMA Settings ──────────────────────────────────────────────────────────────

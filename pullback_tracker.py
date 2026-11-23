@@ -30,7 +30,7 @@ TOP_25_ALTS = [
 
 # Commodities (Spot Gold, Silver, Crude Oil, Natural Gas)
 COMMODITIES = [
-    "XAU/USD", "XAUT/USDT", "XAG/USD", "CL/USD", "NATGAS/USD"
+    "XAU/USD", "XAU/USDT", "XAUT/USDT", "NATGAS/USDT", "NATGAS/USD", "CL/USDT", "CL/USD", "XAG/USDT", "XAG/USD"
 ]
 
 # US Equities (15 Assets)

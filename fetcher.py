@@ -22,6 +22,11 @@ STOCK_YFINANCE_MAP = {
     "AMD": "AMD", "AMDB": "AMD", "AMDUSDT": "AMD", "AMDBUSDT": "AMD",
     "NFLX": "NFLX", "NFLXB": "NFLX", "NFLXUSDT": "NFLX", "NFLXBUSDT": "NFLX",
     "BABA": "BABA", "BABAB": "BABA", "BABAUSDT": "BABA", "BABABUSDT": "BABA",
+    # Commodities mapping to Yahoo Finance futures / benchmark tickers
+    "NATGAS": "NG=F", "NATGASUSDT": "NG=F", "NATGASUSD": "NG=F",
+    "CL": "CL=F", "CLUSDT": "CL=F", "CLUSD": "CL=F", "CRUDEOIL": "CL=F", "CRUDEOILUSDT": "CL=F", "OILUSDT": "CL=F",
+    "XAG": "SI=F", "XAGUSDT": "SI=F", "XAGUSD": "SI=F", "SILVERUSDT": "SI=F",
+    "BZ": "BZ=F", "BZUSDT": "BZ=F", "BRENT": "BZ=F", "BRENTUSDT": "BZ=F",
 }
 
 def _fetch_stock_yfinance_sync(ticker: str, interval: str, limit: int = 100):
@@ -178,6 +183,8 @@ _ohlcv_cache = {}
 # ── ONLY GOLD USES SPOT PRICE (XAU/USD); ALL REST USE USDT TOKENS ─────────────
 SPOT_GOLD_MAP = {
     "XAU/USD":   "XAU/USDT:USDT",  # Live Spot Gold (XAU/USD)
+    "XAU/USDT":  "XAU/USDT:USDT",
+    "XAUUSDT":   "XAU/USDT:USDT",
     "XAUT/USDT": "XAUT/USDT",  # Live Tether Gold Token
 }
 
@@ -306,6 +313,70 @@ def _fetch_spot_gold_sync(symbol: str, interval: str, limit: int = 100):
 
     return None
 
+def _fetch_commodity_sync(symbol: str, interval: str, limit: int = 100):
+    """
+    Fetches real-time institutional commodity candles:
+    - NATGAS -> NG=F (Natural Gas Futures) & TVC/OANDA CFD fallback
+    - CL / CRUDEOIL -> CL=F (Crude Oil WTI Futures) & OANDA:WTICOUSD fallback
+    - XAG / SILVER -> SI=F (Silver Futures) & OANDA:XAGUSD fallback
+    - BZ / BRENT -> BZ=F (Brent Crude Futures) & OANDA:BCOUSD fallback
+    """
+    clean = symbol.replace("/", "").replace("-", "").upper()
+    yf_ticker = None
+    tv_tickers = []
+    
+    if "NATGAS" in clean:
+        yf_ticker = "NG=F"
+        tv_tickers = ["PEPPERSTONE:NATGAS", "CAPITALCOM:NATURALGAS", "TVC:NATGAS", "OANDA:NATGASUSD"]
+    elif any(x in clean for x in ("CL", "CRUDE", "OIL", "WTI")):
+        yf_ticker = "CL=F"
+        tv_tickers = ["OANDA:WTICOUSD", "TVC:USOIL"]
+    elif any(x in clean for x in ("XAG", "SILVER")):
+        yf_ticker = "SI=F"
+        tv_tickers = ["OANDA:XAGUSD"]
+    elif any(x in clean for x in ("BZ", "BRENT")):
+        yf_ticker = "BZ=F"
+        tv_tickers = ["OANDA:BCOUSD", "TVC:UKOIL"]
+
+    # 1. Primary: Historical candles via yfinance
+    df = None
+    if yf_ticker:
+        df = _fetch_stock_yfinance_sync(yf_ticker, interval, limit=limit)
+
+    # 2. Real-time CFD tick alignment from TradingView Scanner
+    if tv_tickers:
+        try:
+            import urllib.request, json
+            url_tv = 'https://scanner.tradingview.com/cfd/scan'
+            headers_tv = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            tf_map = {'5m': '|5', '15m': '|15', '30m': '|30', '1h': '|60', '4h': '|240', '1d': ''}
+            suffix = tf_map.get(interval.lower(), '|5')
+            cols = ['close', f'close{suffix}', f'open{suffix}', f'high{suffix}', f'low{suffix}']
+            
+            for tv_sym in tv_tickers:
+                try:
+                    payload = json.dumps({'symbols': {'tickers': [tv_sym]}, 'columns': cols}).encode('utf-8')
+                    req_tv = urllib.request.Request(url_tv, data=payload, headers=headers_tv)
+                    res_tv = json.loads(urllib.request.urlopen(req_tv, timeout=3.5).read().decode('utf-8'))
+                    if res_tv and 'data' in res_tv and len(res_tv['data']) > 0:
+                        vals = res_tv['data'][0]['d']
+                        spot_px = float(vals[0])
+                        if spot_px > 0:
+                            logger.info(f"Loaded Real-time Commodity {symbol} ({tv_sym}): ${spot_px:.4f}")
+                            if df is not None and len(df) > 0:
+                                df.iloc[-1, df.columns.get_loc('close')] = spot_px
+                                if spot_px > df.iloc[-1]['high']:
+                                    df.iloc[-1, df.columns.get_loc('high')] = spot_px
+                                if spot_px < df.iloc[-1]['low']:
+                                    df.iloc[-1, df.columns.get_loc('low')] = spot_px
+                            break
+                except Exception:
+                    continue
+        except Exception as e_tv:
+            logger.debug(f"TradingView commodity fetch error for {symbol}: {e_tv}")
+
+    return df
+
 async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int, semaphore: asyncio.Semaphore):
     """
     Fetch OHLCV candles asynchronously with TTL caching.
@@ -328,7 +399,7 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
         if now - cached_time < ttl:
             return cached_df
 
-    # 1. SPOT GOLD ROUTE ONLY (XAU/USD / XAUT/USDT)
+    # 1. SPOT GOLD ROUTE ONLY (XAU/USD / XAU/USDT / XAUT/USDT)
     if symbol in SPOT_GOLD_MAP or "XAU" in symbol.upper():
         loop = asyncio.get_running_loop()
         spot_df = await loop.run_in_executor(None, _fetch_spot_gold_sync, symbol, interval, limit)
@@ -336,6 +407,16 @@ async def fetch_ohlcv_async(session: aiohttp.ClientSession, symbol: str, interva
             _ohlcv_cache[cache_key] = (spot_df, time.time())
             return spot_df
         logger.warning(f"Spot gold route returned no data for {symbol} {interval}, falling back to Binance")
+
+    # 1B. COMMODITIES ROUTE (NATGAS, CRUDE OIL, SILVER, BRENT)
+    clean_sym_upper = symbol.replace("/", "").replace("-", "").upper()
+    if any(k in clean_sym_upper for k in ("NATGAS", "CRUDEOIL", "CLUSD", "CLUSDT", "XAG", "SILVER", "BZUSD", "BZUSDT")):
+        loop = asyncio.get_running_loop()
+        comm_df = await loop.run_in_executor(None, _fetch_commodity_sync, symbol, interval, limit)
+        if comm_df is not None and len(comm_df) >= 5:
+            _ohlcv_cache[cache_key] = (comm_df, time.time())
+            return comm_df
+        logger.warning(f"Commodity route returned no data for {symbol} {interval}")
 
     # 2. ALL OTHER ASSETS USE NATIVE USDT TOKENS (Binance Futures API)
     binance_symbol = symbol.replace("/", "").upper()

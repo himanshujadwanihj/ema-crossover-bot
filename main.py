@@ -1409,12 +1409,15 @@ async def main_loop():
                         stock_symbols_set.update({"INTC/USDT", "AMD/USDT", "BABA/USDT", "DIS/USDT", "PYPL/USDT", "BA/USDT", "XOM/USDT", "SOXL/USDT", "SNDK/USDT"})
 
                         if is_weekend:
-                            METALS_LIST = []
+                            COMMODITIES_LIST = []
                             US_STOCKS_LIST = []
                             # Exclude all commodities and US stocks from active scan on weekends (BTC and ETH are active 24/7)
                             weekend_blocked_assets = set(COMMODITIES + US_EQUITIES + list(stock_symbols_set) + ["XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT"])
                         else:
-                            METALS_LIST = ["XAU/USD"]  # Gold Spot only on weekdays
+                            # USER DIRECTIVE: Commodities Active (Gold XAU, Natural Gas NATGAS, Crude Oil CL, Silver XAG)
+                            COMMODITIES_LIST = [
+                                "XAU/USD", "XAU/USDT", "NATGAS/USDT", "CL/USDT", "XAG/USDT"
+                            ]
                             # US Equity Tokens (Binance Spot 24/7 feeds + yfinance fallback): Active all weekdays
                             US_STOCKS_LIST = [
                                 "NVDAB/USDT", "TSLAB/USDT", "MSTRB/USDT", "AAPLB/USDT",
@@ -1424,15 +1427,15 @@ async def main_loop():
                             weekend_blocked_assets = set()
                         
                         # ── USER-DEFINED WEEKDAY vs WEEKEND SCANNING RULES ──
-                        # 1. Mon - Fri: ONLY Top 25 Crypto coins + Commodities (4) + US Equity Tokens (15).
+                        # 1. Mon - Fri: ONLY Top 25 Crypto coins + Commodities (Active) + US Equity Tokens (15).
                         # 2. Sat - Sun (Weekend): ALL Binance Futures coins EXCEPT BTC, ETH, Commodities, and US Equity Tokens.
                         all_futures_pairs = get_top_pairs_by_volume(top_n=None)
                         if not all_futures_pairs: all_futures_pairs = []
 
-                        commodities_set = {"XAU/USDT", "XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT", "OIL/USDT"}
+                        commodities_set = {"XAU/USD", "XAU/USDT", "XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT", "OIL/USDT"}
 
                         if not is_weekend:
-                            # Mon - Fri: ONLY Top 25 Crypto + Commodities (4) + US Equities (15)
+                            # Mon - Fri: ONLY Top 25 Crypto + Commodities + US Equities
                             # User Directive: PAXG is strictly stopped / blocked. Gold trading is strictly XAUUSDT.
                             top_25_crypto = [
                                 sym for sym in all_futures_pairs
@@ -1441,7 +1444,7 @@ async def main_loop():
                                 and "PAXG" not in sym.upper()
                                 and not any(sym.startswith(s) for s in ["XAU", "XAG", "NATGAS", "CL", "SOXL", "SOXS", "SKHY", "KORU", "SPCX"])
                             ][:25]
-                            active_pairs = list(dict.fromkeys(top_25_crypto + METALS_LIST + US_STOCKS_LIST))
+                            active_pairs = list(dict.fromkeys(top_25_crypto + COMMODITIES_LIST + US_STOCKS_LIST))
                         else:
                             # Sat - Sun: ALL Binance Futures + BTC & ETH (Commodities & US Equities remain CLOSED)
                             weekend_blocked = commodities_set.union(stock_symbols_set)
