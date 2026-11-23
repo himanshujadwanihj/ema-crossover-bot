@@ -499,11 +499,12 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
                                 sq_signal = 'SELL'
                         # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout
+                        # User Directive: Short Squeezes & Long Squeezes are genuine breakout moves;
+                        # they must NOT be blocked by counter HTF trend!
                         elif is_valid_consolidation:
-                            h4_trend = tf_states.get("4H") if tf_states and tf_states.get("4H") else "neutral"
-                            if candle_close <= (range_low * 0.998) and h4_trend != "bullish":
+                            if candle_close <= (range_low * 0.998):
                                 sq_signal = 'SELL'
-                            elif candle_close >= (range_high * 1.002) and h4_trend != "bearish":
+                            elif candle_close >= (range_high * 1.002):
                                 sq_signal = 'BUY'
 
                         if sq_signal:
@@ -511,11 +512,11 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             if body_ratio < 0.45:
                                 logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
                                 sq_signal = None
-                            elif sq_signal == 'BUY' and (sq_rsi > 62.0 or sq_rsi < 42.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum [42.0, 62.0].")
+                            elif sq_signal == 'BUY' and (sq_rsi > 78.0 or sq_rsi < 42.0):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum [42.0, 78.0].")
                                 sq_signal = None
-                            elif sq_signal == 'SELL' and (sq_rsi < 38.0 or sq_rsi > 58.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum [38.0, 58.0].")
+                            elif sq_signal == 'SELL' and (sq_rsi < 22.0 or sq_rsi > 58.0):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum [22.0, 58.0].")
                                 sq_signal = None
                             elif sq_signal == 'BUY' and upper_wick_ratio > 0.38:
                                 logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
@@ -1544,10 +1545,11 @@ async def main_loop():
                                     if rsi is not None:
                                         try:
                                             f_rsi = float(rsi)
-                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [42.0 - 62.0] (Bull exhaustion/overbought)."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [38.0 - 58.0] (Oversold bear trap < 38.0)."
+                                            # Squeeze breakout candles surge with high momentum: bounds [42.0 - 78.0] for BUY, [22.0 - 58.0] for SELL
+                                            if sig == "BUY" and not (42.0 <= f_rsi <= 78.0):
+                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [42.0 - 78.0] (Exhaustion > 78.0)."
+                                            elif sig == "SELL" and not (22.0 <= f_rsi <= 58.0):
+                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [22.0 - 58.0] (Exhaustion < 22.0)."
                                         except (ValueError, TypeError):
                                             pass
                                     return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"

@@ -267,6 +267,15 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
                 elif signal == "SELL" and f_rsi < 55.0:
                     logger.info(f"🚫 BLOCKED {symbol} Bull Trap SELL ({tf_label}) — RSI {f_rsi:.1f} not overbought enough (< 55.0).")
                     return False
+            elif is_squeeze_type or kwargs.get("is_dedicated_squeeze", False):
+                # Squeeze Breakouts: High momentum candles naturally surge!
+                # Healthy breakout bounds: BUY [42.0 - 78.0], SELL [22.0 - 58.0]
+                if signal == "BUY" and not (42.0 <= f_rsi <= 78.0):
+                    logger.info(f"🚫 BLOCKED {symbol} Squeeze BUY ({tf_label}) — RSI {f_rsi:.1f} outside squeeze breakout bounds [42, 78].")
+                    return False
+                elif signal == "SELL" and not (22.0 <= f_rsi <= 58.0):
+                    logger.info(f"🚫 BLOCKED {symbol} Squeeze SELL ({tf_label}) — RSI {f_rsi:.1f} outside squeeze breakdown bounds [22, 58].")
+                    return False
             else:
                 if signal == "BUY" and not (42.0 <= f_rsi <= 62.0):
                     logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62] (Overbought peak/exhausted).")
