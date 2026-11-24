@@ -523,8 +523,10 @@ def record_pre_squeeze_radar(symbol: str, radar_data: dict, is_broadcast: bool =
     
     existing = state["ACTIVE_RADARS"].get(sym, {})
     first_detected = existing.get("first_detected_at") or existing.get("created_at") or now_str
+    was_broadcast = is_broadcast or existing.get("is_broadcast", False)
     
     state["ACTIVE_RADARS"][sym] = {
+        "symbol": sym,
         "direction": radar_data.get("direction", "BUY"),
         "squeeze_type": radar_data.get("squeeze_type", "SHORT SQUEEZE"),
         "trigger_entry": radar_data.get("trigger_entry", 0.0),
@@ -532,31 +534,24 @@ def record_pre_squeeze_radar(symbol: str, radar_data: dict, is_broadcast: bool =
         "compression_pct": radar_data.get("compression_pct", 0.0),
         "created_at": now_str,
         "first_detected_at": first_detected,
-        "status": "WATCHING"
+        "status": "WATCHING",
+        "is_broadcast": was_broadcast,
+        "tf_label": radar_data.get("tf_label", "1H"),
+        "coiling_score": radar_data.get("coiling_score", 0.0)
     }
     _save(state)
 
 def get_active_radar(symbol: str) -> dict:
-    """Returns active radar data if symbol is currently on Radar Watchlist and not expired (4h max)."""
+    """Returns active radar data if symbol is currently on Radar Watchlist and in WATCHING state."""
     state = _load()
     radars = state.get("ACTIVE_RADARS", {})
     entry = radars.get(symbol.upper())
     if entry and entry.get("status") == "WATCHING":
-        created_str = entry.get("created_at")
-        if created_str:
-            try:
-                created = datetime.fromisoformat(created_str)
-                if (datetime.now(timezone.utc) - created) > timedelta(hours=4.0):
-                    entry["status"] = "EXPIRED"
-                    _save(state)
-                    return None
-            except Exception:
-                pass
         return entry
     return None
 
 def mark_radar_triggered(symbol: str) -> None:
-    """Marks an active radar as TRIGGERED when Stage 2 entry fires."""
+    """Marks an active radar as TRIGGERED when Stage 2 breakout entry fires successfully."""
     state = _load()
     radars = state.get("ACTIVE_RADARS", {})
     sym = symbol.upper()
@@ -564,6 +559,44 @@ def mark_radar_triggered(symbol: str) -> None:
         radars[sym]["status"] = "TRIGGERED"
         radars[sym]["triggered_at"] = datetime.now(timezone.utc).isoformat()
         _save(state)
+
+def mark_radar_failed(symbol: str, reason: str) -> None:
+    """Marks an active radar as FAILED when a breakout attempt fails, rejects, or wicks back."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "FAILED"
+        radars[sym]["failed_at"] = datetime.now(timezone.utc).isoformat()
+        radars[sym]["fail_reason"] = reason
+        _save(state)
+
+def mark_radar_invalidated(symbol: str, reason: str) -> None:
+    """Marks an active radar as INVALIDATED when price breaches the structure invalidation SL."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "INVALIDATED"
+        radars[sym]["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+        radars[sym]["invalidation_reason"] = reason
+        _save(state)
+
+def mark_radar_expired(symbol: str) -> None:
+    """Marks an active radar as EXPIRED after 4 hours without a breakout."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "EXPIRED"
+        radars[sym]["expired_at"] = datetime.now(timezone.utc).isoformat()
+        _save(state)
+
+def get_all_active_radars() -> dict:
+    """Returns all radars currently active in WATCHING state."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    return {k: v for k, v in radars.items() if isinstance(v, dict) and v.get("status") == "WATCHING"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

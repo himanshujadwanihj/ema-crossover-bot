@@ -1058,15 +1058,16 @@ def get_permanent_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     if is_admin:
         kb = [
             [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
-            [KeyboardButton("💰 Realized Profits"), KeyboardButton("📜 Trade History")],
-            [KeyboardButton("⚙️ Filter Settings"), KeyboardButton("🌐 All Accounts")],
-            [KeyboardButton("🔄 Refresh")]
+            [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
+            [KeyboardButton("📜 Trade History"), KeyboardButton("⚙️ Filter Settings")],
+            [KeyboardButton("🌐 All Accounts"), KeyboardButton("🔄 Refresh")]
         ]
     else:
         kb = [
             [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
-            [KeyboardButton("💰 Realized Profits"), KeyboardButton("📜 Trade History")],
-            [KeyboardButton("⚙️ Filter Settings"), KeyboardButton("🔄 Refresh")]
+            [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
+            [KeyboardButton("📜 Trade History"), KeyboardButton("⚙️ Filter Settings")],
+            [KeyboardButton("🔄 Refresh")]
         ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
 
@@ -1743,6 +1744,8 @@ async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAUL
         await cmd_positions(update, context)
     elif "profit" in t_lower or "scorecard" in t_lower or "stat" in t_lower:
         await cmd_trades(update, context)
+    elif "radar" in t_lower or "coiling" in t_lower or "squeeze" in t_lower:
+        await cmd_radar(update, context)
     elif "trade" in t_lower or "history" in t_lower or "ledger" in t_lower or "closed" in t_lower:
         await cmd_trades(update, context)
     elif "filter" in t_lower or "setting" in t_lower:
@@ -1756,6 +1759,50 @@ async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAUL
             await cmd_accounts(update, context)
         else:
             await cmd_start(update, context)
+
+
+async def cmd_radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reports all active Pre-Squeeze Radars currently on Watchlist."""
+    msg = update.message
+    if not msg:
+        return
+    from state import get_all_active_radars
+    radars = get_all_active_radars()
+    if not radars:
+        await msg.reply_text(
+            "📡 <b>PRE-SQUEEZE RADAR (Coiling Watchlist)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>No active coiling setups on the radar right now.</i>\n\n"
+            "Scanner evaluates 1H Binance candles every scan loop.\n"
+            "As soon as a tight squeeze coil is verified, it will alert here and track for breakout!",
+            parse_mode="HTML"
+        )
+        return
+
+    lines = [
+        f"📡 <b>ACTIVE PRE-SQUEEZE RADARS ({len(radars)})</b>",
+        "<i>Continuous Breakout & Invalidation Monitoring Active</i>",
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    for sym, r in radars.items():
+        dir_t = r.get("direction", "BUY")
+        icon = "🟢 LONG" if dir_t == "BUY" else "🔴 SHORT"
+        sq_type = r.get("squeeze_type", "SQUEEZE")
+        trig = float(r.get("trigger_entry", 0.0))
+        sl = float(r.get("invalidation_sl", 0.0))
+        comp = float(r.get("compression_pct", 0.0))
+        score = float(r.get("coiling_score", 0.0))
+        tf_l = r.get("tf_label", "1H")
+        lines.append(
+            f"• <b>{sym}</b> ({tf_l}) [{icon}]\n"
+            f"   Setup: {sq_type}\n"
+            f"   🎯 Breakout Trigger: <code>{format_price(trig, sym)}</code>\n"
+            f"   🛑 Invalidation SL: <code>{format_price(sl, sym)}</code>\n"
+            f"   📊 Compression: <code>{comp:.2f}%</code> | Score: <b>{score:.1f}</b>"
+        )
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💡 <i>Breakout order executes automatically on 1H candle confirmation, OR failure alert is dispatched!</i>")
+    await msg.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def on_any_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2051,6 +2098,7 @@ def get_application() -> Application:
         _app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
         _app_instance.add_handler(CommandHandler(["stop", "kill", "halt", "pause"], cmd_stop_bot))
         _app_instance.add_handler(CommandHandler(["startbot", "resume", "resumebot"], cmd_resume_bot))
+        _app_instance.add_handler(CommandHandler(["radar", "radars", "coiling", "squeezes"], cmd_radar))
 
         # Account Filter Callback Handler (Seamless multi-account toggling)
         _app_instance.add_handler(CallbackQueryHandler(on_account_filter_callback, pattern=r"^acc_"))
@@ -2091,6 +2139,7 @@ async def start_telegram_bot_service():
             BotCommand("trades", "📜 Closed Trades Ledger"),
             BotCommand("accounts", "💼 Account Overview"),
             BotCommand("today", "📊 Today's Signals Summary"),
+            BotCommand("radar", "📡 Active Pre-Squeeze Radars"),
             BotCommand("help", "ℹ️ Help & Status"),
         ]
         await app.bot.set_my_commands(commands)
@@ -2219,6 +2268,95 @@ async def send_pre_squeeze_radar_alert(radar_data: dict):
         await dispatch_filtered_alert(f_alert_data, text)
     except Exception as e_f:
         logger.error(f"Error dispatching radar to filter subscribers: {e_f}")
+
+
+async def send_radar_status_update(radar_data: dict, status: str, reason: str, candle_close: float = None):
+    """
+    Broadcasts a real-time status update when an active Pre-Squeeze Radar setup:
+    1. FAILS (Fakeout wick rejection / lack of volume / CVD selling into breakout)
+    2. INVALIDATES (Price breaches the invalidation SL structure level)
+    3. EXPIRES (4-hour coiling window elapsed without breakout)
+
+    Ensures complete transparency per user directive:
+    Either the order executes on breakout, OR a clear diagnostic message is dispatched!
+    """
+    symbol = radar_data.get("symbol", "")
+    direction = str(radar_data.get("direction", "BUY")).upper()
+    trigger_entry = float(radar_data.get("trigger_entry", 0.0))
+    invalidation_sl = float(radar_data.get("invalidation_sl", 0.0))
+    sq_tf = radar_data.get("tf_label", "1H")
+    display_sym = format_display_symbol(symbol)
+
+    direction_tag = "SHORT SQUEEZE" if direction == "BUY" else "LONG SQUEEZE"
+
+    if status == "FAILED":
+        header = "⚠️ <b>PRE-SQUEEZE RADAR: BREAKOUT FAILED (Rejection)</b>"
+        icon = "❌"
+        action_note = "<b>Capital Protection Guard:</b>\nBreakout conditions rejected. No order placed on Shark Exchange. Safe!"
+        levels_str = (
+            f"🎯 <b>Breakout Trigger:</b> <code>{format_price(trigger_entry, symbol)}</code>\n"
+            f"📉 <b>Candle Close:</b> <code>{format_price(candle_close or trigger_entry, symbol)}</code>\n"
+        )
+    elif status == "INVALIDATED":
+        header = "🛑 <b>PRE-SQUEEZE RADAR: SETUP INVALIDATED</b>"
+        icon = "🛑"
+        action_note = "<b>Watchlist Action:</b>\nCoiling structure collapsed. Radar removed from watchlist. Zero trade taken!"
+        levels_str = (
+            f"🛑 <b>Invalidation Level:</b> <code>{format_price(invalidation_sl, symbol)}</code>\n"
+            f"📉 <b>Breached Price:</b> <code>{format_price(candle_close or invalidation_sl, symbol)}</code>\n"
+        )
+    else:  # EXPIRED
+        header = "⏱️ <b>PRE-SQUEEZE RADAR: TIMED OUT / EXPIRED</b>"
+        icon = "⏳"
+        action_note = "<b>Watchlist Action:</b>\nConsolidation lost momentum after 4 hours without breakout. Symbol removed from active radar."
+        levels_str = (
+            f"🎯 <b>Untriggered Level:</b> <code>{format_price(trigger_entry, symbol)}</code>\n"
+        )
+
+    text = (
+        f"{header}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 <b>Pair:</b> <code>{display_sym}</code> ({sq_tf})\n"
+        f"⚡ <b>Setup:</b> {direction_tag}\n"
+        f"{levels_str}\n"
+        f"{icon} <b>Diagnostic:</b>\n"
+        f"<i>{reason}</i>\n\n"
+        f"🛡️ {action_note}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    EMA_SCANNER_CHANNEL = "-1004332146822"
+    from config import TELEGRAM_CHAT_ID
+    admin_id = str(TELEGRAM_CHAT_ID or "771305593")
+
+    # Send to Scanner Channel
+    try:
+        await send_text_to_chat(EMA_SCANNER_CHANNEL, text)
+    except Exception as e:
+        logger.error(f"Failed to dispatch radar status update to {EMA_SCANNER_CHANNEL}: {e}")
+
+    # Always ensure Admin receives it directly
+    try:
+        if admin_id and admin_id != EMA_SCANNER_CHANNEL:
+            await send_text_to_chat(admin_id, text)
+    except Exception as e:
+        logger.error(f"Failed to dispatch radar status update to Admin DM {admin_id}: {e}")
+
+    # Dispatch to Filter Bot subscribers
+    try:
+        from filter_bot import dispatch_filtered_alert
+        f_alert_data = {
+            "symbol": symbol,
+            "tf_label": sq_tf,
+            "signal": direction,
+            "is_squeeze": True,
+            "is_dedicated_squeeze": True,
+            "cross_type": f"Pre-Squeeze Radar ({status})",
+            "aligned_count": 4
+        }
+        await dispatch_filtered_alert(f_alert_data, text)
+    except Exception as e_f:
+        logger.error(f"Error dispatching radar update to filter subscribers: {e_f}")
 
 
 async def send_circuit_breaker_alert(paused_until_ts: float, streak_count: int, trigger_symbol: str = "") -> None:

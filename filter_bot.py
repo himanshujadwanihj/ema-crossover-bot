@@ -491,6 +491,10 @@ async def on_user_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from telegram_bot import cmd_trades
         await cmd_trades(update, context)
         return
+    elif "radar" in t_lower or "coiling" in t_lower or "squeeze" in t_lower:
+        from telegram_bot import cmd_radar
+        await cmd_radar(update, context)
+        return
     elif "trade" in t_lower or "history" in t_lower or "ledger" in t_lower or "closed" in t_lower:
         from telegram_bot import cmd_trades
         await cmd_trades(update, context)
@@ -930,10 +934,11 @@ async def start_filter_bot_service():
         _filter_app_instance.add_handler(CommandHandler(["broadcast"], cmd_broadcast))
         _filter_app_instance.add_handler(CommandHandler(["removeuser", "deleteuser", "kick", "ban", "unban"], cmd_remove_user))
         _filter_app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
-        from telegram_bot import cmd_accounts, cmd_trades, cmd_positions, cmd_sync, on_account_filter_callback
+        from telegram_bot import cmd_accounts, cmd_trades, cmd_positions, cmd_sync, cmd_radar, on_account_filter_callback
         _filter_app_instance.add_handler(CommandHandler(["accounts", "account"], cmd_accounts))
         _filter_app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
         _filter_app_instance.add_handler(CommandHandler(["positions", "paper", "wallet"], cmd_positions))
+        _filter_app_instance.add_handler(CommandHandler(["radar", "radars", "coiling", "squeezes"], cmd_radar))
         _filter_app_instance.add_handler(CommandHandler(["sync", "syncaccounts", "copysync"], cmd_sync))
         _filter_app_instance.add_handler(CallbackQueryHandler(on_account_filter_callback, pattern=r"^acc_"))
         _filter_app_instance.add_handler(CallbackQueryHandler(on_button_callback))
@@ -950,6 +955,7 @@ async def start_filter_bot_service():
                 BotCommand("positions", "🟢 Live Active Trades"),
                 BotCommand("trades", "📜 Closed Trades Ledger"),
                 BotCommand("filter", "⚙️ Filter Settings"),
+                BotCommand("radar", "📡 Active Pre-Squeeze Radars"),
                 BotCommand("watch", "🎯 Custom Watchlist"),
                 BotCommand("help", "ℹ️ Help & Info"),
             ]

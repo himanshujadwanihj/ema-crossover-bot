@@ -490,14 +490,75 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     # DUAL ENGINE: BRANCH B — CONTINUATION BREAKDOWN / BREAKOUT CHASER
                     # ─────────────────────────────────────────────────────────────
                     if not sq_signal:
-                        # MODE A: Dedicated Pre-Squeeze Radar (if active on Radar)
+                        # MODE A: Dedicated Pre-Squeeze Radar (Continuous Lifecycle Tracking)
                         if has_radar:
                             radar_trigger = float(radar_entry.get('trigger_entry', 0.0))
+                            radar_invalidation = float(radar_entry.get('invalidation_sl', 0.0))
                             radar_dir = str(radar_entry.get('direction', '')).upper()
-                            if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
-                                sq_signal = 'BUY'
-                            elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
-                                sq_signal = 'SELL'
+
+                            # 1. Structure Invalidation Check:
+                            is_invalidated = False
+                            invalidation_reason = ""
+                            if radar_dir == 'BUY' and radar_invalidation > 0 and (c_low <= radar_invalidation or candle_close <= radar_invalidation):
+                                is_invalidated = True
+                                invalidation_reason = f"Price breached below support invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
+                            elif radar_dir == 'SELL' and radar_invalidation > 0 and (c_high >= radar_invalidation or candle_close >= radar_invalidation):
+                                is_invalidated = True
+                                invalidation_reason = f"Price breached above resistance invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
+
+                            if is_invalidated:
+                                from state import mark_radar_invalidated
+                                from telegram_bot import send_radar_status_update
+                                mark_radar_invalidated(symbol, invalidation_reason)
+                                await send_radar_status_update(radar_entry, status="INVALIDATED", reason=invalidation_reason, candle_close=candle_close)
+                                logger.info(f"🛑 RADAR INVALIDATED for {symbol}: {invalidation_reason}")
+                                has_radar = False
+
+                            # 2. 4-Hour Expiration Check:
+                            if has_radar:
+                                created_str = radar_entry.get("created_at")
+                                if created_str:
+                                    try:
+                                        created_dt = datetime.fromisoformat(created_str)
+                                        if (datetime.now(timezone.utc) - created_dt).total_seconds() > 14400:
+                                            from state import mark_radar_expired
+                                            from telegram_bot import send_radar_status_update
+                                            exp_reason = "4 hours elapsed without breakout trigger. Consolidation lost momentum."
+                                            mark_radar_expired(symbol)
+                                            await send_radar_status_update(radar_entry, status="EXPIRED", reason=exp_reason, candle_close=candle_close)
+                                            logger.info(f"⏱️ RADAR EXPIRED for {symbol} after 4h coiling window.")
+                                            has_radar = False
+                                    except Exception:
+                                        pass
+
+                            # 3. Breakout vs Fakeout Rejection Check:
+                            if has_radar:
+                                attempted_breakout = False
+                                if radar_dir == 'BUY' and (c_high >= radar_trigger or candle_close >= radar_trigger):
+                                    attempted_breakout = True
+                                elif radar_dir == 'SELL' and (c_low <= radar_trigger or candle_close <= radar_trigger):
+                                    attempted_breakout = True
+
+                                if attempted_breakout:
+                                    if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
+                                        sq_signal = 'BUY'
+                                    elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
+                                        sq_signal = 'SELL'
+                                    else:
+                                        # Wicked past trigger, but closed back inside!
+                                        wick_p = c_high if radar_dir == 'BUY' else c_low
+                                        fail_reason = (
+                                            f"Price wicked to {format_price(wick_p, symbol)} beyond trigger "
+                                            f"({format_price(radar_trigger, symbol)}), but closed back inside range at "
+                                            f"{format_price(candle_close, symbol)}. Fakeout wick rejection!"
+                                        )
+                                        from state import mark_radar_failed
+                                        from telegram_bot import send_radar_status_update
+                                        mark_radar_failed(symbol, fail_reason)
+                                        await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
+                                        logger.info(f"⚠️ RADAR FAILED (Fakeout): {symbol} — {fail_reason}")
+                                        has_radar = False
+
                         # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout
                         # User Directive: Short Squeezes & Long Squeezes are genuine breakout moves;
                         # they must NOT be blocked by counter HTF trend!
@@ -510,24 +571,29 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         if sq_signal:
                             # Chaser Validation Rules (Responsive triggers for pre-vetted Radar setups):
                             req_body = 0.35 if has_radar else 0.45
+                            fail_reason = None
                             if body_ratio < req_body:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < {req_body:.0%} (Weak expansion / long wick trap).")
-                                sq_signal = None
+                                fail_reason = f"Candle body ratio {body_ratio:.1%} < {req_body:.0%} (Weak expansion / long wick trap)."
                             elif sq_signal == 'BUY' and (sq_rsi > (85.0 if has_radar else 78.0) or sq_rsi < (35.0 if has_radar else 42.0)):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar}).")
-                                sq_signal = None
+                                fail_reason = f"RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar})."
                             elif sq_signal == 'SELL' and (sq_rsi < (15.0 if has_radar else 22.0) or sq_rsi > (65.0 if has_radar else 58.0)):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar}).")
-                                sq_signal = None
+                                fail_reason = f"RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar})."
                             elif sq_signal == 'BUY' and upper_wick_ratio > (0.45 if has_radar else 0.38):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > {'45%' if has_radar else '38%'} (Shooting star / whale trap).")
-                                sq_signal = None
+                                fail_reason = f"Upper rejection wick {upper_wick_ratio:.1%} > {'45%' if has_radar else '38%'} (Shooting star / whale trap)."
                             elif sq_signal == 'SELL' and lower_wick_ratio > (0.45 if has_radar else 0.38):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — Lower rejection wick > {'45%' if has_radar else '38%'} (Hammer / bear trap).")
-                                sq_signal = None
+                                fail_reason = f"Lower rejection wick {lower_wick_ratio:.1%} > {'45%' if has_radar else '38%'} (Hammer / bear trap)."
                             elif vol_20_sma > 0 and breakout_vol < ((1.05 if has_radar else 1.25) * vol_20_sma):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Volume {breakout_vol:.0f} < {'1.05x' if has_radar else '1.25x'} 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
+                                fail_reason = f"Volume {breakout_vol:.0f} < {'1.05x' if has_radar else '1.25x'} 20-SMA {vol_20_sma:.0f} (Volume surge missing)."
+
+                            if fail_reason:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — {fail_reason}")
                                 sq_signal = None
+                                if has_radar:
+                                    from state import mark_radar_failed
+                                    from telegram_bot import send_radar_status_update
+                                    mark_radar_failed(symbol, fail_reason)
+                                    await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
+                                    has_radar = False
 
                     if sq_signal:
                         from market_cache import is_btc_safe_for_altcoins
@@ -535,6 +601,13 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         if not is_safe:
                             logger.info(f"FILTERED 1H SIGNAL: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
                             sq_signal = None
+                            if has_radar:
+                                from state import mark_radar_failed
+                                from telegram_bot import send_radar_status_update
+                                btc_fail = f"BTC Micro-Gate safety block: {btc_reason} (Market crash risk)."
+                                mark_radar_failed(symbol, btc_fail)
+                                await send_radar_status_update(radar_entry, status="FAILED", reason=btc_fail, candle_close=candle_close)
+                                has_radar = False
 
                         # Breakout Freshness Guard: Reject historical signals older than 65 minutes
                         if sq_signal and candle_ts:
@@ -686,6 +759,14 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         "rr2": target_r,
                                         "rsi": sq_rsi,
                                     }
+                            elif has_radar:
+                                cvd_fail = "Whale CVD Divergence: Aggressive delta selling detected during breakout candle."
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} — {cvd_fail}")
+                                from state import mark_radar_failed
+                                from telegram_bot import send_radar_status_update
+                                mark_radar_failed(symbol, cvd_fail)
+                                await send_radar_status_update(radar_entry, status="FAILED", reason=cvd_fail, candle_close=candle_close)
+                                has_radar = False
             except Exception as e_sq_eng:
                 logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
 
