@@ -2738,6 +2738,29 @@ class MultiAccountExecutor:
     def is_configured(self) -> bool:
         return any(acc.is_configured() for acc in self.accounts)
 
+    def get_account(self, identifier: str = None) -> SharkExchangeExecutor:
+        """Finds account by index (1-based), name, or returns primary if default."""
+        if not self.accounts:
+            return None
+        if not identifier:
+            return self.primary
+        ident = str(identifier).strip().lower()
+        if ident in ("1", "main", "himanshu", "primary", "mine"):
+            return self.accounts[0]
+        if ident in ("2", "anuj", "anuj sharma", "sharma"):
+            return self.accounts[1] if len(self.accounts) > 1 else self.accounts[0]
+        if ident.isdigit():
+            idx = int(ident) - 1
+            if 0 <= idx < len(self.accounts):
+                return self.accounts[idx]
+        for acc in self.accounts:
+            if ident in acc.name.lower():
+                return acc
+        return self.primary
+
+    def get_all_configured_accounts(self) -> list[SharkExchangeExecutor]:
+        return [acc for acc in self.accounts if acc.is_configured()]
+
     def clean_sym(self, p) -> str:
         return self.primary.clean_sym(p) if self.primary else ""
 

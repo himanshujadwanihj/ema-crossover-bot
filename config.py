@@ -37,7 +37,7 @@ SHARK_ACC1_CHAT_ID: str      = os.getenv("SHARK_ACC1_CHAT_ID", os.getenv("TELEGR
 SHARK_ACC2_NAME: str         = os.getenv("SHARK_ACC2_NAME", "Anuj Sharma")
 SHARK_ACC2_API_KEY: str      = os.getenv("SHARK_ACC2_API_KEY", "3388882595bbe761da4328eaa43462a8")
 SHARK_ACC2_API_SECRET: str   = os.getenv("SHARK_ACC2_API_SECRET", "2e238b3211066e1db5480110c71b377b")
-SHARK_ACC2_CHAT_ID: str      = os.getenv("SHARK_ACC2_CHAT_ID", "")
+SHARK_ACC2_CHAT_ID: str      = os.getenv("SHARK_ACC2_CHAT_ID", "1010973596")
 
 # Account 3 (Optional 3rd Account)
 SHARK_ACC3_NAME: str         = os.getenv("SHARK_ACC3_NAME", "Account_3")

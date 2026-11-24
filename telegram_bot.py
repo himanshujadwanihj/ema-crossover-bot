@@ -1066,6 +1066,280 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def get_account_keyboard(acc_idx: int = 1, view: str = "pos") -> InlineKeyboardMarkup:
+    """Builds interactive inline buttons to switch accounts and toggle between Positions and Trades."""
+    mine_label = "👑 Mine (Himanshu) ✅" if acc_idx == 1 else "👑 Mine (Himanshu)"
+    anuj_label = "👤 Anuj Sharma ✅" if acc_idx == 2 else "👤 Anuj Sharma"
+    btn_mine = InlineKeyboardButton(mine_label, callback_data=f"acc_{view}_1")
+    btn_anuj = InlineKeyboardButton(anuj_label, callback_data=f"acc_{view}_2")
+    btn_all = InlineKeyboardButton("🌐 All Accounts Overview", callback_data="acc_all_summary")
+    
+    if view == "pos":
+        toggle_btn = InlineKeyboardButton("📜 View All Closed Trades (Purane + New)", callback_data=f"acc_trades_{acc_idx}")
+    else:
+        toggle_btn = InlineKeyboardButton("🟢 View Active Positions & Margin", callback_data=f"acc_pos_{acc_idx}")
+        
+    refresh_btn = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
+    
+    keyboard = [
+        [btn_mine, btn_anuj],
+        [toggle_btn],
+        [refresh_btn, btn_all]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def build_account_positions_card(acc, session, acc_idx: int = 1) -> str:
+    from web_dashboard import fetch_live_market_price
+    bal_str = await acc.get_wallet_balance_summary(session)
+    positions = await acc.get_open_positions(session)
+    open_orders = await acc.get_open_orders(session)
+    
+    pos_lines = []
+    for p in positions:
+        sym = acc.clean_sym(p)
+        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+        side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+        sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+        entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+        mark_p = await fetch_live_market_price(session, sym)
+        if mark_p <= 0:
+            mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
+        if side == "SHORT":
+            upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+            pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
+        else:
+            upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+            pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
+        upnl_inr = upnl_usd * 102.0
+        pnl_sign = "+" if upnl_inr >= 0 else ""
+        pct_sign = "+" if pct >= 0 else ""
+        icon = "🟢" if upnl_inr >= 0 else "🔴"
+        pos_lines.append(f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>\n     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)")
+        
+    pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open active positions right now.</i>"
+    
+    ord_lines = []
+    for o in open_orders:
+        if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
+            osym = acc.clean_sym(o)
+            oside = o.get("side", "BUY")
+            opx = o.get("price", 0)
+            oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
+            ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ <code>{opx}</code> (Qty: {oqty})")
+    ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No resting entry limit orders.</i>"
+    
+    tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else f"👤 <b>{acc.name.upper()}</b>"
+    
+    card = (
+        f"🦈 <b>SHARK EXCHANGE — ISOLATED ACCOUNT VIEW</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Account: {tag}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bal_str}\n\n"
+        f"🟢 <b>Live Active Positions ({len(positions)}):</b>\n"
+        f"{pos_str}\n\n"
+        f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
+        f"{ord_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Status: Strict Account Isolation Active (No mixed data)</i>"
+    )
+    return card
+
+
+async def build_account_trades_card(acc, session, acc_idx: int = 1) -> str:
+    st_cl, closed_raw = await acc.shark_get(session, "/v1/positions/CLOSED")
+    tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else f"👤 <b>{acc.name.upper()}</b>"
+    
+    if st_cl != 200 or not isinstance(closed_raw, list):
+        return (
+            f"📜 <b>TRADE HISTORY LEDGER</b>\n"
+            f"Account: {tag}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Unable to query closed trades from Shark Exchange API (Status: {st_cl}).</i>"
+        )
+        
+    if not closed_raw:
+        return (
+            f"📜 <b>TRADE HISTORY LEDGER</b>\n"
+            f"Account: {tag}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>No closed trades recorded yet for this account. Active positions will appear here once closed.</i>"
+        )
+        
+    c_wins = 0
+    c_losses = 0
+    c_be = 0
+    gross_wins = 0.0
+    gross_losses = 0.0
+    be_friction = 0.0
+    
+    trade_items = []
+    for cp in closed_raw:
+        sym = acc.clean_sym(cp)
+        pos_t = str(cp.get("positionType") or "SHORT").upper()
+        sig = "BUY" if pos_t in ("LONG", "BUY") else "SELL"
+        pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
+        up_at = str(cp.get("updatedAt") or cp.get("createdAt") or "")
+        
+        # Format timestamp cleanly
+        ts_clean = up_at[:16].replace("T", " ") if up_at else "Recent"
+        
+        if abs(pnl_inr) <= 15.0:
+            c_be += 1
+            be_friction += pnl_inr
+            status_txt = "BE"
+            icon = "⚖️"
+        elif pnl_inr > 15.0:
+            c_wins += 1
+            gross_wins += pnl_inr
+            status_txt = "WIN"
+            icon = "🎯"
+        else:
+            c_losses += 1
+            gross_losses += abs(pnl_inr)
+            status_txt = "LOSS"
+            icon = "🔴"
+            
+        sign = "+" if pnl_inr >= 0 else ""
+        trade_items.append(f"{icon} <b>{sym}</b> [{sig}] <code>{sign}₹{pnl_inr:,.2f}</code> ({status_txt}) — <i>{ts_clean}</i>")
+        
+    total_exec = c_wins + c_losses + c_be
+    decisive = c_wins + c_losses
+    win_rate = (c_wins / decisive * 100.0) if decisive > 0 else 0.0
+    net_pnl = gross_wins - gross_losses + be_friction
+    pnl_sign = "+" if net_pnl >= 0 else ""
+    
+    recent_display = "\n".join(trade_items[:18])
+    more_count = max(0, total_exec - 18)
+    more_txt = f"\n<i>...plus {more_count} earlier closed trades recorded in broker state.</i>" if more_count > 0 else ""
+    
+    card = (
+        f"📜 <b>ALL CLOSED TRADES (PURANE + NEW)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Account: {tag}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>Scorecard:</b> <b>{c_wins}W</b> - <b>{c_losses}L</b> - <b>{c_be}BE</b>\n"
+        f"📈 <b>Win Rate:</b> <b>{win_rate:.1f}%</b> ({total_exec} Total Closed Setups)\n"
+        f"💰 <b>Net Realized PnL:</b> <b>{pnl_sign}₹{net_pnl:,.2f} INR</b>\n"
+        f"   └ Gross Wins: +₹{gross_wins:,.2f} | Losses: -₹{gross_losses:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Closed Trades Ledger (Most Recent):</b>\n"
+        f"{recent_display}{more_txt}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Strictly filtered to {acc.name} — No other account's trades mixed here.</i>"
+    )
+    return card
+
+
+async def build_all_accounts_summary_card(session) -> str:
+    from executor import executor
+    accs = executor.get_all_configured_accounts()
+    lines = []
+    lines.append("🌐 <b>MULTI-ACCOUNT PORTFOLIO OVERVIEW</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    for i, acc in enumerate(accs, 1):
+        tag = "👑 Mine (Himanshu)" if i == 1 else f"👤 {acc.name}"
+        bal_str = await acc.get_wallet_balance_summary(session)
+        pos = await acc.get_open_positions(session)
+        orders = await acc.get_open_orders(session)
+        resting = [o for o in orders if not o.get("reduceOnly") and o.get("placeType") != "POSITION"]
+        
+        st_cl, closed_raw = await acc.shark_get(session, "/v1/positions/CLOSED")
+        c_count = len(closed_raw) if st_cl == 200 and isinstance(closed_raw, list) else 0
+        
+        lines.append(f"<b>[{i}] {tag}</b>")
+        lines.append(f"  • Active Positions: <b>{len(pos)}</b> | Resting Limits: <b>{len(resting)}</b>")
+        lines.append(f"  • Total Closed Trades: <b>{c_count}</b>")
+        if bal_str:
+            lines.append(f"  {bal_str}")
+        lines.append("──────────────────────────")
+        
+    lines.append("<i>Use buttons below to inspect individual account trades & positions.</i>")
+    return "\n".join(lines)
+
+
+async def on_account_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+    
+    from executor import executor
+    import aiohttp
+    
+    async with aiohttp.ClientSession() as s:
+        if data == "acc_all_summary":
+            card = await build_all_accounts_summary_card(s)
+            kb = get_account_keyboard(acc_idx=1, view="pos")
+            try:
+                await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                pass
+            return
+            
+        parts = data.split("_")
+        # formats: acc_pos_1, acc_trades_2, acc_refresh_1_pos, acc_refresh_2_trades
+        if len(parts) >= 3:
+            action = parts[1]
+            if action == "refresh":
+                acc_idx = int(parts[2])
+                view = parts[3] if len(parts) > 3 else "pos"
+            elif action in ("pos", "trades"):
+                view = action
+                acc_idx = int(parts[2])
+            else:
+                acc_idx = 1
+                view = "pos"
+                
+            acc = executor.get_account(str(acc_idx))
+            if not acc:
+                acc = executor.primary
+                acc_idx = 1
+                
+            if view == "trades":
+                card = await build_account_trades_card(acc, s, acc_idx=acc_idx)
+            else:
+                card = await build_account_positions_card(acc, s, acc_idx=acc_idx)
+                
+            kb = get_account_keyboard(acc_idx=acc_idx, view=view)
+            try:
+                await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
+            except Exception as e_edit:
+                logger.debug(f"Edit message skipped: {e_edit}")
+
+
+async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends interactive account switcher & filter menu."""
+    msg = update.message
+    if not msg:
+        return
+    import aiohttp
+    from executor import executor
+    async with aiohttp.ClientSession() as s:
+        card = await build_all_accounts_summary_card(s)
+        kb = get_account_keyboard(acc_idx=1, view="pos")
+        await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
+
+
+async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reports all closed trades (purane + naye sab) for specified or primary account."""
+    msg = update.message
+    if not msg:
+        return
+    arg = context.args[0].lower() if context.args else "1"
+    from executor import executor
+    import aiohttp
+    acc_idx = 2 if arg in ("2", "anuj", "sharma") else 1
+    acc = executor.get_account(str(acc_idx))
+    async with aiohttp.ClientSession() as s:
+        card = await build_account_trades_card(acc, s, acc_idx=acc_idx)
+        kb = get_account_keyboard(acc_idx=acc_idx, view="trades")
+        await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
+
+
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reports real-time Paper Trading Strategy Lookout or Shark Live Status."""
     msg = update.message
@@ -1078,55 +1352,19 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If Paper Trading is DISABLED and Shark is Configured -> Show strictly Live Exchange
         if not PAPER_TRADING_ENABLED and executor.is_configured():
+            arg = context.args[0].lower() if context.args else "1"
+            if arg in ("all", "overview", "summary"):
+                async with aiohttp.ClientSession() as s:
+                    card = await build_all_accounts_summary_card(s)
+                    kb = get_account_keyboard(acc_idx=1, view="pos")
+                    await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
+                    return
+            acc_idx = 2 if arg in ("2", "anuj", "sharma") else 1
+            acc = executor.get_account(str(acc_idx))
             async with aiohttp.ClientSession() as s:
-                shark_bal = await executor.get_wallet_balance_summary(s)
-                shark_pos = await executor.get_open_positions(s)
-                open_orders = await executor.get_open_orders(s)
-                from web_dashboard import fetch_live_market_price
-                pos_lines = []
-                for p in shark_pos:
-                    sym = executor.clean_sym(p)
-                    pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-                    side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-                    sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-                    entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-                    mark_p = await fetch_live_market_price(s, sym)
-                    if mark_p <= 0:
-                        mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
-                    if side == "SHORT":
-                        upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
-                        pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-                    else:
-                        upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
-                        pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-                    upnl_inr = upnl_usd * 102.0
-                    pnl_sign = "+" if upnl_inr >= 0 else ""
-                    pct_sign = "+" if pct >= 0 else ""
-                    pos_lines.append(f"  • <b>{sym}</b> [{side}] Qty: {sz} (Floating: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%))")
-                pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open exchange positions currently.</i>"
-
-                ord_lines = []
-                for o in open_orders:
-                    if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
-                        osym = executor.clean_sym(o)
-                        oside = o.get("side", "BUY")
-                        opx = o.get("price", 0)
-                        oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
-                        ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ {opx} (Qty: {oqty})")
-                ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
-
-                card = (
-                    f"🦈 <b>SHARK EXCHANGE REAL LIVE AUTO-TRADING</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"{shark_bal}\n\n"
-                    f"🟢 <b>Live Active Positions ({len(shark_pos)}):</b>\n"
-                    f"{pos_str}\n\n"
-                    f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
-                    f"{ord_str}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<i>Mode: 🟢 REAL LIVE TRADING (Paper Trading Disabled)</i>"
-                )
-                await msg.reply_text(card, parse_mode="HTML")
+                card = await build_account_positions_card(acc, s, acc_idx=acc_idx)
+                kb = get_account_keyboard(acc_idx=acc_idx, view="pos")
+                await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
                 return
 
         # Default: Paper Trading or Combined View
@@ -1136,6 +1374,11 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             card = await generate_trades_ledger_card()
         else:
             card = await generate_strategy_lookout_card()
+        await msg.reply_text(card, parse_mode="HTML")
+        return
+    except Exception as e:
+        logger.error(f"cmd_positions error: {e}")
+        await msg.reply_text(f"⚠️ Error querying positions: {e}")
 
         if executor.is_configured():
             try:
@@ -1466,13 +1709,18 @@ def get_application() -> Application:
         
         # Core bot command handlers
         _app_instance.add_handler(CommandHandler(["start", "help"], cmd_start))
+        _app_instance.add_handler(CommandHandler(["accounts", "account", "users", "filter"], cmd_accounts))
+        _app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
         _app_instance.add_handler(CommandHandler(["setchannel", "linkchannel"], cmd_setchannel))
         _app_instance.add_handler(CommandHandler(["today", "report", "stats"], cmd_today))
         _app_instance.add_handler(CommandHandler(["getid", "channelid", "id"], cmd_getid))
-        _app_instance.add_handler(CommandHandler(["positions", "paper", "wallet", "trades"], cmd_positions))
+        _app_instance.add_handler(CommandHandler(["positions", "paper", "wallet"], cmd_positions))
         _app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
         _app_instance.add_handler(CommandHandler(["stop", "kill", "halt", "pause"], cmd_stop_bot))
         _app_instance.add_handler(CommandHandler(["startbot", "resume", "resumebot"], cmd_resume_bot))
+
+        # Account Filter Callback Handler (Seamless multi-account toggling)
+        _app_instance.add_handler(CallbackQueryHandler(on_account_filter_callback, pattern=r"^acc_"))
 
         # Channel member management handlers
         _app_instance.add_handler(CommandHandler(["admin", "users", "channels", "channelusers", "channelmembers", "members"], cmd_channels))
