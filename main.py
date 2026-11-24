@@ -1666,19 +1666,7 @@ async def main_loop():
                                 c["quality_score"] = quality_score
                                 c["analysis"] = analysis
 
-                                # Hard Minimum Score Gate: Must be at least 75
-                                if quality_score < 75:
-                                    comps = analysis.get("components", {})
-                                    comp_summary = (
-                                        f"HTF:{comps.get('htf',0)}/20, RSI:{comps.get('rsi',0)}/20, "
-                                        f"Vol:{comps.get('volume',0)}/15, ADX:{comps.get('adx',0)}/15, "
-                                        f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
-                                    )
-                                    return False, f"Multi-Factor Score is {quality_score}/100 (< 75 required | {verdict} | Breakdown: {comp_summary})"
-
-                                # USER DIRECTIVE:
-                                # "If AI score above 77 and RSI sign not there, still execute the trade!
-                                # 3-Star or 4-Star trade RSI sign not there but score above 77 -> execute the trade!"
+                                # Check RSI zone
                                 is_rsi_valid = True
                                 rsi_fail_reason = ""
                                 if f_rsi_val is None:
@@ -1692,6 +1680,11 @@ async def main_loop():
                                         is_rsi_valid = False
                                         rsi_fail_reason = f"RSI {f_rsi_val:.1f} is outside healthy SELL zone [38.0 - 58.0]"
 
+                                is_retest = c.get("is_retest", False) or "retest" in str(c.get("cross_type", "")).lower()
+
+                                # USER DIRECTIVE:
+                                # "If AI score above 77 and RSI sign not there, still execute the trade!
+                                # 3-Star or 4-Star trade RSI sign not there but score above 77 -> execute the trade!"
                                 if not is_rsi_valid:
                                     if quality_score > 77:
                                         logger.info(
@@ -1700,6 +1693,20 @@ async def main_loop():
                                         )
                                     else:
                                         return False, f"{rsi_fail_reason} (AI Quality Score {quality_score}/100 <= 77; requires healthy RSI)."
+                                else:
+                                    # RSI is healthy!
+                                    # For 3-Star and 4-Star setups with verified healthy RSI:
+                                    # - Retest setups: pullbacks naturally have low volume and rejection wicks; min score 60 required.
+                                    # - 4-Star setups: min score 65 required (allows off-hours session / 24/7 crypto execution).
+                                    min_score_required = 60 if is_retest else (65 if stars >= 4 else 70)
+                                    if quality_score < min_score_required:
+                                        comps = analysis.get("components", {})
+                                        comp_summary = (
+                                            f"HTF:{comps.get('htf',0)}/20, RSI:{comps.get('rsi',0)}/20, "
+                                            f"Vol:{comps.get('volume',0)}/15, ADX:{comps.get('adx',0)}/15, "
+                                            f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
+                                        )
+                                        return False, f"Multi-Factor Score is {quality_score}/100 (< {min_score_required} required | {verdict} | Breakdown: {comp_summary})"
 
                                 # USER DIRECTIVE: Funding Rate Squeeze Shield (Live Binance Microstructure)
                                 # Shields against crowded trades (Short Squeezes & Long Liquidations)
