@@ -603,6 +603,8 @@ async def get_real_live_dashboard_payload_async(session, account_identifier: str
             "account": {
                 "name": target_acc.name,
                 "id": 1 if target_acc == executor.accounts[0] else (2 if len(executor.accounts) > 1 and target_acc == executor.accounts[1] else 1),
+                "api_status": st,
+                "api_raw_balance": raw_total,
                 "all_accounts": [{"id": i + 1, "name": a.name} for i, a in enumerate(executor.accounts) if a.is_configured()]
             }
         }
@@ -681,12 +683,34 @@ async def api_paper_history_handler(request: web.Request) -> web.Response:
     return web.json_response({"error": "No wallet file found"}, status=404)
 
 
+async def api_test_account_handler(request: web.Request) -> web.Response:
+    """Tests Shark Exchange API authentication and permissions for specified account."""
+    acc_id = request.query.get("account") or "2"
+    from executor import executor
+    acc = executor.get_account(acc_id)
+    if not acc:
+        return web.json_response({"error": "Account not found"}, status=404)
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        st_w, resp_w = await acc.shark_get(s, "/v1/wallet/futures-wallet/details")
+        st_p, resp_p = await acc.shark_get(s, "/v1/positions/OPEN")
+        st_f, resp_f = await acc.shark_get(s, "/v1/wallet/funding-wallet/details")
+        return web.json_response({
+            "account_name": acc.name,
+            "api_key_prefix": acc.api_key[:6] + "..." if acc.api_key else None,
+            "futures_wallet": {"status": st_w, "response": resp_w},
+            "funding_wallet": {"status": st_f, "response": resp_f},
+            "open_positions": {"status": st_p, "response": resp_p}
+        })
+
+
 def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/index.html", index_handler)
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
+    app.router.add_get("/api/test-account", api_test_account_handler)
     app.router.add_get("/api/paper-history", api_paper_history_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ip", ip_handler)
