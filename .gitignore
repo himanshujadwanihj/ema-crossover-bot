@@ -31,6 +31,9 @@ scratch/
 # Large Reports & Documents
 *.pdf
 *.html
+!index.html
+!client_presentation_dashboard.html
+!client_dashboard.html
 *.xlsx
 
 # Signal state files (dynamically generated at runtime)

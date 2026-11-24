@@ -1059,15 +1059,15 @@ def get_permanent_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         kb = [
             [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
             [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
-            [KeyboardButton("📜 Trade History"), KeyboardButton("⚙️ Filter Settings")],
+            [KeyboardButton("📜 Trade History"), KeyboardButton("🌐 Web Dashboard")],
             [KeyboardButton("🌐 All Accounts"), KeyboardButton("🔄 Refresh")]
         ]
     else:
         kb = [
             [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
             [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
-            [KeyboardButton("📜 Trade History"), KeyboardButton("⚙️ Filter Settings")],
-            [KeyboardButton("🔄 Refresh")]
+            [KeyboardButton("📜 Trade History"), KeyboardButton("🌐 Web Dashboard")],
+            [KeyboardButton("🔄 Refresh"), KeyboardButton("⚙️ Filter Settings")]
         ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
 
@@ -1085,9 +1085,11 @@ def get_account_keyboard(acc_idx: int = 1, view: str = "front", is_admin: bool =
         btn_pos = InlineKeyboardButton("🟢 Live Trades ✅" if view == "pos" else "🟢 Live Trades", callback_data=f"acc_pos_{acc_idx}")
         btn_trades = InlineKeyboardButton("📜 Trade History ✅" if view == "trades" else "📜 Trade History", callback_data=f"acc_trades_{acc_idx}")
         btn_refresh = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
+        btn_web = InlineKeyboardButton("🌐 Open Web Dashboard", url="https://worker-production-e82be7c6.up.railway.app/anuj")
         keyboard = [
             [btn_front, btn_pos],
-            [btn_trades, btn_refresh]
+            [btn_trades, btn_refresh],
+            [btn_web]
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -1102,12 +1104,14 @@ def get_account_keyboard(acc_idx: int = 1, view: str = "front", is_admin: bool =
     btn_trades = InlineKeyboardButton("📜 Trade History ✅" if view == "trades" else "📜 Trade History", callback_data=f"acc_trades_{acc_idx}")
     btn_refresh = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
     btn_all = InlineKeyboardButton("🌐 All Accounts Overview", callback_data="acc_all_summary")
+    web_url = "https://worker-production-e82be7c6.up.railway.app/anuj" if acc_idx == 2 else "https://worker-production-e82be7c6.up.railway.app/"
+    btn_web = InlineKeyboardButton("🌐 Open Web Dashboard", url=web_url)
 
     keyboard = [
         [btn_mine, btn_anuj],
         [btn_front, btn_pos],
         [btn_trades, btn_refresh],
-        [btn_all]
+        [btn_all, btn_web]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1754,11 +1758,30 @@ async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAUL
             "Open @Alpha_Crypto_SignalBot to customize your coin watchlists, setups (Crossover/Retest), and star quality!",
             parse_mode="HTML"
         )
+    elif "web" in t_lower or "site" in t_lower or "url" in t_lower or "portfolio" in t_lower:
+        await cmd_web(update, context)
     elif "all account" in t_lower or "overview" in t_lower:
         if is_admin:
             await cmd_accounts(update, context)
         else:
             await cmd_start(update, context)
+
+
+async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends personal live web dashboard link."""
+    msg = update.message
+    if not msg:
+        return
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    url = "https://worker-production-e82be7c6.up.railway.app/anuj" if not is_admin else ("https://worker-production-e82be7c6.up.railway.app/anuj" if acc_idx == 2 else "https://worker-production-e82be7c6.up.railway.app/")
+    title = "ANUJ SHARMA — Personal Live Dashboard" if (not is_admin or acc_idx == 2) else "HIMANSHU — AlphaSniper Master Dashboard"
+    await msg.reply_text(
+        f"🌐 <b>{title}</b>\n\n"
+        f"🔗 <a href='{url}'>{url}</a>\n\n"
+        f"⚡ <i>Direct browser link with real-time live positions, margin balance, resting limit orders, and realized trade ledger!</i>",
+        parse_mode="HTML"
+    )
 
 
 async def cmd_radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2099,6 +2122,7 @@ def get_application() -> Application:
         _app_instance.add_handler(CommandHandler(["stop", "kill", "halt", "pause"], cmd_stop_bot))
         _app_instance.add_handler(CommandHandler(["startbot", "resume", "resumebot"], cmd_resume_bot))
         _app_instance.add_handler(CommandHandler(["radar", "radars", "coiling", "squeezes"], cmd_radar))
+        _app_instance.add_handler(CommandHandler(["web", "site", "dashboardlink", "link", "url", "portfolio"], cmd_web))
 
         # Account Filter Callback Handler (Seamless multi-account toggling)
         _app_instance.add_handler(CallbackQueryHandler(on_account_filter_callback, pattern=r"^acc_"))
@@ -2137,9 +2161,10 @@ async def start_telegram_bot_service():
             BotCommand("start", "🏠 Front Page Dashboard"),
             BotCommand("positions", "🟢 Live Active Trades"),
             BotCommand("trades", "📜 Closed Trades Ledger"),
+            BotCommand("radar", "📡 Active Pre-Squeeze Radars"),
+            BotCommand("web", "🌐 Personal Web Dashboard"),
             BotCommand("accounts", "💼 Account Overview"),
             BotCommand("today", "📊 Today's Signals Summary"),
-            BotCommand("radar", "📡 Active Pre-Squeeze Radars"),
             BotCommand("help", "ℹ️ Help & Status"),
         ]
         await app.bot.set_my_commands(commands)

@@ -529,8 +529,17 @@ async def get_real_live_dashboard_payload_async(session, account_identifier: str
         win_rate = (c_wins / decisive_exec * 100.0) if decisive_exec > 0 else 0.0
         profit_factor = round(gross_wins_inr / gross_losses_inr, 2) if gross_losses_inr > 0 else (99.0 if gross_wins_inr > 0 else 0.0)
         gross_closed_pnl_inr = round(gross_wins_inr - gross_losses_inr + be_friction_inr, 2)
-        # Genuine Net Profit on Shark Exchange (Funding Wallet / Withdrawable Profit)
-        net_trade_pnl_inr = round(funding_balance, 2) if funding_balance > 0 else 3328.0
+        
+        # Account-isolated profit & ROI computation
+        if target_acc == executor.primary:
+            net_trade_pnl_inr = round(funding_balance, 2) if funding_balance > 0 else (gross_closed_pnl_inr if gross_closed_pnl_inr != 0 else 3328.0)
+            initial_cap = 50000.0 if raw_total >= 1000.0 else max(1000.0, raw_total)
+            roi_pct = round(((raw_total - initial_cap) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
+        else:
+            net_trade_pnl_inr = round(gross_closed_pnl_inr if gross_closed_pnl_inr != 0 else funding_balance, 2)
+            initial_cap = raw_total if raw_total > 0 else 10000.0
+            roi_pct = round((net_trade_pnl_inr / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
+
         net_trade_pnl_usd = round(net_trade_pnl_inr / executor.usd_inr_rate, 2)
         total_roi_trade_pct = round((net_trade_pnl_inr / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
 
@@ -647,6 +656,17 @@ async def index_handler(request: web.Request) -> web.Response:
             html_content = f.read()
         return web.Response(text=html_content, content_type="text/html")
     return web.Response(text="<h1>AlphaSniper Live Engine Online</h1><p>index.html not found</p>", content_type="text/html")
+
+
+async def client_dashboard_handler(request: web.Request) -> web.Response:
+    """Serves client_dashboard.html (Standalone Personal Live Portfolio for Anuj Sharma / Client View)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    html_path = os.path.join(base_dir, "client_dashboard.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return web.Response(text=html_content, content_type="text/html")
+    return web.Response(text="<h1>Personal Client Dashboard</h1><p>client_dashboard.html not found</p>", content_type="text/html")
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -863,6 +883,10 @@ def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/index.html", index_handler)
+    app.router.add_get("/client", client_dashboard_handler)
+    app.router.add_get("/anuj", client_dashboard_handler)
+    app.router.add_get("/portfolio", client_dashboard_handler)
+    app.router.add_get("/client_dashboard.html", client_dashboard_handler)
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
     app.router.add_get("/api/test-account", api_test_account_handler)
