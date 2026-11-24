@@ -1364,13 +1364,16 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry = float(p.get("entryPrice") or p.get("price") or 0)
             sl = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
             tp1 = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
+            tp2 = float(p.get("takeProfitPrice2") or 0)
             curr_p = await fetch_live_market_price(s, sym)
             use_entry = curr_p if curr_p > 0 else entry
             if sl == 0:
                 sl = use_entry * 1.022 if sig == "SELL" else use_entry * 0.978
             if tp1 == 0:
                 tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
-            res = await target_acc.execute_signal_trade(s, sym, sig, use_entry, sl, tp1, aligned_count=4)
+            if tp2 == 0:
+                tp2 = use_entry * 0.93 if sig == "SELL" else use_entry * 1.07
+            res = await target_acc.execute_signal_trade(s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4)
             synced.append(f"• <b>{sym}</b> [{sig}]: {res.get('status')} ({res.get('reason', 'OK')})")
             
         if synced:
