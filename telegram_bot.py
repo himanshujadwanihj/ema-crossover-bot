@@ -1023,12 +1023,30 @@ async def on_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif msg.forward_from:
         await msg.reply_text(f"That was forwarded from a user, not a channel. Please forward a message FROM the channel itself.", parse_mode="HTML")
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responds to /start and reports user's chat ID immediately."""
+    msg = update.message
+    if not msg:
+        return
+    chat_id = msg.chat_id
+    user = msg.from_user
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Trader"
+    logger.info(f"📩 /start received from {name} (Chat ID: {chat_id})")
+    await msg.reply_text(
+        f"👋 <b>Welcome {name}!</b>\n\n"
+        f"📋 <b>Your Telegram Chat ID:</b> <code>{chat_id}</code>\n\n"
+        f"Share this Chat ID with the admin to receive private trade alerts for your account! 🚀",
+        parse_mode="HTML"
+    )
+
+
 async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reports the channel ID of any forwarded message or current chat."""
     msg = update.message
     if not msg:
         return
     
+    logger.info(f"📩 /id received from {msg.chat_id}")
     # If user forwarded a message from a channel
     if msg.forward_from_chat:
         chat = msg.forward_from_chat
@@ -1447,6 +1465,7 @@ def get_application() -> Application:
         from telegram.ext import MessageHandler, filters, ChatMemberHandler
         
         # Core bot command handlers
+        _app_instance.add_handler(CommandHandler(["start", "help"], cmd_start))
         _app_instance.add_handler(CommandHandler(["setchannel", "linkchannel"], cmd_setchannel))
         _app_instance.add_handler(CommandHandler(["today", "report", "stats"], cmd_today))
         _app_instance.add_handler(CommandHandler(["getid", "channelid", "id"], cmd_getid))
