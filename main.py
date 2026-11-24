@@ -710,55 +710,55 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     lbl1 = f"{target_r}R Target"
                                     lbl2 = f"{rr2}R Extended"
 
-                                from telegram_bot import queue_alert
-                                sq_queued = await queue_alert(
-                                    symbol=symbol,
-                                    tf_label="1H",
-                                    signal=sq_signal,
-                                    entry=entry,
-                                    sl=dyn_sl,
-                                    tp=tp1,
-                                    tf_states=tf_states,
-                                    cross_type=cross_type,
-                                    candle_time=candle_ts,
-                                    macro_struct=macro_struct,
-                                    tp1=tp1, tp2=tp2,
-                                    rr1=rr1, rr2=rr2,
-                                    lbl1=lbl1, lbl2=lbl2,
-                                    tf_data=tf_data,
-                                    is_special_list=(symbol in SPECIAL_LIST),
-                                    rsi=sq_rsi,
-                                    is_dedicated_squeeze=True,
-                                    is_trap_reversal=is_trap_reversal
-                                )
-                                if sq_queued:
-                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
-                                    if has_radar:
-                                        mark_radar_triggered(symbol)
-                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
+                                    from telegram_bot import queue_alert
+                                    sq_queued = await queue_alert(
+                                        symbol=symbol,
+                                        tf_label="1H",
+                                        signal=sq_signal,
+                                        entry=entry,
+                                        sl=dyn_sl,
+                                        tp=tp1,
+                                        tf_states=tf_states,
+                                        cross_type=cross_type,
+                                        candle_time=candle_ts,
+                                        macro_struct=macro_struct,
+                                        tp1=tp1, tp2=tp2,
+                                        rr1=rr1, rr2=rr2,
+                                        lbl1=lbl1, lbl2=lbl2,
+                                        tf_data=tf_data,
+                                        is_special_list=(symbol in SPECIAL_LIST),
+                                        rsi=sq_rsi,
+                                        is_dedicated_squeeze=True,
+                                        is_trap_reversal=is_trap_reversal
+                                    )
+                                    if sq_queued:
+                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
+                                        if has_radar:
+                                            mark_radar_triggered(symbol)
+                                        logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
 
-                                    # AUTO-TRADING ENROLLMENT:
-                                    # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
-                                    sq_candidate = {
-                                        "symbol": symbol,
-                                        "signal": sq_signal,
-                                        "entry": entry,
-                                        "sl": dyn_sl,
-                                        "tp1": tp1,
-                                        "tp2": tp2,
-                                        "tp": tp1,
-                                        "target_r": target_r,
-                                        "aligned_count": 4,  # High-conviction verified setup with CVD + volume
-                                        "is_3_htf_aligned": True,
-                                        "is_30m_early": False,
-                                        "is_special": (symbol in SPECIAL_LIST),
-                                        "is_dedicated_squeeze": True,
-                                        "is_trap_reversal": is_trap_reversal,
-                                        "unique_key": unique_sq_key,
-                                        "candle_ts": candle_ts,
-                                        "rr2": target_r,
-                                        "rsi": sq_rsi,
-                                    }
+                                        # AUTO-TRADING ENROLLMENT:
+                                        # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
+                                        sq_candidate = {
+                                            "symbol": symbol,
+                                            "signal": sq_signal,
+                                            "entry": entry,
+                                            "sl": dyn_sl,
+                                            "tp1": tp1,
+                                            "tp2": tp2,
+                                            "tp": tp1,
+                                            "target_r": target_r,
+                                            "aligned_count": 4,  # High-conviction verified setup with CVD + volume
+                                            "is_3_htf_aligned": True,
+                                            "is_30m_early": False,
+                                            "is_special": (symbol in SPECIAL_LIST),
+                                            "is_dedicated_squeeze": True,
+                                            "is_trap_reversal": is_trap_reversal,
+                                            "unique_key": unique_sq_key,
+                                            "candle_ts": candle_ts,
+                                            "rr2": target_r,
+                                            "rsi": sq_rsi,
+                                        }
                             elif has_radar:
                                 cvd_fail = "Whale CVD Divergence: Aggressive delta selling detected during breakout candle."
                                 logger.info(f"FILTERED 1H SQUEEZE: {symbol} — {cvd_fail}")
@@ -1043,13 +1043,15 @@ async def scan_single_symbol_async(session, symbol, semaphore):
         # BUG #1 FIX: process_symbol_async now returns a LIST of candidates (all TF crossovers)
         crossover_cands = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data)
 
-        # Build unified trades list: crossovers (all TFs) + retest candidate
+        # Build unified trades list: crossovers (all TFs) + retest candidates
         trade_cands = []
         if isinstance(crossover_cands, list):
             trade_cands.extend(crossover_cands)
         elif isinstance(crossover_cands, dict):
             trade_cands.append(crossover_cands)  # Backward compat
-        if isinstance(retest_cand, dict):
+        if isinstance(retest_cand, list):
+            trade_cands.extend(retest_cand)
+        elif isinstance(retest_cand, dict):
             trade_cands.append(retest_cand)
 
         return {
@@ -1081,39 +1083,48 @@ async def shark_native_tp_sl_monitor(session):
 _rejection_notified_cache = {}
 
 async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: dict = None):
-    """Notifies the user immediately via Telegram when a signal is rejected/filtered from Shark execution."""
+    """Notifies the user reliably via Telegram when a signal is rejected/filtered from Shark execution."""
+    import html as _html
     cand = cand or {}
-    uniq_k = cand.get("unique_key") or "signal"
+    uniq_k = str(cand.get("unique_key") or "signal")
     c_ts = str(cand.get("candle_ts") or "")
     stars = cand.get("aligned_count", 0)
     rsi_val = cand.get("rsi")
     entry_p = cand.get("entry")
-    
-    dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason[:25]}"
+    tf_lbl = str(cand.get("tf_label") or "")
+    setup_lbl = str(cand.get("cross_type") or "")
+
+    reason_str = str(reason or "Unspecified rejection reason")
+    dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason_str[:35]}"
     now_ts = time.time()
-    
+
     # Prune old cache (> 2 hours)
     for k, ts in list(_rejection_notified_cache.items()):
         if now_ts - ts > 7200:
             _rejection_notified_cache.pop(k, None)
-            
+
     if dedup_key in _rejection_notified_cache and (now_ts - _rejection_notified_cache[dedup_key] < 1800):
         return  # Deduplicated within 30 minutes
-        
-    _rejection_notified_cache[dedup_key] = now_ts
-    
+
+    safe_sym = _html.escape(str(symbol), quote=False)
+    safe_sig = _html.escape(str(signal).upper(), quote=False)
+    safe_reason = _html.escape(reason_str, quote=False)
+    safe_setup = _html.escape(f"{setup_lbl} ({tf_lbl})".strip(), quote=False) if (setup_lbl or tf_lbl) else ""
+
     stars_str = f"{stars}/4 Stars" if stars > 0 else "Signal"
     rsi_str = f" | 📊 <b>RSI:</b> <code>{float(rsi_val):.1f}</code>" if rsi_val is not None else ""
     funding_val = cand.get("funding_pct")
     funding_str = f" | ⚡ <b>Funding:</b> <code>{funding_val:+.4f}%</code>" if funding_val is not None else ""
-    entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{entry_p}</code>" if entry_p else ""
-    
+    entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{_html.escape(str(entry_p), quote=False)}</code>" if entry_p else ""
+    setup_line = f"\n📐 <b>Setup:</b> {safe_setup}" if safe_setup else ""
+
     score_val = cand.get("quality_score") or (cand.get("analysis") or {}).get("score")
     score_verdict = (cand.get("analysis") or {}).get("verdict")
     comps = (cand.get("analysis") or {}).get("components") or {}
-    
+
     score_block = ""
     if score_val is not None:
+        safe_verdict = _html.escape(str(score_verdict or ""), quote=False)
         comp_lines = ""
         if comps:
             comp_lines = (
@@ -1123,24 +1134,42 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
                 f"  • MACD: <code>{comps.get('macd', 0)}/10</code> | Candle Body: <code>{comps.get('body', 0)}/10</code>\n"
                 f"  • Session: <code>{comps.get('session', 0)}/10</code>"
             )
-        score_block = f"\n🧠 <b>AI Quality Score:</b> <code>{score_val}/100</code> ({score_verdict}){comp_lines}"
+        score_block = f"\n🧠 <b>AI Quality Score:</b> <code>{score_val}/100</code> ({safe_verdict}){comp_lines}"
+
+    rl = reason_str.lower()
+    if "maintenance" in rl:
+        footer_note = "🌙 <i>Night Maintenance Window (12:30 AM–05:30 AM IST) active — zero new trades executed.</i>"
+    elif "circuit breaker" in rl or "weekend" in rl:
+        footer_note = "🛡️ <i>Scheduled risk protection pause active — capital preserved.</i>"
+    elif "shark broker" in rl or "partial" in rl or "margin" in rl:
+        footer_note = "⚠️ <i>Broker/Account execution error reported above — check account margin or order state.</i>"
+    elif "already exists" in rl or "directional limit" in rl:
+        footer_note = "🛡️ <i>Portfolio risk shield prevented duplicate or over-concentrated exposure.</i>"
+    else:
+        footer_note = "💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>"
 
     msg = (
-        f"🛡️ <b>SHARK AUTO-TRADE FILTER NOTICE</b>\n"
+        f"🛡️ <b>SHARK AUTO-TRADE REJECTION NOTICE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 <b>Pair:</b> <code>{symbol}</code> [<b>{signal.upper()}</b>]\n"
+        f"🪙 <b>Pair:</b> <code>{safe_sym}</code> [<b>{safe_sig}</b>]{setup_line}\n"
         f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{funding_str}{entry_str}{score_block}\n"
-        f"🚫 <b>Execution Status:</b> Order Suppressed by Shield\n"
-        f"📋 <b>Exact Reason:</b> {reason}\n\n"
-        f"💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>\n"
+        f"🚫 <b>Execution Status:</b> Not Executed on Broker\n"
+        f"📋 <b>Exact Reason:</b> {safe_reason}\n\n"
+        f"{footer_note}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
-        from telegram_bot import send_trading_update
-        await send_trading_update(msg)
-        logger.info(f"Dispatched trade rejection notice for {symbol} [{signal}]: {reason}")
+        from telegram_bot import send_text_to_chat
+        from config import TELEGRAM_CHAT_ID
+        target = str(TELEGRAM_CHAT_ID or "771305593").strip()
+        sent = await send_text_to_chat(target, msg)
+        if sent is not None:
+            _rejection_notified_cache[dedup_key] = now_ts
+            logger.info(f"Dispatched trade rejection notice for {symbol} [{signal}]: {reason_str}")
+        else:
+            logger.error(f"Telegram returned None dispatching rejection notice for {symbol} [{signal}]")
     except Exception as e_ntf:
-        logger.error(f"Error dispatching rejection notice: {e_ntf}")
+        logger.error(f"Error dispatching rejection notice for {symbol}: {e_ntf}", exc_info=True)
 
 async def main_loop():
     validate_config()
@@ -1215,7 +1244,8 @@ async def main_loop():
                 logger.info("⚡ Fast TP/SL Monitor Worker STARTED (Polling every 5s for real-time exchange TP/SL hit alerts & order sweeps)")
                 from executor import executor
                 from paper_trader import evaluate_paper_trades_async, load_wallet, generate_strategy_lookout_card, notify_telegram
-                last_lookout_time = time.time()
+                from state import get_last_lookout_ts, set_last_lookout_ts
+                last_lookout_time = get_last_lookout_ts()
                 while True:
                     try:
                         await executor.sync_and_manage_live_orders(session)
@@ -1231,7 +1261,7 @@ async def main_loop():
 
                         # Regular Automated Strategy Lookout Update (Every 1 hour when trades are active)
                         now_t = time.time()
-                        if now_t - last_lookout_time >= 3600:
+                        if now_t - last_lookout_time >= 3600 and (now_t - BOT_START_TIME >= 65):
                             try:
                                 wallet = load_wallet()
                                 if wallet.get("active_positions") or wallet.get("resting_orders"):
@@ -1239,142 +1269,36 @@ async def main_loop():
                                     await notify_telegram(card)
                                     logger.info("Dispatched regular hourly paper trading strategy lookout update.")
                                 last_lookout_time = now_t
+                                set_last_lookout_ts(now_t)
                             except Exception as e_look:
                                 logger.error(f"Error sending regular paper lookout update: {e_look}")
                     else:
-                        # REAL LIVE TRADING: Regular Automated Hourly Position Tracking Lookout Update
+                        # REAL LIVE TRADING: Multi-Account Hourly Position Tracking Lookout Update
                         now_t = time.time()
-                        if now_t - last_lookout_time >= 3600:
+                        if now_t - last_lookout_time >= 3600 and (now_t - BOT_START_TIME >= 65):
                             try:
                                 if executor.is_configured():
                                     import zoneinfo
+                                    from telegram_bot import build_hourly_live_lookout_cards, send_text_to_chat
+                                    from config import TELEGRAM_CHAT_ID
                                     ist_h = zoneinfo.ZoneInfo("Asia/Kolkata")
                                     time_str_h = datetime.now(ist_h).strftime("%d %b %Y, %I:%M %p IST")
-                                    shark_bal = await executor.get_wallet_balance_summary(session)
-                                    shark_pos = await executor.get_open_positions(session)
-                                    open_orders = await executor.get_open_orders(session)
 
-                                    pos_lines = []
-                                    from web_dashboard import fetch_live_market_price
-                                    for p in shark_pos:
-                                        p_sym = executor.clean_sym(p)
-                                        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-                                        p_side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-                                        p_sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-                                        p_entry = float(p.get("entryPrice", 0) or p.get("avgPrice", 0) or 0)
-                                        
-                                        # Live sub-second market price with multi-exchange fallback
-                                        p_mark = await fetch_live_market_price(session, p_sym)
-                                        if p_mark <= 0:
-                                            p_mark = float(p.get("markPrice", 0) or p.get("lastPrice", 0) or p_entry)
+                                    admin_card, client_dispatches = await build_hourly_live_lookout_cards(session, time_str_h)
+                                    admin_chat = str(TELEGRAM_CHAT_ID or "771305593").strip()
+                                    await send_text_to_chat(admin_chat, admin_card)
+                                    logger.info("Dispatched multi-account hourly real live trading lookout update to Admin Telegram.")
 
-                                        # Real-time Mathematical Floating PnL
-                                        if p_side == "SHORT":
-                                          p_upnl_usd = (
-                                              (p_entry - p_mark) * p_sz
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                          p_pct = (
-                                              (
-                                                  (p_entry - p_mark)
-                                                  / p_entry
-                                                  * 100.0
-                                                  * 10
-                                              )
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                        else:
-                                          p_upnl_usd = (
-                                              (p_mark - p_entry) * p_sz
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                          p_pct = (
-                                              (
-                                                  (p_mark - p_entry)
-                                                  / p_entry
-                                                  * 100.0
-                                                  * 10
-                                              )
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-
-                                        p_upnl_inr = (
-                                            p_upnl_usd * executor.usd_inr_rate
-                                        )
-                                        pnl_sign = (
-                                            "+" if p_upnl_inr >= 0 else ""
-                                        )
-                                        pct_sign = "+" if p_pct >= 0 else ""
-                                        p_entry_disp = format_price(
-                                            p_entry, p_sym
-                                        )
-                                        p_mark_disp = format_price(
-                                            p_mark, p_sym
-                                        )
-                                        pos_lines.append(
-                                            f"  • <b>{p_sym}</b> [{p_side}] Qty:"
-                                            f" {p_sz} | Entry: {p_entry_disp} |"
-                                            f" Mark: {p_mark_disp} | Floating:"
-                                            f" <b>{pnl_sign}₹{p_upnl_inr:,.2f}</b>"
-                                            f" ({pct_sign}{p_pct:.2f}%)"
-                                        )
-
-                                    pos_str = (
-                                        "\n".join(pos_lines)
-                                        if pos_lines
-                                        else (
-                                            "  • <i>No open exchange positions"
-                                            " currently.</i>"
-                                        )
-                                    )
-
-                                    ord_lines = []
-                                    for o in open_orders:
-                                      if (
-                                          not o.get("reduceOnly")
-                                          and o.get("placeType") != "POSITION"
-                                      ):
-                                        o_sym = executor.clean_sym(o)
-                                        o_side = str(
-                                            o.get("side", "BUY")
-                                        ).upper()
-                                        o_px = float(o.get("price", 0) or 0)
-                                        o_qty = float(
-                                            o.get("orderAmount")
-                                            or o.get("quantity")
-                                            or o.get("origQty")
-                                            or 0
-                                        )
-                                        ord_lines.append(
-                                            f"  • <b>{o_sym}</b> [{o_side}]"
-                                            f" Limit @ {format_price(o_px, o_sym)} (Qty: {o_qty})"
-                                        )
-
-                                    ord_str = "\n".join(ord_lines[:8]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
-
-                                    live_lookout_card = (
-                                        f"🦈 <b>REAL LIVE TRADING: HOURLY POSITION LOOKOUT</b>\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"⏰ <b>Time:</b> {time_str_h}\n"
-                                        f"💼 <b>Status:</b> 🟢 <b>Real Live Trading Active</b> (Shark Exchange)\n\n"
-                                        f"{shark_bal}\n\n"
-                                        f"🟢 <b>Active Positions ({len(shark_pos)}):</b>\n"
-                                        f"{pos_str}\n\n"
-                                        f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
-                                        f"{ord_str}\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"<i>Automated Hourly Position Tracker • 100% Target Engine Active</i>"
-                                    )
-                                    from telegram_bot import send_text_alert
-                                    await send_text_alert(live_lookout_card)
-                                    logger.info("Dispatched regular hourly real live trading lookout update to Telegram.")
+                                    for client_chat, client_card in client_dispatches:
+                                        try:
+                                            await send_text_to_chat(client_chat, client_card)
+                                            logger.info(f"Dispatched personal hourly lookout update to client chat {client_chat}.")
+                                        except Exception as e_cli:
+                                            logger.error(f"Error sending personal hourly lookout to {client_chat}: {e_cli}")
                                 last_lookout_time = now_t
+                                set_last_lookout_ts(now_t)
                             except Exception as e_live_look:
-                                logger.error(f"Error sending regular live lookout update: {e_live_look}")
+                                logger.error(f"Error sending regular live lookout update: {e_live_look}", exc_info=True)
 
                     await asyncio.sleep(5)
 
@@ -1406,7 +1330,8 @@ async def main_loop():
                     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
                     today_str = now_ist.strftime("%Y-%m-%d")
                     # USER DIRECTIVE: Night Maintenance Pause (12:30 AM to 05:30 AM IST) strictly enforced
-                    is_night_pause = (now_ist.hour == 0 and now_ist.minute >= 30) or (1 <= now_ist.hour < 5) or (now_ist.hour == 5 and now_ist.minute < 30)
+                    from config import is_night_maintenance_window
+                    is_night_pause = is_night_maintenance_window(datetime.now(timezone.utc))
                     
                     # Always resolve pending active trades (TP / SL / Breakeven Shield)
                     await resolve_pending_trades_async(session, semaphore)
@@ -1566,6 +1491,10 @@ async def main_loop():
                         if raw_candidates:
                             from executor import executor
                             async def _check_auto_trade_eligibility(c):
+                                from config import is_night_maintenance_window
+                                if is_night_maintenance_window():
+                                    return False, "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused to protect capital."
+
                                 sym = c.get("symbol", "")
                                 sym_upper = sym.upper()
                                 sig = c.get("signal", "BUY").upper()
@@ -1733,7 +1662,12 @@ async def main_loop():
 
                             eligible_candidates = []
                             for c in raw_candidates:
-                                is_ok, reason = await _check_auto_trade_eligibility(c)
+                                try:
+                                    is_ok, reason = await _check_auto_trade_eligibility(c)
+                                except Exception as e_elig:
+                                    is_ok = False
+                                    reason = f"Eligibility check error: {e_elig}"
+                                    logger.error(f"Error checking auto-trade eligibility for {c.get('symbol')}: {e_elig}", exc_info=True)
                                 if is_ok:
                                     eligible_candidates.append(c)
                                 else:
@@ -1745,6 +1679,17 @@ async def main_loop():
                                         update_trade_outcome(st_k, "SIGNAL_ONLY_US_STOCK")
                                     else:
                                         await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
+
+                            if eligible_candidates and not executor.is_configured():
+                                from config import PAPER_TRADING_ENABLED
+                                if not PAPER_TRADING_ENABLED:
+                                    for c_unconf in eligible_candidates:
+                                        await notify_signal_rejection(
+                                            c_unconf.get("symbol"),
+                                            c_unconf.get("signal"),
+                                            "Auto-Trading Disabled or Shark Exchange API keys not configured.",
+                                            cand=c_unconf,
+                                        )
 
                             if eligible_candidates and executor.is_configured():
                                 from executor import clean_contract_symbol
@@ -1826,20 +1771,32 @@ async def main_loop():
 
                                     action_desc = "CONTINUATION TRAIL SL/TP" if is_same_dir_continuation else "BULK TRADE EXECUTE"
                                     logger.info(f"⚡ {action_desc}: {sym} [{sig}] ({stars}/4 Stars Priority | AI Score: {cand.get('quality_score', 'N/A')}/100)")
-                                    
-                                    shark_res = await executor.execute_signal_trade(
-                                        session, sym, sig, cand["entry"], cand["sl"], 
-                                        cand["tp1"], cand["tp2"],
-                                        aligned_count=stars,
-                                        adx=cand.get("adx")
-                                    )
-                                    
-                                    if shark_res and shark_res.get("status") == "success":
+                                    try:
+                                        shark_res = await executor.execute_signal_trade(
+                                            session, sym, sig, cand["entry"], cand["sl"], 
+                                            cand["tp1"], cand["tp2"],
+                                            aligned_count=stars,
+                                            adx=cand.get("adx")
+                                        )
+                                    except Exception as e_exec:
+                                        logger.error(f"Unhandled exception executing {sym} [{sig}]: {e_exec}", exc_info=True)
+                                        await notify_signal_rejection(sym, sig, f"Shark Broker Exception: {e_exec}", cand=cand)
+                                        continue
+
+                                    if shark_res and shark_res.get("status") in ("success", "partial_success"):
                                         from state import update_trade_progress, _make_key
                                         state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
                                         t_qty = shark_res.get("total_qty", 0)
                                         update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
                                         logger.info(f"Marked shark_order_placed=True for {state_key}")
+                                        failed_accs = shark_res.get("failed_accounts") or []
+                                        real_failures = [
+                                            f for f in failed_accs
+                                            if "already exists" not in str(f.get("reason", "")).lower()
+                                        ]
+                                        if real_failures:
+                                            part_reason = " | ".join([f"{f['account']}: {f['reason']}" for f in real_failures])
+                                            await notify_signal_rejection(sym, sig, f"Partial Account Rejection: {part_reason}", cand=cand)
                                     elif shark_res and shark_res.get("status") == "trailed":
                                         logger.info(f"✅ Position for {sym} successfully trailed SL/TP on continuation signal.")
                                     elif shark_res and shark_res.get("status") in ("skipped", "error"):

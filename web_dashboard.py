@@ -852,7 +852,7 @@ async def api_sync_positions_handler(request: web.Request) -> web.Response:
                     
                 logger.info(f"🔄 SYNC POSITIONS: Executing {sym} [{sig}] on {target_acc.name} at entry {use_entry}")
                 res = await target_acc.execute_signal_trade(
-                    s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4
+                    s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4, allow_during_maintenance=True
                 )
                 synced.append({
                     "symbol": sym,

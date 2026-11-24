@@ -51,22 +51,72 @@ _send_lock = asyncio.Lock()
 async def send_text_to_chat(chat_id: str, message: str, disable_notification: bool = False):
     if not message:
         return None
-    from telegram.error import RetryAfter
+    import re
+    import html as _html
+    from telegram.error import RetryAfter, BadRequest
     bot = _get_bot()
+
+    def _split_chunks(text: str, max_len: int = 3900) -> list[str]:
+        if len(text) <= max_len:
+            return [text]
+        chunks = []
+        current = []
+        cur_len = 0
+        for line in text.split("\n"):
+            add_len = len(line) + (1 if current else 0)
+            if cur_len + add_len > max_len and current:
+                chunks.append("\n".join(current))
+                current = [line]
+                cur_len = len(line)
+            else:
+                current.append(line)
+                cur_len += add_len
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
+    def _strip_html(text: str) -> str:
+        plain = re.sub(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a\b[^>]*)>", "", text)
+        return _html.unescape(plain)
+
+    last_sent = None
     async with _send_lock:
-        for attempt in range(5):
-            try:
-                sent = await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML", disable_web_page_preview=False, disable_notification=disable_notification)
-                await asyncio.sleep(2.0)
-                return sent
-            except RetryAfter as e:
-                wait_s = getattr(e, 'retry_after', 20)
-                logger.warning(f"Telegram Flood Control hit for {chat_id}. Waiting {wait_s}s...")
-                await asyncio.sleep(wait_s + 1)
-            except Exception as e:
-                logger.error(f"Failed to send to chat {chat_id}: {e}")
-                await asyncio.sleep(2)
-        return None
+        for chunk in _split_chunks(str(message)):
+            for attempt in range(5):
+                try:
+                    last_sent = await bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        parse_mode="HTML",
+                        disable_web_page_preview=False,
+                        disable_notification=disable_notification,
+                    )
+                    await asyncio.sleep(1.5)
+                    break
+                except RetryAfter as e:
+                    wait_s = getattr(e, "retry_after", 20)
+                    logger.warning(f"Telegram Flood Control hit for {chat_id}. Waiting {wait_s}s...")
+                    await asyncio.sleep(wait_s + 1)
+                except BadRequest as br:
+                    logger.error(f"Telegram BadRequest for chat {chat_id}: {br}")
+                    err_l = str(br).lower()
+                    if "parse entities" in err_l or "tag" in err_l or "entity" in err_l:
+                        try:
+                            last_sent = await bot.send_message(
+                                chat_id=chat_id,
+                                text=_strip_html(chunk),
+                                parse_mode=None,
+                                disable_web_page_preview=False,
+                                disable_notification=disable_notification,
+                            )
+                            await asyncio.sleep(1.5)
+                        except Exception as e_plain:
+                            logger.error(f"Plain-text fallback also failed for {chat_id}: {e_plain}")
+                    break
+                except Exception as e:
+                    logger.error(f"Failed to send to chat {chat_id} (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(2)
+    return last_sent
 
 import os
 
@@ -1116,6 +1166,286 @@ def get_account_keyboard(acc_idx: int = 1, view: str = "front", is_admin: bool =
     return InlineKeyboardMarkup(keyboard)
 
 
+async def _fetch_account_positions_snapshot(acc, session) -> dict:
+    """
+    Shared live snapshot builder for a SharkExchangeExecutor account:
+    - Fetches open positions & open orders cleanly.
+    - Extracts SL, TP, and live Mark Price directly from Shark orderbook + multi-exchange feeds.
+    - Never drops positions due to truncation or missing fields, and never confuses notional positionAmount with coin quantity.
+    """
+    from web_dashboard import fetch_live_market_price
+    from state import get_latest_symbol_state
+
+    positions = await acc.get_open_positions(session)
+    pos_ok = bool(getattr(acc, "_last_positions_fetch_ok", True))
+    open_orders = await acc.get_open_orders(session)
+    ord_ok = bool(getattr(acc, "_last_orders_fetch_ok", True))
+
+    orders_by_sym = {}
+    resting_orders = []
+    cur_market_by_sym = {}
+
+    for o in open_orders:
+        sym = acc.clean_sym(o)
+        if not sym:
+            continue
+        mp = float(o.get("curMarketPrice") or 0)
+        if mp > 0:
+            cur_market_by_sym[sym] = mp
+
+        place_up = str(o.get("placeType") or "").upper()
+        typ_up = str(o.get("type") or "").upper()
+        sub_up = str(o.get("subType") or "").upper()
+        link_up = str(o.get("linkType") or "").upper()
+        is_red = bool(o.get("reduceOnly", False))
+
+        is_bracket = (
+            place_up == "POSITION"
+            or is_red
+            or link_up in ("ORDER_SL", "ORDER_TP")
+            or sub_up in ("STOP_LOSS", "TAKE_PROFIT")
+            or typ_up in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+        )
+        if is_bracket:
+            orders_by_sym.setdefault(sym, []).append(o)
+        else:
+            o_px = float(o.get("price") or 0)
+            o_qty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
+            resting_orders.append({
+                "symbol": sym,
+                "side": str(o.get("side") or "BUY").upper(),
+                "price": o_px,
+                "qty": o_qty,
+            })
+
+    parsed_positions = []
+    tot_unrealized_inr = 0.0
+    usd_rate = getattr(acc, "usd_inr_rate", 102.0)
+
+    for p in positions:
+        sym = acc.clean_sym(p)
+        if not sym:
+            continue
+        # Prioritize true coin qty keys before notional positionAmount
+        sz = 0.0
+        for q_key in ("quantity", "holdQty", "openQty", "posQty", "size", "amount", "positionAmount"):
+            val = p.get(q_key)
+            if val is not None:
+                try:
+                    fv = abs(float(val))
+                    if fv > 0:
+                        sz = fv
+                        break
+                except Exception:
+                    pass
+        if sz <= 0:
+            continue
+
+        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+        side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+
+        entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+        pos_size = abs(float(p.get("positionSize") or 0))
+        if entry_p <= 0 and pos_size > 0 and sz > 0:
+            entry_p = round(pos_size / sz, 6)
+
+        st_sym = get_latest_symbol_state(sym) or {}
+        if entry_p <= 0:
+            entry_p = float(st_sym.get("entry") or 0)
+
+        mark_p = await fetch_live_market_price(session, sym)
+        if mark_p <= 0:
+            mark_p = float(cur_market_by_sym.get(sym) or p.get("markPrice") or p.get("lastPrice") or entry_p)
+
+        sl_p = float(p.get("stopLossPrice") or p.get("stopLoss") or st_sym.get("cur_sl") or st_sym.get("initial_sl") or 0)
+        tp_p = float(p.get("takeProfitPrice") or p.get("takeProfit") or st_sym.get("tp1") or 0)
+
+        found_tps = []
+        for o_ord in orders_by_sym.get(sym, []):
+            typ_u = str(o_ord.get("type") or "").upper()
+            sub_u = str(o_ord.get("subType") or "").upper()
+            lnk_u = str(o_ord.get("linkType") or "").upper()
+            if typ_u in ("STOP_MARKET", "STOP_LIMIT", "STOP") or lnk_u == "ORDER_SL" or sub_u == "STOP_LOSS":
+                sl_ord = float(o_ord.get("stopLossPrice") or o_ord.get("stopPrice") or o_ord.get("triggerPrice") or o_ord.get("price") or 0)
+                if sl_ord > 0:
+                    sl_p = sl_ord
+            elif typ_u == "LIMIT" and (
+                str(o_ord.get("placeType") or "").upper() == "POSITION"
+                or lnk_u == "ORDER_TP"
+                or sub_u == "TAKE_PROFIT"
+                or o_ord.get("reduceOnly")
+            ):
+                tp_ord = float(o_ord.get("price") or 0)
+                if tp_ord > 0:
+                    found_tps.append(tp_ord)
+
+        if found_tps:
+            found_tps.sort()
+            tp_p = found_tps[-1] if side == "SHORT" else found_tps[0]
+            if len(found_tps) == 1:
+                tp_p = found_tps[0]
+
+        lev = float(p.get("leverage") or getattr(acc, "leverage", 10) or 10)
+        if side == "SHORT":
+            upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+            pct = ((entry_p - mark_p) / entry_p * 100.0 * lev) if entry_p > 0 else 0.0
+        else:
+            upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+            pct = ((mark_p - entry_p) / entry_p * 100.0 * lev) if entry_p > 0 else 0.0
+
+        upnl_inr = upnl_usd * usd_rate
+        tot_unrealized_inr += upnl_inr
+        parsed_positions.append({
+            "symbol": sym,
+            "side": side,
+            "qty": sz,
+            "entry": entry_p,
+            "mark": mark_p,
+            "sl": sl_p,
+            "tp": tp_p,
+            "upnl_inr": upnl_inr,
+            "pct": pct,
+        })
+
+    return {
+        "pos_ok": pos_ok,
+        "ord_ok": ord_ok,
+        "positions": parsed_positions,
+        "resting_orders": resting_orders,
+        "total_upnl_inr": tot_unrealized_inr,
+    }
+
+
+def _format_position_lines(parsed_positions: list) -> list[str]:
+    lines = []
+    for p in parsed_positions:
+        sym = p["symbol"]
+        pnl_sign = "+" if p["upnl_inr"] >= 0 else ""
+        pct_sign = "+" if p["pct"] >= 0 else ""
+        icon = "🟢" if p["upnl_inr"] >= 0 else "🔴"
+        entry_d = format_price(p["entry"], sym)
+        mark_d = format_price(p["mark"], sym)
+        brackets = []
+        if p["sl"] > 0:
+            brackets.append(f"🛑 SL: <code>{format_price(p['sl'], sym)}</code>")
+        if p["tp"] > 0:
+            brackets.append(f"🎯 TP: <code>{format_price(p['tp'], sym)}</code>")
+        bracket_line = f"\n     {' | '.join(brackets)}" if brackets else ""
+        lines.append(
+            f"  {icon} <b>{sym}</b> [{p['side']}] Qty: {p['qty']}\n"
+            f"     Entry: <code>{entry_d}</code> | Mark: <code>{mark_d}</code>"
+            f"{bracket_line}\n"
+            f"     Floating: <b>{pnl_sign}₹{p['upnl_inr']:,.2f}</b> ({pct_sign}{p['pct']:.2f}%)"
+        )
+    return lines
+
+
+def _format_resting_order_lines(resting_orders: list) -> list[str]:
+    return [
+        f"  • <b>{o['symbol']}</b> [{o['side']}] Limit @ <code>{format_price(o['price'], o['symbol'])}</code> (Qty: {o['qty']})"
+        for o in resting_orders
+    ]
+
+
+async def build_hourly_live_lookout_cards(session, time_str_h: str) -> tuple[str, list[tuple[str, str]]]:
+    """
+    Builds accurate Multi-Account Hourly Live Lookout cards:
+    - admin_card: Complete overview covering EVERY configured account (Himanshu + Client accounts),
+      never omitting secondary account trades, never truncating resting orders, always showing SL/TP.
+    - client_cards: List of (chat_id, isolated_card) strictly scoped to each non-admin account.
+    """
+    from executor import executor
+    from config import TELEGRAM_CHAT_ID, is_night_maintenance_window
+
+    admin_chat = str(TELEGRAM_CHAT_ID or "771305593").strip()
+    configured_accs = executor.get_all_configured_accounts()
+    is_maint = is_night_maintenance_window()
+    maint_banner = (
+        "\n🌙 <b>Mode:</b> <i>Night Maintenance Window (12:30 AM–05:30 AM IST) — New entries paused; open SL/TP guarded 24/7</i>"
+        if is_maint else
+        "\n💼 <b>Status:</b> 🟢 <b>Real Live Trading Active</b> (Shark Exchange)"
+    )
+
+    admin_sections = []
+    client_dispatches = []
+    total_pos_all = 0
+    total_ord_all = 0
+    total_upnl_all = 0.0
+
+    for idx, acc in enumerate(configured_accs, 1):
+        bal_str = await acc.get_wallet_balance_summary(session)
+        snap = await _fetch_account_positions_snapshot(acc, session)
+        pos_list = snap["positions"]
+        ord_list = snap["resting_orders"]
+        acc_upnl = snap["total_upnl_inr"]
+        total_pos_all += len(pos_list)
+        total_ord_all += len(ord_list)
+        total_upnl_all += acc_upnl
+
+        pos_lines = _format_position_lines(pos_list)
+        ord_lines = _format_resting_order_lines(ord_list)
+
+        if not snap["pos_ok"]:
+            pos_str = "  • ⚠️ <i>Shark API positions fetch temporarily failed — retrying next cycle.</i>"
+        elif pos_lines:
+            pos_str = "\n".join(pos_lines)
+        else:
+            pos_str = "  • <i>No open exchange positions currently.</i>"
+
+        if not snap["ord_ok"]:
+            ord_str = "  • ⚠️ <i>Shark API open-orders fetch temporarily failed.</i>"
+        elif ord_lines:
+            ord_str = "\n".join(ord_lines)
+        else:
+            ord_str = "  • <i>No pending entry orders resting on book.</i>"
+
+        upnl_s = "+" if acc_upnl >= 0 else ""
+        acc_tag = "👑" if idx == 1 else "👤"
+        bal_block = bal_str if bal_str else "💼 <b>Shark Wallet:</b> <i>Temporarily unavailable</i>"
+        section = (
+            f"{acc_tag} <b>[{idx}] {acc.name}</b>\n"
+            f"{bal_block}\n\n"
+            f"🟢 <b>Active Positions ({len(pos_list)})</b> | Net Floating: <b>{upnl_s}₹{acc_upnl:,.2f}</b>\n"
+            f"{pos_str}\n\n"
+            f"⏳ <b>Resting Entry Orders ({len(ord_list)}):</b>\n"
+            f"{ord_str}"
+        )
+        admin_sections.append(section)
+
+        acc_chat = str(getattr(acc, "telegram_chat_id", "") or "").strip()
+        if acc_chat and acc_chat != admin_chat:
+            personal_card = (
+                f"🦈 <b>REAL LIVE TRADING: HOURLY POSITION LOOKOUT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Account:</b> {acc.name} (Personal Isolated)\n"
+                f"⏰ <b>Time:</b> {time_str_h}"
+                f"{maint_banner}\n\n"
+                f"{bal_block}\n\n"
+                f"🟢 <b>Active Positions ({len(pos_list)})</b> | Floating: <b>{upnl_s}₹{acc_upnl:,.2f}</b>\n"
+                f"{pos_str}\n\n"
+                f"⏳ <b>Resting Entry Orders ({len(ord_list)}):</b>\n"
+                f"{ord_str}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Automated Hourly Position Tracker • Personal Portfolio Feed</i>"
+            )
+            client_dispatches.append((acc_chat, personal_card))
+
+    tot_sign = "+" if total_upnl_all >= 0 else ""
+    body_sections = "\n\n──────────────────────────\n\n".join(admin_sections) if admin_sections else "<i>No configured accounts active.</i>"
+    admin_card = (
+        f"🦈 <b>REAL LIVE TRADING: HOURLY POSITION LOOKOUT</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ <b>Time:</b> {time_str_h}"
+        f"{maint_banner}\n"
+        f"📊 <b>All Accounts Totals:</b> <b>{total_pos_all}</b> Open Positions | <b>{total_ord_all}</b> Resting Orders | Floating: <b>{tot_sign}₹{total_upnl_all:,.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{body_sections}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Automated Multi-Account Position Tracker • 100% Target Engine Active</i>"
+    )
+    return admin_card, client_dispatches
+
+
 async def build_front_page_card(acc, session, acc_idx: int = 1, is_admin: bool = False) -> str:
     """
     Builds the Front Page dashboard displaying:
@@ -1125,68 +1455,17 @@ async def build_front_page_card(acc, session, acc_idx: int = 1, is_admin: bool =
     4. Resting entry limit orders
     5. Performance scorecard & realized profits (Win Rate, Total PnL, Last closed trade)
     """
-    from web_dashboard import fetch_live_market_price
-
-    # 1. Balances & Margins
     bal_str = await acc.get_wallet_balance_summary(session)
     if not bal_str:
         bal_str = "💼 <b>Futures Wallet:</b> <i>Balance loading or broker syncing...</i>"
 
-    # 2. Live Positions
-    positions = await acc.get_open_positions(session)
-    pos_lines = []
-    tot_unrealized_inr = 0.0
-    for p in positions:
-        sym = acc.clean_sym(p)
-        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-        side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-        sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-        entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-        mark_p = await fetch_live_market_price(session, sym)
-        if mark_p <= 0:
-            mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
-        sl_p = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
-        tp_p = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
-
-        usd_rate = getattr(acc, "usd_inr_rate", 102.0)
-        if side == "SHORT":
-            upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
-            pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-        else:
-            upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
-            pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-        upnl_inr = upnl_usd * usd_rate
-        tot_unrealized_inr += upnl_inr
-        pnl_sign = "+" if upnl_inr >= 0 else ""
-        pct_sign = "+" if pct >= 0 else ""
-        icon = "🟢" if upnl_inr >= 0 else "🔴"
-
-        sl_tp_info = []
-        if sl_p > 0:
-            sl_tp_info.append(f"SL: <code>{sl_p}</code>")
-        if tp_p > 0:
-            sl_tp_info.append(f"TP: <code>{tp_p}</code>")
-        sl_tp_str = f"\n     {' | '.join(sl_tp_info)}" if sl_tp_info else ""
-
-        pos_lines.append(
-            f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n"
-            f"     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>"
-            f"{sl_tp_str}\n"
-            f"     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)"
-        )
+    snap = await _fetch_account_positions_snapshot(acc, session)
+    positions = snap["positions"]
+    pos_lines = _format_position_lines(positions)
     pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open active positions right now.</i>"
 
-    # 3. Resting Orders
-    open_orders = await acc.get_open_orders(session)
-    ord_lines = []
-    for o in open_orders:
-        if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
-            osym = acc.clean_sym(o)
-            oside = o.get("side", "BUY")
-            opx = o.get("price", 0)
-            oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
-            ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ <code>{opx}</code> (Qty: {oqty})")
-    ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No resting entry limit orders.</i>"
+    ord_lines = _format_resting_order_lines(snap["resting_orders"])
+    ord_str = "\n".join(ord_lines) if ord_lines else "  • <i>No resting entry limit orders.</i>"
 
     # 4. Closed Trades Ledger & Scorecard / Realized Profits
     st_cl, closed_raw = await acc.shark_get(session, "/v1/positions/CLOSED")
@@ -1312,63 +1591,16 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def build_account_positions_card(acc, session, acc_idx: int = 1, is_admin: bool = False) -> str:
-    from web_dashboard import fetch_live_market_price
     bal_str = await acc.get_wallet_balance_summary(session)
     if not bal_str:
         bal_str = "💼 <b>Futures Wallet:</b> <i>Balance loading or broker syncing...</i>"
-    positions = await acc.get_open_positions(session)
-    open_orders = await acc.get_open_orders(session)
-    
-    pos_lines = []
-    for p in positions:
-        sym = acc.clean_sym(p)
-        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-        side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-        sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-        entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-        mark_p = await fetch_live_market_price(session, sym)
-        if mark_p <= 0:
-            mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
-        sl_p = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
-        tp_p = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
-
-        usd_rate = getattr(acc, "usd_inr_rate", 102.0)
-        if side == "SHORT":
-            upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
-            pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-        else:
-            upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
-            pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-        upnl_inr = upnl_usd * usd_rate
-        pnl_sign = "+" if upnl_inr >= 0 else ""
-        pct_sign = "+" if pct >= 0 else ""
-        icon = "🟢" if upnl_inr >= 0 else "🔴"
-
-        sl_tp_info = []
-        if sl_p > 0:
-            sl_tp_info.append(f"SL: <code>{sl_p}</code>")
-        if tp_p > 0:
-            sl_tp_info.append(f"TP: <code>{tp_p}</code>")
-        sl_tp_str = f"\n     {' | '.join(sl_tp_info)}" if sl_tp_info else ""
-
-        pos_lines.append(
-            f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n"
-            f"     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>"
-            f"{sl_tp_str}\n"
-            f"     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)"
-        )
-        
+    snap = await _fetch_account_positions_snapshot(acc, session)
+    positions = snap["positions"]
+    pos_lines = _format_position_lines(positions)
     pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open active positions right now.</i>"
-    
-    ord_lines = []
-    for o in open_orders:
-        if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
-            osym = acc.clean_sym(o)
-            oside = o.get("side", "BUY")
-            opx = o.get("price", 0)
-            oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
-            ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ <code>{opx}</code> (Qty: {oqty})")
-    ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No resting entry limit orders.</i>"
+
+    ord_lines = _format_resting_order_lines(snap["resting_orders"])
+    ord_str = "\n".join(ord_lines) if ord_lines else "  • <i>No resting entry limit orders.</i>"
     
     if not is_admin:
         tag = "👤 <b>ANUJ SHARMA (PERSONAL PORTFOLIO)</b>"
@@ -1657,7 +1889,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
             if tp2 == 0:
                 tp2 = use_entry * 0.93 if sig == "SELL" else use_entry * 1.07
-            res = await target_acc.execute_signal_trade(s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4)
+            res = await target_acc.execute_signal_trade(s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4, allow_during_maintenance=True)
             synced.append(f"• <b>{sym}</b> [{sig}]: {res.get('status')} ({res.get('reason', 'OK')})")
             
         if synced:

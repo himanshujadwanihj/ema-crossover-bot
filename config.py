@@ -347,6 +347,30 @@ def validate_config() -> None:
 
 
 
+def is_night_maintenance_window(now_utc=None) -> bool:
+    """
+    USER DIRECTIVE: Night Maintenance Pause strictly enforced between 12:30 AM and 05:30 AM IST.
+    During this window, new signal scanning and new automated trade executions are paused.
+    Open positions continue to be protected by SL/TP monitoring 24/7.
+    """
+    from datetime import datetime, timezone
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    try:
+        import zoneinfo
+        now_ist = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        from datetime import timedelta
+        now_ist = now_utc + timedelta(hours=5, minutes=30)
+    return (
+        (now_ist.hour == 0 and now_ist.minute >= 30)
+        or (1 <= now_ist.hour < 5)
+        or (now_ist.hour == 5 and now_ist.minute < 30)
+    )
+
+
 def is_weekend_trading_blocked(symbol: str) -> bool:
     """
     STRICT USER DIRECTIVE:

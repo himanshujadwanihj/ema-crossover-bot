@@ -950,10 +950,15 @@ class SharkExchangeExecutor:
         tp2: float,
         tp3: float = None,
         aligned_count: int = 4,
-        adx: float = None
+        adx: float = None,
+        allow_during_maintenance: bool = False
     ) -> dict:
         async with _get_execution_lock():
-            res = await self._execute_signal_trade_internal(session, symbol, signal, entry, sl, tp1, tp2, tp3, aligned_count=aligned_count, adx=adx)
+            res = await self._execute_signal_trade_internal(
+                session, symbol, signal, entry, sl, tp1, tp2, tp3,
+                aligned_count=aligned_count, adx=adx,
+                allow_during_maintenance=allow_during_maintenance,
+            )
             # Mandatory 1.5s (1500ms) sequential execution pause between trade submissions
             await asyncio.sleep(1.5)
             return res
@@ -969,7 +974,8 @@ class SharkExchangeExecutor:
         tp2: float,
         tp3: float = None,
         aligned_count: int = 4,
-        adx: float = None
+        adx: float = None,
+        allow_during_maintenance: bool = False
     ) -> dict:
         """
         Executes a new trade on Shark Exchange from a bot signal.
@@ -1022,7 +1028,13 @@ class SharkExchangeExecutor:
             logger.info(f"AUTO-TRADE EXCLUSION: {symbol} is a US Stock token. Skipping auto-trade per user directive. Telegram alert only.")
             return {"status": "skipped", "reason": f"{symbol} is a US stock (auto-trade disabled per directive, alerts only)"}
 
-        # 3. DAILY RISK CIRCUIT BREAKER: 10 Consecutive SLs -> 60-min pause
+        # 3. DAILY RISK CIRCUIT BREAKER & NIGHT MAINTENANCE PAUSE GUARD
+        if not allow_during_maintenance:
+            from config import is_night_maintenance_window
+            if is_night_maintenance_window():
+                logger.info(f"🌙 NIGHT MAINTENANCE ACTIVE: Blocked execution for {clean_sym} [{signal}] (12:30 AM - 05:30 AM IST).")
+                return {"status": "skipped", "reason": "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused."}
+
         from state import is_trading_paused
         is_paused, rem_secs, pause_reason = is_trading_paused()
         if is_paused:
@@ -1180,7 +1192,7 @@ class SharkExchangeExecutor:
             err_msg = str(data)
             logger.error(f"Shark order placement failed for {clean_sym} (Status {status}): {err_msg}")
             
-            # If rejected due to insufficient margin, notify Telegram so user can top up
+            # If rejected due to insufficient margin, notify account owner + Admin CC cleanly
             if "3018" in err_msg or "Insufficient margin" in err_msg:
                 msg = (
                     f"⚠️ <b>SHARK AUTO-ORDER MARGIN ALERT</b>\n\n"
@@ -1189,8 +1201,7 @@ class SharkExchangeExecutor:
                     f"<b>Required:</b> ₹{self.margin_inr:,.0f} INR.\n"
                     f"<i>Please deposit/transfer funds into your Shark Exchange Futures Wallet.</i>"
                 )
-                from telegram_bot import send_text_alert as _send_alert
-                await _send_alert(msg)
+                await self.send_alert(msg)
 
             return {"status": "error", "reason": err_msg, "http_status": status}
 
@@ -2812,41 +2823,95 @@ class MultiAccountExecutor:
         tp2: float = None,
         tp3: float = None,
         aligned_count: int = 3,
-        adx: float = None
+        adx: float = None,
+        allow_during_maintenance: bool = False
     ) -> dict:
         """
         Executes trade across ALL configured accounts concurrently (Copy Trading)!
         Each account sizes independently based on its own free margin on Shark Exchange.
+        Reports per-account success, trailing, skipped, and error outcomes explicitly so
+        failures on secondary accounts are never swallowed silently.
         """
         configured_accs = [acc for acc in self.accounts if acc.is_configured()]
         if not configured_accs:
             logger.warning("No configured Shark Exchange accounts available for execution.")
-            return {"status": "skipped", "reason": "No accounts configured"}
+            return {"status": "skipped", "reason": "No accounts configured", "failed_accounts": [], "account_results": []}
+
+        if not allow_during_maintenance:
+            from config import is_night_maintenance_window
+            if is_night_maintenance_window():
+                msg = "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused."
+                logger.info(f"🌙 MULTI-ACCOUNT MAINTENANCE SHIELD: Blocked {symbol} [{signal}] ({msg})")
+                return {"status": "skipped", "reason": msg, "failed_accounts": [], "account_results": []}
 
         logger.info(f"⚡ MULTI-ACCOUNT DISPATCH: Executing {symbol} [{signal}] across {len(configured_accs)} account(s): {[a.name for a in configured_accs]}")
 
         tasks = [
             acc.execute_signal_trade(
                 session, symbol, signal, entry, sl, tp1, tp2,
-                tp3=tp3, aligned_count=aligned_count, adx=adx
+                tp3=tp3, aligned_count=aligned_count, adx=adx,
+                allow_during_maintenance=allow_during_maintenance,
             )
             for acc in configured_accs
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        primary_result = {"status": "skipped", "reason": "Execution failed"}
+        account_results = []
+        succeeded = []
+        trailed = []
+        failed = []
+        primary_result = None
+
         for i, res in enumerate(results):
             acc_name = configured_accs[i].name
             if isinstance(res, Exception):
-                logger.error(f"❌ Execution exception on [{acc_name}]: {res}")
+                err_txt = str(res)
+                logger.error(f"❌ Execution exception on [{acc_name}]: {err_txt}")
+                rec = {"account": acc_name, "status": "error", "reason": err_txt}
+                account_results.append(rec)
+                failed.append(rec)
             elif isinstance(res, dict):
-                logger.info(f"✅ Execution result for [{acc_name}]: status={res.get('status')} reason={res.get('reason', 'OK')}")
+                st_val = res.get("status", "skipped")
+                rsn_val = res.get("reason", "OK")
+                logger.info(f"✅ Execution result for [{acc_name}]: status={st_val} reason={rsn_val}")
+                rec = {"account": acc_name, "status": st_val, "reason": rsn_val, "total_qty": res.get("total_qty", 0)}
+                account_results.append(rec)
+                if st_val == "success":
+                    succeeded.append(res)
+                elif st_val == "trailed":
+                    trailed.append(res)
+                else:
+                    failed.append(rec)
                 if i == 0:
                     primary_result = res
             else:
                 logger.info(f"Execution result for [{acc_name}]: {res}")
+                rec = {"account": acc_name, "status": "error", "reason": str(res)}
+                account_results.append(rec)
+                failed.append(rec)
 
-        return primary_result
+        if succeeded:
+            base = dict(succeeded[0])
+            base["status"] = "partial_success" if failed else "success"
+            base["failed_accounts"] = failed
+            base["account_results"] = account_results
+            return base
+
+        if trailed:
+            base = dict(trailed[0])
+            base["status"] = "partial_success" if failed else "trailed"
+            base["failed_accounts"] = failed
+            base["account_results"] = account_results
+            return base
+
+        combined_reasons = " | ".join([f"{f['account']}: {f['reason']}" for f in failed]) if failed else (primary_result.get("reason", "Execution failed") if isinstance(primary_result, dict) else "Execution failed")
+        overall_status = "error" if any(f["status"] == "error" for f in failed) else "skipped"
+        return {
+            "status": overall_status,
+            "reason": combined_reasons,
+            "failed_accounts": failed,
+            "account_results": account_results,
+        }
 
     async def sync_and_manage_live_orders(self, session: aiohttp.ClientSession) -> None:
         """Monitors, heals, and trails orders across ALL accounts concurrently."""

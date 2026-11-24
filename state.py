@@ -655,6 +655,8 @@ def is_trading_paused() -> tuple:
 def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_minutes: int = 60, max_consecutive_sl: int = 5) -> tuple:
     """
     Records a trade outcome (SL or TP/WIN) for the daily circuit breaker.
+    - Deduplicates simultaneous multi-account closes of the same symbol within 180s
+      so copy-trading accounts don't double-count 1 SL/TP twice.
     - If SL: increments consecutive_sl_count. If >= max_consecutive_sl (5), pauses trading for pause_minutes (60 min).
     - If WIN/TP/BE: resets consecutive_sl_count to 0.
     Returns (circuit_breaker_triggered: bool, cb_state: dict).
@@ -664,12 +666,21 @@ def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_m
     now_ts = time.time()
     triggered = False
 
+    sym_norm = clean_contract_symbol(symbol) if symbol else ""
+    last_event_key = f"{sym_norm}|{'SL' if is_sl else 'TP'}"
+    if sym_norm and cb.get("last_recorded_event") == last_event_key and (now_ts - float(cb.get("last_recorded_ts") or 0.0) < 180.0):
+        logger.debug(f"Circuit breaker dedup: {last_event_key} already recorded within 180s across multi-account close.")
+        return False, cb
+
+    cb["last_recorded_event"] = last_event_key
+    cb["last_recorded_ts"] = now_ts
+
     if is_sl:
         cb["consecutive_sl_count"] = int(cb.get("consecutive_sl_count", 0)) + 1
         cb["total_sl_today"] = int(cb.get("total_sl_today", 0)) + 1
         cb["last_trigger_symbol"] = symbol
 
-        # Check threshold (10 consecutive SLs)
+        # Check threshold (5 consecutive SLs)
         if cb["consecutive_sl_count"] >= max_consecutive_sl:
             cb["paused_until"] = now_ts + (pause_minutes * 60)
             cb["pause_reason"] = f"Circuit Breaker: {cb['consecutive_sl_count']} Consecutive SLs Hit in a Day"
@@ -693,6 +704,22 @@ def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_m
     state["_CIRCUIT_BREAKER_STATE"] = cb
     _save(state)
     return triggered, cb
+
+
+def get_last_lookout_ts() -> float:
+    """Returns persisted unix timestamp of last hourly live lookout dispatch."""
+    state = _load()
+    try:
+        return float(state.get("_LAST_LIVE_LOOKOUT_TS") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def set_last_lookout_ts(ts: float = None) -> None:
+    """Persists timestamp of last hourly live lookout dispatch across restarts."""
+    state = _load()
+    state["_LAST_LIVE_LOOKOUT_TS"] = float(ts if ts is not None else time.time())
+    _save(state)
 
 
 def resume_trading_manually() -> None:

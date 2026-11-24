@@ -176,8 +176,8 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
     else:
         tf_map = {"1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 
-    # Deduplication and level filters handle spam per timeframe.
-    first_cand = None
+    # Collect ALL qualified retest candidates across timeframes for execution/rejection tracking.
+    retest_cands = []
     
     for tf, tf_key in tf_map.items():
             
@@ -464,45 +464,44 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     tf_states.get("1D", "").lower() == target_trend
                 )
                 
-                if first_cand is None:
-                    c_open = float(row.get('open', 0))
-                    c_close = float(row.get('close', 0))
-                    c_high = float(row.get('high', 0))
-                    c_low = float(row.get('low', 0))
-                    c_range = max(c_high - c_low, 1e-8)
-                    b_ratio = abs(c_close - c_open) / c_range
+                c_open = float(row.get('open', 0))
+                c_close = float(row.get('close', 0))
+                c_high = float(row.get('high', 0))
+                c_low = float(row.get('low', 0))
+                c_range = max(c_high - c_low, 1e-8)
+                b_ratio = abs(c_close - c_open) / c_range
 
-                    # Use prev_row volume (closed candle) since current row is a live forming candle
-                    p_vol = float(prev_row.get('volume', 0)) if 'volume' in prev_row else (float(row.get('volume', 0)) if 'volume' in row else None)
-                    p_vol_sma = float(prev_row.get('vol_sma_20', 0)) if 'vol_sma_20' in prev_row else (float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None)
-                    adx_val = float(prev_row.get('adx', row.get('adx', 25.0))) if ('adx' in prev_row and not pd.isna(prev_row['adx'])) else (float(row.get('adx', 25.0)) if ('adx' in row and not pd.isna(row['adx'])) else 25.0)
+                # Use prev_row volume (closed candle) since current row is a live forming candle
+                p_vol = float(prev_row.get('volume', 0)) if 'volume' in prev_row else (float(row.get('volume', 0)) if 'volume' in row else None)
+                p_vol_sma = float(prev_row.get('vol_sma_20', 0)) if 'vol_sma_20' in prev_row else (float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None)
+                adx_val = float(prev_row.get('adx', row.get('adx', 25.0))) if ('adx' in prev_row and not pd.isna(prev_row['adx'])) else (float(row.get('adx', 25.0)) if ('adx' in row and not pd.isna(row['adx'])) else 25.0)
 
-                    first_cand = {
-                        "symbol": symbol,
-                        "signal": sig_type,
-                        "entry": retest_price,
-                        "sl": sl,
-                        "tp1": tp1,
-                        "tp2": tp2,
-                        "tp": tp1,
-                        "aligned_count": aligned_count,
-                        "is_3_htf_aligned": is_3_htf_aligned,
-                        "is_30m_early": False,
-                        "is_retest": True,
-                        "is_special": is_special,
-                        "unique_key": unique_key,
-                        "candle_ts": dedup_ts,
-                        "rr2": rr2 or 1.5,
-                        "rsi": cur_rsi,
-                        "adx": adx_val,
-                        "volume": p_vol,
-                        "volume_sma": p_vol_sma,
-                        "macd_line": float(row.get('macd_line', 0)) if 'macd_line' in row else None,
-                        "macd_signal_val": float(row.get('macd_signal', 0)) if 'macd_signal' in row else None,
-                        "body_ratio": b_ratio,
-                        "tf_label": tf_label,
-                        "cross_type": f"{ema_name} {action_name}",
-                    }
+                retest_cands.append({
+                    "symbol": symbol,
+                    "signal": sig_type,
+                    "entry": retest_price,
+                    "sl": sl,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp": tp1,
+                    "aligned_count": aligned_count,
+                    "is_3_htf_aligned": is_3_htf_aligned,
+                    "is_30m_early": False,
+                    "is_retest": True,
+                    "is_special": is_special,
+                    "unique_key": unique_key,
+                    "candle_ts": dedup_ts,
+                    "rr2": rr2 or 1.5,
+                    "rsi": cur_rsi,
+                    "adx": adx_val,
+                    "volume": p_vol,
+                    "volume_sma": p_vol_sma,
+                    "macd_line": float(row.get('macd_line', 0)) if 'macd_line' in row else None,
+                    "macd_signal_val": float(row.get('macd_signal', 0)) if 'macd_signal' in row else None,
+                    "body_ratio": b_ratio,
+                    "tf_label": tf_label,
+                    "cross_type": f"{ema_name} {action_name}",
+                })
         except Exception as e:
             logger.error(f"Error in pullback tracker for {symbol}: {e}")
-    return first_cand or False
+    return retest_cands or False
