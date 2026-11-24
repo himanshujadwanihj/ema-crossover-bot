@@ -101,5 +101,31 @@
     "username": null,
     "first_name": "Sagar",
     "joined_at": "2026-11-03 19:18 UTC"
+  },
+  "1010973596": {
+    "enabled": true,
+    "coin_groups": [
+      "core_10",
+      "alts_25",
+      "commodities"
+    ],
+    "timeframes": [
+      "15m",
+      "1h",
+      "4h",
+      "1d"
+    ],
+    "signal_types": [
+      "crossover",
+      "retest"
+    ],
+    "custom_coins": [],
+    "min_stars": 3,
+    "gold_scalp_5m_15m": true,
+    "squeeze_alerts": true,
+    "squeeze_only": false,
+    "username": "Anuj",
+    "first_name": "Anuj",
+    "joined_at": "2026-11-24 09:30 UTC"
   }
 }

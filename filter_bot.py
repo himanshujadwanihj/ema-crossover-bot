@@ -487,6 +487,12 @@ async def on_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "noop":
         return
 
+    # ── Multi-Account Copy Trading Switcher Callbacks ────────────────
+    if data.startswith("acc_"):
+        from telegram_bot import on_account_filter_callback
+        await on_account_filter_callback(update, context)
+        return
+
     # ── Unified Admin Panel Action Callbacks ─────────────────────────
     if data.startswith("act_"):
         from config import TELEGRAM_CHAT_ID
@@ -859,6 +865,11 @@ async def start_filter_bot_service():
         _filter_app_instance.add_handler(CommandHandler(["broadcast"], cmd_broadcast))
         _filter_app_instance.add_handler(CommandHandler(["removeuser", "deleteuser", "kick", "ban", "unban"], cmd_remove_user))
         _filter_app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
+        from telegram_bot import cmd_accounts, cmd_trades, cmd_positions, cmd_sync
+        _filter_app_instance.add_handler(CommandHandler(["accounts", "account"], cmd_accounts))
+        _filter_app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
+        _filter_app_instance.add_handler(CommandHandler(["positions", "paper", "wallet"], cmd_positions))
+        _filter_app_instance.add_handler(CommandHandler(["sync", "syncaccounts", "copysync"], cmd_sync))
         _filter_app_instance.add_handler(CallbackQueryHandler(on_button_callback))
         _filter_app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_user_text_message))
 

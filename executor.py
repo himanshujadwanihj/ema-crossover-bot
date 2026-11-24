@@ -2774,10 +2774,32 @@ class MultiAccountExecutor:
         return await self.primary.get_open_positions(session)
 
     async def get_open_position(self, session: aiohttp.ClientSession, symbol: str) -> dict:
-        return await self.primary.get_open_position(session, symbol)
+        # Check primary first, then secondary configured accounts
+        p = await self.primary.get_open_position(session, symbol)
+        if p:
+            return p
+        for acc in self.accounts:
+            if acc != self.primary and acc.is_configured():
+                p_sub = await acc.get_open_position(session, symbol)
+                if p_sub:
+                    return p_sub
+        return None
 
     async def has_active_trade_on_exchange(self, session: aiohttp.ClientSession, symbol: str, signal: str = None) -> bool:
-        return await self.primary.has_active_trade_on_exchange(session, symbol, signal=signal)
+        """
+        Multi-Account Single Order Shield:
+        Only returns True if ALL configured accounts already hold an active position or resting order for this symbol.
+        If ANY account lacks the trade, returns False so execute_signal_trade() can place the order on missing accounts
+        while existing accounts automatically trail their SL/TP!
+        """
+        configured_accs = [acc for acc in self.accounts if acc.is_configured()]
+        if not configured_accs:
+            return False
+        checks = await asyncio.gather(*[
+            acc.has_active_trade_on_exchange(session, symbol, signal=signal)
+            for acc in configured_accs
+        ], return_exceptions=True)
+        return all(isinstance(c, bool) and c for c in checks)
 
     async def execute_signal_trade(
         self,

@@ -1324,6 +1324,61 @@ async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
 
 
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Syncs missing active trades from Admin to secondary accounts."""
+    msg = update.message
+    if not msg:
+        return
+    import aiohttp
+    from executor import executor
+    from web_dashboard import fetch_live_market_price
+    
+    target_idx = 2
+    target_acc = executor.get_account(str(target_idx))
+    if not target_acc or not target_acc.is_configured():
+        await msg.reply_text("❌ Secondary account (Anuj Sharma) not configured or disabled.")
+        return
+        
+    await msg.reply_text("🔄 <i>Checking open positions across accounts and synchronizing...</i>", parse_mode="HTML")
+    async with aiohttp.ClientSession() as s:
+        primary_pos = await executor.primary.get_open_positions(s)
+        target_pos = await target_acc.get_open_positions(s)
+        target_orders = await target_acc.get_open_orders(s)
+        
+        target_syms = set()
+        for p in target_pos:
+            target_syms.add(target_acc.clean_sym(p))
+        for o in target_orders:
+            target_syms.add(target_acc.clean_sym(o))
+            
+        synced = []
+        for p in primary_pos:
+            sym = executor.primary.clean_sym(p)
+            if sym in target_syms:
+                continue
+            qty = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+            if qty <= 0:
+                continue
+            pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
+            sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
+            entry = float(p.get("entryPrice") or p.get("price") or 0)
+            sl = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
+            tp1 = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
+            curr_p = await fetch_live_market_price(s, sym)
+            use_entry = curr_p if curr_p > 0 else entry
+            if sl == 0:
+                sl = use_entry * 1.022 if sig == "SELL" else use_entry * 0.978
+            if tp1 == 0:
+                tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
+            res = await target_acc.execute_signal_trade(s, sym, sig, use_entry, sl, tp1, aligned_count=4)
+            synced.append(f"• <b>{sym}</b> [{sig}]: {res.get('status')} ({res.get('reason', 'OK')})")
+            
+        if synced:
+            await msg.reply_text(f"✅ <b>SYNC COMPLETED for {target_acc.name}!</b>\n\n" + "\n".join(synced), parse_mode="HTML")
+        else:
+            await msg.reply_text(f"ℹ️ All active positions are already in sync on {target_acc.name}!", parse_mode="HTML")
+
+
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reports all closed trades (purane + naye sab) for specified or primary account."""
     msg = update.message
@@ -1711,6 +1766,7 @@ def get_application() -> Application:
         _app_instance.add_handler(CommandHandler(["start", "help"], cmd_start))
         _app_instance.add_handler(CommandHandler(["accounts", "account", "users", "filter"], cmd_accounts))
         _app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
+        _app_instance.add_handler(CommandHandler(["sync", "syncaccounts", "copysync"], cmd_sync))
         _app_instance.add_handler(CommandHandler(["setchannel", "linkchannel"], cmd_setchannel))
         _app_instance.add_handler(CommandHandler(["today", "report", "stats"], cmd_today))
         _app_instance.add_handler(CommandHandler(["getid", "channelid", "id"], cmd_getid))
