@@ -704,6 +704,76 @@ async def api_test_account_handler(request: web.Request) -> web.Response:
         })
 
 
+async def api_demo_order_handler(request: web.Request) -> web.Response:
+    """Places a 100% safe, deep limit order on Shark Exchange to verify real order placement, then cancels it."""
+    acc_id = request.query.get("account") or "2"
+    from executor import executor
+    acc = executor.get_account(acc_id)
+    if not acc:
+        return web.json_response({"error": "Account not found"}, status=404)
+        
+    import aiohttp
+    import asyncio
+    async with aiohttp.ClientSession() as s:
+        # Step 1: Place 100% safe deep limit order ($30,000 BTC when market is ~$87,000 -> IMPOSSIBLE TO FILL)
+        payload = {
+            "placeType": "ORDER_FORM",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "LIMIT",
+            "price": 30000.0,
+            "quantity": 0.002,
+            "reduceOnly": False,
+            "stopLossPrice": 27000.0
+        }
+        st_place, res_place = await acc.shark_post(s, "/v1/order/place-order", payload)
+        
+        # Step 2: Check open orders to verify presence on orderbook
+        await asyncio.sleep(1.0)
+        st_orders, res_orders = await acc.shark_get(s, "/v1/order/open-orders")
+        
+        # Step 3: Cancel the test order immediately so no resting order remains
+        cancel_res = None
+        st_del = None
+        cid = res_place.get("clientOrderId") if isinstance(res_place, dict) else None
+        oid = res_place.get("orderId") or res_place.get("id") if isinstance(res_place, dict) else None
+        
+        if cid:
+            st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"clientOrderId": str(cid)})
+        elif oid:
+            st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"orderId": str(oid)})
+        elif isinstance(res_orders, list) and len(res_orders) > 0:
+            for o in res_orders:
+                c_id = o.get("clientOrderId")
+                if c_id:
+                    st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"clientOrderId": str(c_id)})
+                    break
+                    
+        # Step 4: Verify book is 100% clean
+        await asyncio.sleep(1.0)
+        st_clean, res_clean = await acc.shark_get(s, "/v1/order/open-orders")
+        
+        return web.json_response({
+            "account": acc.name,
+            "step_1_placement": {
+                "status": st_place,
+                "order_details": res_place,
+                "verified": st_place in (200, 201)
+            },
+            "step_2_orderbook_check": {
+                "status": st_orders,
+                "resting_on_exchange": len(res_orders) if isinstance(res_orders, list) else 0
+            },
+            "step_3_cancellation": {
+                "status": st_del,
+                "cancel_response": cancel_res
+            },
+            "step_4_final_cleanup": {
+                "orderbook_clean": len(res_clean) == 0 if isinstance(res_clean, list) else True
+            }
+        })
+
+
 def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
@@ -711,6 +781,7 @@ def setup_web_app() -> web.Application:
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
     app.router.add_get("/api/test-account", api_test_account_handler)
+    app.router.add_get("/api/demo-order", api_demo_order_handler)
     app.router.add_get("/api/paper-history", api_paper_history_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ip", ip_handler)
