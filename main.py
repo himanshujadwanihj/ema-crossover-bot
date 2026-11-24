@@ -1554,23 +1554,11 @@ async def main_loop():
                                             pass
                                     return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"
 
-                                # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
+                                # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups!
                                 if stars < 3:
                                     return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
 
-                                # STRICT RSI MOMENTUM GATE (Same across Crypto & Commodities per user directive):
-                                # BUY: 42.0 <= RSI <= 62.0 (filters late overbought tops > 62)
-                                # SELL: 38.0 <= RSI <= 58.0 (filters late oversold bottoms < 38)
-                                if rsi is not None:
-                                    try:
-                                        f_rsi = float(rsi)
-                                        if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                                            return False, f"RSI {f_rsi:.1f} is outside healthy BUY zone [42.0 - 62.0] (Overbought peak/exhausted > 62.0)."
-                                        elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                                            return False, f"RSI {f_rsi:.1f} is outside healthy SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
-                                    except (ValueError, TypeError):
-                                        pass
-                                # STRICT USER DIRECTIVE: Multi-Factor AI Quality Score >= 75 Hard Gate
+                                # STRICT USER DIRECTIVE: Compute Multi-Factor AI Quality Score FIRST
                                 from signal_analyser import analyse_signal
                                 f_rsi_val = None
                                 if rsi is not None:
@@ -1598,6 +1586,7 @@ async def main_loop():
                                 c["quality_score"] = quality_score
                                 c["analysis"] = analysis
 
+                                # Hard Minimum Score Gate: Must be at least 75
                                 if quality_score < 75:
                                     comps = analysis.get("components", {})
                                     comp_summary = (
@@ -1606,6 +1595,31 @@ async def main_loop():
                                         f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
                                     )
                                     return False, f"Multi-Factor Score is {quality_score}/100 (< 75 required | {verdict} | Breakdown: {comp_summary})"
+
+                                # USER DIRECTIVE:
+                                # "If AI score above 77 and RSI sign not there, still execute the trade!
+                                # 3-Star or 4-Star trade RSI sign not there but score above 77 -> execute the trade!"
+                                is_rsi_valid = True
+                                rsi_fail_reason = ""
+                                if f_rsi_val is None:
+                                    is_rsi_valid = False
+                                    rsi_fail_reason = "RSI indicator value not available"
+                                else:
+                                    if sig == "BUY" and not (42.0 <= f_rsi_val <= 62.0):
+                                        is_rsi_valid = False
+                                        rsi_fail_reason = f"RSI {f_rsi_val:.1f} is outside healthy BUY zone [42.0 - 62.0]"
+                                    elif sig == "SELL" and not (38.0 <= f_rsi_val <= 58.0):
+                                        is_rsi_valid = False
+                                        rsi_fail_reason = f"RSI {f_rsi_val:.1f} is outside healthy SELL zone [38.0 - 58.0]"
+
+                                if not is_rsi_valid:
+                                    if quality_score > 77:
+                                        logger.info(
+                                            f"🚀 AI QUALITY OVERRIDE for {sym} [{sig}]: Score {quality_score}/100 > 77 with {stars}★ Confluence! "
+                                            f"Executing trade despite RSI ({rsi_fail_reason}) per user directive."
+                                        )
+                                    else:
+                                        return False, f"{rsi_fail_reason} (AI Quality Score {quality_score}/100 <= 77; requires healthy RSI)."
 
                                 # USER DIRECTIVE: Funding Rate Squeeze Shield (Live Binance Microstructure)
                                 # Shields against crowded trades (Short Squeezes & Long Liquidations)
@@ -1627,7 +1641,8 @@ async def main_loop():
                                     except Exception as e_fr:
                                         logger.debug(f"Funding rate check bypassed for {sym}: {e_fr}")
 
-                                return True, f"Eligible (3★+ Confluence, RSI Healthy, Score: {quality_score}/100, Funding Clean)"
+                                rsi_status_lbl = "AI Score > 77 Override" if not is_rsi_valid else "RSI Healthy"
+                                return True, f"Eligible ({stars}★ Confluence, {rsi_status_lbl}, Score: {quality_score}/100, Funding Clean)"
 
                             eligible_candidates = []
                             for c in raw_candidates:

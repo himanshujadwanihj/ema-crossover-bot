@@ -404,12 +404,29 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                 if cur_rsi is not None:
                     rsi_buy_min, rsi_buy_max = (40.0, 65.0) if tf_label in ["5M", "15M"] else (42.0, 62.0)
                     rsi_sell_min, rsi_sell_max = (35.0, 60.0) if tf_label in ["5M", "15M"] else (38.0, 58.0)
+                    rsi_out = False
                     if sig_type == "BUY" and not (rsi_buy_min <= cur_rsi <= rsi_buy_max):
-                        logger.info(f"FILTERED RETEST: {symbol} BUY rejected — RSI {cur_rsi:.1f} outside healthy zone [{rsi_buy_min}, {rsi_buy_max}].")
-                        continue
+                        rsi_out = True
                     elif sig_type == "SELL" and not (rsi_sell_min <= cur_rsi <= rsi_sell_max):
-                        logger.info(f"FILTERED RETEST: {symbol} SELL rejected — RSI {cur_rsi:.1f} outside healthy zone [{rsi_sell_min}, {rsi_sell_max}].")
-                        continue
+                        rsi_out = True
+
+                    if rsi_out:
+                        # USER DIRECTIVE: If 3★ or 4★ setup with AI score > 77, bypass RSI filter!
+                        target_trend = "bullish" if sig_type == "BUY" else "bearish"
+                        al_cnt = sum(1 for t, st in tf_states.items() if st.lower() == target_trend)
+                        bypass_retest_rsi = False
+                        if al_cnt >= 3:
+                            try:
+                                from signal_analyser import analyse_signal
+                                pb_ai = analyse_signal(symbol=symbol, signal=sig_type, rsi=cur_rsi, aligned_count=al_cnt, tf_label=tf_label)
+                                if pb_ai.get("score", 0) > 77:
+                                    bypass_retest_rsi = True
+                                    logger.info(f"🚀 RETEST AI OVERRIDE for {symbol} [{sig_type}]: Score {pb_ai.get('score')}/100 > 77 with {al_cnt}★. Bypassing RSI filter.")
+                            except Exception:
+                                pass
+                        if not bypass_retest_rsi:
+                            logger.info(f"FILTERED RETEST: {symbol} {sig_type} rejected — RSI {cur_rsi:.1f} outside healthy zone and AI score not > 77.")
+                            continue
 
                 is_special = symbol in SPECIAL_LIST
                 is_ret_queued = await queue_alert(
