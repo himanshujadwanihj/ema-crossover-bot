@@ -782,68 +782,77 @@ async def api_demo_order_handler(request: web.Request) -> web.Response:
 
 async def api_sync_positions_handler(request: web.Request) -> web.Response:
     """Synchronizes missing active trades from Primary (Himanshu) to Target Account (e.g. Anuj)."""
-    from executor import executor
-    target_id = request.query.get("account", "2")
-    target_acc = executor.get_account(target_id)
-    if not target_acc or not target_acc.is_configured():
-        return web.json_response({"status": "error", "reason": f"Account {target_id} not configured"}, status=400)
-    
-    async with aiohttp.ClientSession() as s:
-        primary_pos = await executor.primary.get_open_positions(s)
-        target_pos = await target_acc.get_open_positions(s)
-        target_orders = await target_acc.get_open_orders(s)
+    import traceback
+    try:
+        from executor import executor
+        target_id = request.query.get("account", "2")
+        target_acc = executor.get_account(target_id)
+        if not target_acc or not target_acc.is_configured():
+            return web.json_response({"status": "error", "reason": f"Account {target_id} not configured"}, status=400)
         
-        target_syms = set()
-        for p in target_pos:
-            target_syms.add(target_acc.clean_sym(p))
-        for o in target_orders:
-            target_syms.add(target_acc.clean_sym(o))
+        async with aiohttp.ClientSession() as s:
+            primary_pos = await executor.primary.get_open_positions(s)
+            target_pos = await target_acc.get_open_positions(s)
+            target_orders = await target_acc.get_open_orders(s)
             
-        synced = []
-        skipped = []
-        for p in primary_pos:
-            sym = executor.primary.clean_sym(p)
-            if sym in target_syms:
-                skipped.append({"symbol": sym, "reason": "Already active or resting on target account"})
-                continue
+            target_syms = set()
+            for p in target_pos:
+                target_syms.add(target_acc.clean_sym(p))
+            for o in target_orders:
+                target_syms.add(target_acc.clean_sym(o))
                 
-            qty = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-            if qty <= 0:
-                continue
+            synced = []
+            skipped = []
+            for p in primary_pos:
+                sym = executor.primary.clean_sym(p)
+                if sym in target_syms:
+                    skipped.append({"symbol": sym, "reason": "Already active or resting on target account"})
+                    continue
+                    
+                qty = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+                if qty <= 0:
+                    continue
+                    
+                pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
+                sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
                 
-            pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
-            sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
-            
-            entry = float(p.get("entryPrice") or p.get("price") or 0)
-            sl = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
-            tp1 = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
-            
-            curr_p = await fetch_live_market_price(s, sym)
-            use_entry = curr_p if curr_p > 0 else entry
-            if sl == 0:
-                sl = use_entry * 1.022 if sig == "SELL" else use_entry * 0.978
-            if tp1 == 0:
-                tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
+                entry = float(p.get("entryPrice") or p.get("price") or 0)
+                sl = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
+                tp1 = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
                 
-            logger.info(f"🔄 SYNC POSITIONS: Executing {sym} [{sig}] on {target_acc.name} at entry {use_entry}")
-            res = await target_acc.execute_signal_trade(
-                s, sym, sig, use_entry, sl, tp1, aligned_count=4
-            )
-            synced.append({
-                "symbol": sym,
-                "signal": sig,
-                "entry": use_entry,
-                "sl": sl,
-                "tp1": tp1,
-                "result": res
+                curr_p = await fetch_live_market_price(s, sym)
+                use_entry = curr_p if curr_p > 0 else entry
+                if sl == 0:
+                    sl = use_entry * 1.022 if sig == "SELL" else use_entry * 0.978
+                if tp1 == 0:
+                    tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
+                    
+                logger.info(f"🔄 SYNC POSITIONS: Executing {sym} [{sig}] on {target_acc.name} at entry {use_entry}")
+                res = await target_acc.execute_signal_trade(
+                    s, sym, sig, use_entry, sl, tp1, aligned_count=4
+                )
+                synced.append({
+                    "symbol": sym,
+                    "signal": sig,
+                    "entry": use_entry,
+                    "sl": sl,
+                    "tp1": tp1,
+                    "result": str(res)
+                })
+                
+            return web.json_response({
+                "status": "success",
+                "target_account": target_acc.name,
+                "synced_trades": synced,
+                "skipped_trades": skipped
             })
-            
+    except Exception as e:
+        logger.error(f"Error in api_sync_positions_handler: {e}\n{traceback.format_exc()}")
         return web.json_response({
-            "status": "success",
-            "target_account": target_acc.name,
-            "synced_trades": synced,
-            "skipped_trades": skipped
-        })
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status=500)
 
 
 def setup_web_app() -> web.Application:
