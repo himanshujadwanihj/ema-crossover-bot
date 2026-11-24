@@ -508,24 +508,25 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 sq_signal = 'BUY'
 
                         if sq_signal:
-                            # Chaser Validation Rules:
-                            if body_ratio < 0.45:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
+                            # Chaser Validation Rules (Responsive triggers for pre-vetted Radar setups):
+                            req_body = 0.35 if has_radar else 0.45
+                            if body_ratio < req_body:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < {req_body:.0%} (Weak expansion / long wick trap).")
                                 sq_signal = None
-                            elif sq_signal == 'BUY' and (sq_rsi > 78.0 or sq_rsi < 42.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum [42.0, 78.0].")
+                            elif sq_signal == 'BUY' and (sq_rsi > (85.0 if has_radar else 78.0) or sq_rsi < (35.0 if has_radar else 42.0)):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar}).")
                                 sq_signal = None
-                            elif sq_signal == 'SELL' and (sq_rsi < 22.0 or sq_rsi > 58.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum [22.0, 58.0].")
+                            elif sq_signal == 'SELL' and (sq_rsi < (15.0 if has_radar else 22.0) or sq_rsi > (65.0 if has_radar else 58.0)):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar}).")
                                 sq_signal = None
-                            elif sq_signal == 'BUY' and upper_wick_ratio > 0.38:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
+                            elif sq_signal == 'BUY' and upper_wick_ratio > (0.45 if has_radar else 0.38):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > {'45%' if has_radar else '38%'} (Shooting star / whale trap).")
                                 sq_signal = None
-                            elif sq_signal == 'SELL' and lower_wick_ratio > 0.38:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
+                            elif sq_signal == 'SELL' and lower_wick_ratio > (0.45 if has_radar else 0.38):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — Lower rejection wick > {'45%' if has_radar else '38%'} (Hammer / bear trap).")
                                 sq_signal = None
-                            elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
+                            elif vol_20_sma > 0 and breakout_vol < ((1.05 if has_radar else 1.25) * vol_20_sma):
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Volume {breakout_vol:.0f} < {'1.05x' if has_radar else '1.25x'} 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
                                 sq_signal = None
 
                     if sq_signal:
@@ -920,15 +921,13 @@ async def scan_single_symbol_async(session, symbol, semaphore):
             if not is_weekend_trading_blocked(symbol):
                 df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
                 if df_1h is not None and len(df_1h) >= 25:
-                    from state import is_radar_on_cooldown
-                    if not is_radar_on_cooldown(symbol, cooldown_hours=4.0):
-                        from fetcher import fetch_futures_microstructure_async
-                        micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
-                        from indicators import evaluate_watchlist_coiling_candidate
-                        eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H")
-                        if eval_res.get("eligible"):
-                            radar_cand = eval_res
-                            logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
+                    from fetcher import fetch_futures_microstructure_async
+                    micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
+                    from indicators import evaluate_watchlist_coiling_candidate
+                    eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H")
+                    if eval_res.get("eligible"):
+                        radar_cand = eval_res
+                        logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
         except Exception as e_rad:
             logger.debug(f"Watchlist coiling evaluation error for {symbol}: {e_rad}")
 
@@ -1772,22 +1771,27 @@ async def main_loop():
                         radar_candidates = [r["radar"] for r in results if isinstance(r, dict) and isinstance(r.get("radar"), dict)]
                         if radar_candidates:
                             from state import is_global_radar_on_cooldown, record_global_radar_sent, record_pre_squeeze_radar, is_radar_on_cooldown
-                            # Re-verify not on symbol cooldown
-                            eligible_radars = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
-                            if eligible_radars and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
+                            # Filter candidates eligible for Telegram broadcast (not on 4-hour alert cooldown)
+                            broadcast_eligible = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
+                            if broadcast_eligible and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
                                 # Rank by Coiling Quality Score and select ONLY the #1 single best coiled setup across the market
-                                eligible_radars.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
-                                top_radar = eligible_radars[0]
+                                broadcast_eligible.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
+                                top_radar = broadcast_eligible[0]
 
                                 from telegram_bot import send_pre_squeeze_radar_alert
                                 await send_pre_squeeze_radar_alert(top_radar)
                                 record_global_radar_sent()
-                                record_pre_squeeze_radar(top_radar["symbol"], top_radar)
+                                record_pre_squeeze_radar(top_radar["symbol"], top_radar, is_broadcast=True)
                                 logger.info(f"📡 DISPATCHED TOP #1 WATCHLIST COILING ALERT: {top_radar['symbol']} ({top_radar['direction']}) | Score: {top_radar.get('coiling_score')}")
+
+                                # Silently track all other coiling candidates in state for Stage 2 breakout execution
+                                for cand in radar_candidates:
+                                    if cand["symbol"] != top_radar["symbol"]:
+                                        record_pre_squeeze_radar(cand["symbol"], cand, is_broadcast=False)
                             else:
-                                # Keep track of active radars in state silently for Stage 2 breakout execution
-                                for cand in eligible_radars:
-                                    record_pre_squeeze_radar(cand["symbol"], cand)
+                                # All coiling candidates tracked silently in state for Stage 2 breakout execution
+                                for cand in radar_candidates:
+                                    record_pre_squeeze_radar(cand["symbol"], cand, is_broadcast=False)
                         
                         # SILENTLY EDIT PINNED 4H VOLATILITY DASHBOARD (Every 5 minutes)
                         if time.time() - last_dashboard_update_time >= 300:

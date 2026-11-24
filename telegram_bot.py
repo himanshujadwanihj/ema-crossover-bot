@@ -2180,7 +2180,7 @@ async def send_pre_squeeze_radar_alert(radar_data: dict):
         f"🧲 <b>Market Dynamic:</b>\n"
         f"<i>{mechanism}</i>\n\n"
         f"📋 <b>Institutional Coiling Checklist:</b>\n"
-        f"✅ <b>[1] Active Market:</b> Liquid (24h Vol {vol_str} &gt; $10M)\n"
+        f"✅ <b>[1] Active Market:</b> Liquid (24h Vol {vol_str} &gt; $2.5M)\n"
         f"✅ <b>[2] Range Compression:</b> <code>{compression_pct:.2f}%</code> (Tight Coiling)\n"
         f"✅ <b>[3] Volatility Pinch:</b> {ttm_tag}\n"
         f"✅ <b>[4] Smart Money OI:</b> <code>{oi_sign}{oi_change_1h:.1f}%</code> (1H Accumulation)\n"

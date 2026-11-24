@@ -710,15 +710,6 @@ async def fetch_futures_microstructure_async(session: aiohttp.ClientSession, sym
                 await session.close()
             except Exception:
                 pass
-        # Fallback to Bybit if Binance is unreachable
-        try:
-            ex = _get_bybit_instance()
-            bybit_sym = f"{symbol}:USDT" if ":" not in symbol else symbol
-            fr_info = ex.fetch_funding_rate(bybit_sym)
-            if fr_info and fr_info.get("fundingRate") is not None:
-                funding_rate = float(fr_info["fundingRate"])
-        except Exception:
-            pass
 
     funding_pct = funding_rate * 100.0
     is_squeeze = False

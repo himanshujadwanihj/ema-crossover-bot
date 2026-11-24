@@ -506,14 +506,24 @@ def is_radar_on_cooldown(symbol: str, cooldown_hours: float = 4.0) -> bool:
         pass
     return False
 
-def record_pre_squeeze_radar(symbol: str, radar_data: dict) -> None:
-    """Records a new active Pre-Squeeze Radar alert into state."""
+def record_pre_squeeze_radar(symbol: str, radar_data: dict, is_broadcast: bool = False) -> None:
+    """
+    Records a new active Pre-Squeeze Radar alert into state.
+    Only sets Telegram alert cooldown when is_broadcast=True (broadcast winner).
+    Silent candidates maintain active status for Stage 2 breakout without cooldown lock.
+    """
     state = _load()
     sym = symbol.upper()
     now_str = datetime.now(timezone.utc).isoformat()
-    state[f"RADAR_COOLDOWN|{sym}"] = now_str
+    if is_broadcast:
+        state[f"RADAR_COOLDOWN|{sym}"] = now_str
+        state["GLOBAL_RADAR_LAST_SENT"] = now_str
     if "ACTIVE_RADARS" not in state or not isinstance(state["ACTIVE_RADARS"], dict):
         state["ACTIVE_RADARS"] = {}
+    
+    existing = state["ACTIVE_RADARS"].get(sym, {})
+    first_detected = existing.get("first_detected_at") or existing.get("created_at") or now_str
+    
     state["ACTIVE_RADARS"][sym] = {
         "direction": radar_data.get("direction", "BUY"),
         "squeeze_type": radar_data.get("squeeze_type", "SHORT SQUEEZE"),
@@ -521,6 +531,7 @@ def record_pre_squeeze_radar(symbol: str, radar_data: dict) -> None:
         "invalidation_sl": radar_data.get("invalidation_sl", 0.0),
         "compression_pct": radar_data.get("compression_pct", 0.0),
         "created_at": now_str,
+        "first_detected_at": first_detected,
         "status": "WATCHING"
     }
     _save(state)
