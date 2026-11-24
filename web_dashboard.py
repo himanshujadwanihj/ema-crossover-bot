@@ -715,16 +715,22 @@ async def api_demo_order_handler(request: web.Request) -> web.Response:
     import aiohttp
     import asyncio
     async with aiohttp.ClientSession() as s:
-        # Step 1: Place 100% safe deep limit order ($30,000 BTC when market is ~$87,000 -> IMPOSSIBLE TO FILL)
+        # Step 1: Fetch current live price and place safe limit order 4.0% below market (safe from execution, within Shark price collar)
+        curr_p = await fetch_live_market_price(s, "BTCUSDT")
+        if curr_p <= 0:
+            curr_p = 87000.0
+        safe_entry = round(curr_p * 0.96, 1)
+        safe_sl = round(safe_entry * 0.98, 1)
+
         payload = {
             "placeType": "ORDER_FORM",
             "symbol": "BTCUSDT",
             "side": "BUY",
             "type": "LIMIT",
-            "price": 30000.0,
+            "price": safe_entry,
             "quantity": 0.002,
             "reduceOnly": False,
-            "stopLossPrice": 27000.0
+            "stopLossPrice": safe_sl
         }
         st_place, res_place = await acc.shark_post(s, "/v1/order/place-order", payload)
         
