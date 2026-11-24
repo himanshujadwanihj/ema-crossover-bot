@@ -2,7 +2,16 @@ import channel_manager
 import time
 import asyncio
 import logging
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Bot,
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    BotCommand,
+    MenuButtonCommands
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1023,21 +1032,254 @@ async def on_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif msg.forward_from:
         await msg.reply_text(f"That was forwarded from a user, not a channel. Please forward a message FROM the channel itself.", parse_mode="HTML")
 
+ANUJ_CHAT_ID = "1010973596"
+ADMIN_CHAT_ID = "771305593"
+
+def resolve_user_account_context(chat_id: str | int) -> tuple[int, bool]:
+    """
+    Resolves the account index and admin status for a given Telegram chat ID.
+    - Anuj Sharma ('1010973596'): Strictly Account 2, is_admin=False (100% Personal).
+    - Himanshu ('771305593'): Account 1 default, is_admin=True (Admin controller).
+    - Other users: Default Account 1, is_admin=False.
+    """
+    cid = str(chat_id).strip()
+    if cid == ANUJ_CHAT_ID:
+        return 2, False
+    elif cid == ADMIN_CHAT_ID:
+        return 1, True
+    return 1, False
+
+
+def get_permanent_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """
+    Builds a permanent bottom docked keyboard (is_persistent=True) so the user
+    always has instant menu access docked right at their keyboard bar.
+    """
+    if is_admin:
+        kb = [
+            [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
+            [KeyboardButton("💰 Realized Profits"), KeyboardButton("📜 Trade History")],
+            [KeyboardButton("⚙️ Filter Settings"), KeyboardButton("🌐 All Accounts")],
+            [KeyboardButton("🔄 Refresh")]
+        ]
+    else:
+        kb = [
+            [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
+            [KeyboardButton("💰 Realized Profits"), KeyboardButton("📜 Trade History")],
+            [KeyboardButton("⚙️ Filter Settings"), KeyboardButton("🔄 Refresh")]
+        ]
+    return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
+
+
+def get_account_keyboard(acc_idx: int = 1, view: str = "front", is_admin: bool = False) -> InlineKeyboardMarkup:
+    """
+    Builds interactive inline buttons.
+    - If is_admin=False (e.g., Anuj Sharma):
+        Strictly personal buttons only. Never displays Himanshu's account or All Accounts Overview.
+    - If is_admin=True (Himanshu):
+        Full admin switcher tabs: Mine (Himanshu), Anuj Sharma, All Accounts Overview.
+    """
+    if not is_admin:
+        btn_front = InlineKeyboardButton("🏠 Front Page ✅" if view == "front" else "🏠 Front Page", callback_data=f"acc_front_{acc_idx}")
+        btn_pos = InlineKeyboardButton("🟢 Live Trades ✅" if view == "pos" else "🟢 Live Trades", callback_data=f"acc_pos_{acc_idx}")
+        btn_trades = InlineKeyboardButton("📜 Trade History ✅" if view == "trades" else "📜 Trade History", callback_data=f"acc_trades_{acc_idx}")
+        btn_refresh = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
+        keyboard = [
+            [btn_front, btn_pos],
+            [btn_trades, btn_refresh]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    # Admin controls (Himanshu)
+    mine_label = "👑 Mine (Himanshu) ✅" if acc_idx == 1 else "👑 Mine (Himanshu)"
+    anuj_label = "👤 Anuj Sharma ✅" if acc_idx == 2 else "👤 Anuj Sharma"
+    btn_mine = InlineKeyboardButton(mine_label, callback_data=f"acc_{view}_1")
+    btn_anuj = InlineKeyboardButton(anuj_label, callback_data=f"acc_{view}_2")
+
+    btn_front = InlineKeyboardButton("🏠 Front Page ✅" if view == "front" else "🏠 Front Page", callback_data=f"acc_front_{acc_idx}")
+    btn_pos = InlineKeyboardButton("🟢 Live Trades ✅" if view == "pos" else "🟢 Live Trades", callback_data=f"acc_pos_{acc_idx}")
+    btn_trades = InlineKeyboardButton("📜 Trade History ✅" if view == "trades" else "📜 Trade History", callback_data=f"acc_trades_{acc_idx}")
+    btn_refresh = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
+    btn_all = InlineKeyboardButton("🌐 All Accounts Overview", callback_data="acc_all_summary")
+
+    keyboard = [
+        [btn_mine, btn_anuj],
+        [btn_front, btn_pos],
+        [btn_trades, btn_refresh],
+        [btn_all]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def build_front_page_card(acc, session, acc_idx: int = 1, is_admin: bool = False) -> str:
+    """
+    Builds the Front Page dashboard displaying:
+    1. Account header & isolation badge
+    2. Wallet & margin balance
+    3. Live active positions (entry, mark, floating PnL in INR & %, SL/TP)
+    4. Resting entry limit orders
+    5. Performance scorecard & realized profits (Win Rate, Total PnL, Last closed trade)
+    """
+    from web_dashboard import fetch_live_market_price
+
+    # 1. Balances & Margins
+    bal_str = await acc.get_wallet_balance_summary(session)
+    if not bal_str:
+        bal_str = "💼 <b>Futures Wallet:</b> <i>Balance loading or broker syncing...</i>"
+
+    # 2. Live Positions
+    positions = await acc.get_open_positions(session)
+    pos_lines = []
+    tot_unrealized_inr = 0.0
+    for p in positions:
+        sym = acc.clean_sym(p)
+        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
+        side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
+        sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+        entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+        mark_p = await fetch_live_market_price(session, sym)
+        if mark_p <= 0:
+            mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
+        sl_p = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
+        tp_p = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
+
+        usd_rate = getattr(acc, "usd_inr_rate", 102.0)
+        if side == "SHORT":
+            upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
+            pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
+        else:
+            upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
+            pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
+        upnl_inr = upnl_usd * usd_rate
+        tot_unrealized_inr += upnl_inr
+        pnl_sign = "+" if upnl_inr >= 0 else ""
+        pct_sign = "+" if pct >= 0 else ""
+        icon = "🟢" if upnl_inr >= 0 else "🔴"
+
+        sl_tp_info = []
+        if sl_p > 0:
+            sl_tp_info.append(f"SL: <code>{sl_p}</code>")
+        if tp_p > 0:
+            sl_tp_info.append(f"TP: <code>{tp_p}</code>")
+        sl_tp_str = f"\n     {' | '.join(sl_tp_info)}" if sl_tp_info else ""
+
+        pos_lines.append(
+            f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n"
+            f"     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>"
+            f"{sl_tp_str}\n"
+            f"     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)"
+        )
+    pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open active positions right now.</i>"
+
+    # 3. Resting Orders
+    open_orders = await acc.get_open_orders(session)
+    ord_lines = []
+    for o in open_orders:
+        if not o.get("reduceOnly", False) and o.get("placeType") != "POSITION":
+            osym = acc.clean_sym(o)
+            oside = o.get("side", "BUY")
+            opx = o.get("price", 0)
+            oqty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
+            ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ <code>{opx}</code> (Qty: {oqty})")
+    ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No resting entry limit orders.</i>"
+
+    # 4. Closed Trades Ledger & Scorecard / Realized Profits
+    st_cl, closed_raw = await acc.shark_get(session, "/v1/positions/CLOSED")
+    c_wins = 0
+    c_losses = 0
+    c_be = 0
+    gross_wins = 0.0
+    gross_losses = 0.0
+    be_friction = 0.0
+    last_trade_str = "None yet"
+
+    if st_cl == 200 and isinstance(closed_raw, list) and closed_raw:
+        for idx, cp in enumerate(closed_raw):
+            pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
+            if abs(pnl_inr) <= 15.0:
+                c_be += 1
+                be_friction += pnl_inr
+            elif pnl_inr > 15.0:
+                c_wins += 1
+                gross_wins += pnl_inr
+            else:
+                c_losses += 1
+                gross_losses += abs(pnl_inr)
+
+            if idx == 0:
+                csym = acc.clean_sym(cp)
+                cpos_t = str(cp.get("positionType") or "SHORT").upper()
+                csig = "BUY" if cpos_t in ("LONG", "BUY") else "SELL"
+                cstat = "WIN 🎯" if pnl_inr > 15 else ("LOSS 🔴" if pnl_inr < -15 else "BE ⚖️")
+                csign = "+" if pnl_inr >= 0 else ""
+                last_trade_str = f"<b>{csym}</b> [{csig}] <code>{csign}₹{pnl_inr:,.2f}</code> ({cstat})"
+
+    total_closed = c_wins + c_losses + c_be
+    decisive = c_wins + c_losses
+    win_rate = (c_wins / decisive * 100.0) if decisive > 0 else 0.0
+    net_realized_pnl = gross_wins - gross_losses + be_friction
+    rpnl_sign = "+" if net_realized_pnl >= 0 else ""
+
+    # Header and tag
+    if not is_admin:
+        tag = "👤 <b>ANUJ SHARMA (PERSONAL PORTFOLIO)</b>"
+        footer = "<i>Strict Personal Isolation • Direct Broker Link</i>"
+    else:
+        if acc_idx == 2:
+            tag = "👤 <b>ANUJ SHARMA (ACCOUNT 2)</b>"
+            footer = "<i>Viewing as Admin • Multi-Account Managed</i>"
+        else:
+            tag = "👑 <b>MINE (HIMANSHU - ADMIN MASTER)</b>"
+            footer = "<i>Admin Master Controller Active</i>"
+
+    card = (
+        f"🦈 <b>SHARK EXCHANGE — DASHBOARD FRONT PAGE</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Account: {tag}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bal_str}\n\n"
+        f"🟢 <b>Live Active Positions ({len(positions)}):</b>\n"
+        f"{pos_str}\n\n"
+        f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
+        f"{ord_str}\n\n"
+        f"💰 <b>Profits & Performance Scorecard:</b>\n"
+        f"  • Scorecard: <b>{c_wins}W</b> - <b>{c_losses}L</b> - <b>{c_be}BE</b>\n"
+        f"  • Win Rate: <b>{win_rate:.1f}%</b> ({total_closed} Total Closed)\n"
+        f"  • Net Realized Profit: <b>{rpnl_sign}₹{net_realized_pnl:,.2f} INR</b>\n"
+        f"  • Last Closed Trade: {last_trade_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{footer}"
+    )
+    return card
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responds to /start and reports user's chat ID immediately."""
+    """Responds to /start by loading the permanent docked menu and Front Page Dashboard."""
     msg = update.message
     if not msg:
         return
-    chat_id = msg.chat_id
+    chat_id = str(update.effective_chat.id)
     user = msg.from_user
     name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Trader"
-    logger.info(f"📩 /start received from {name} (Chat ID: {chat_id})")
-    await msg.reply_text(
-        f"👋 <b>Welcome {name}!</b>\n\n"
-        f"📋 <b>Your Telegram Chat ID:</b> <code>{chat_id}</code>\n\n"
-        f"Share this Chat ID with the admin to receive private trade alerts for your account! 🚀",
-        parse_mode="HTML"
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    logger.info(f"📩 /start received from {name} (Chat ID: {chat_id}, acc_idx: {acc_idx}, is_admin: {is_admin})")
+
+    # Send docked persistent keyboard first
+    reply_kb = get_permanent_reply_keyboard(is_admin=is_admin)
+    welcome_text = (
+        f"👋 <b>Welcome {name}!</b>\n"
+        f"⚡ <i>Permanent Navigation Menu is docked below ⬇️</i>\n"
+        f"📋 <b>Your Chat ID:</b> <code>{chat_id}</code>"
     )
+    await msg.reply_text(welcome_text, reply_markup=reply_kb, parse_mode="HTML")
+
+    from executor import executor
+    import aiohttp
+    acc = executor.get_account(str(acc_idx)) or executor.primary
+    async with aiohttp.ClientSession() as s:
+        card = await build_front_page_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+        kb = get_account_keyboard(acc_idx=acc_idx, view="front", is_admin=is_admin)
+        await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
 
 
 async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1047,7 +1289,6 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     logger.info(f"📩 /id received from {msg.chat_id}")
-    # If user forwarded a message from a channel
     if msg.forward_from_chat:
         chat = msg.forward_from_chat
         await msg.reply_text(
@@ -1058,7 +1299,6 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
     else:
-        # Report the current chat ID
         await msg.reply_text(
             f"📋 <b>Current Chat ID:</b> <code>{msg.chat_id}</code>\n\n"
             f"<i>To get a channel ID, forward any message FROM that channel TO this bot, then type /getid</i>",
@@ -1066,32 +1306,11 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def get_account_keyboard(acc_idx: int = 1, view: str = "pos") -> InlineKeyboardMarkup:
-    """Builds interactive inline buttons to switch accounts and toggle between Positions and Trades."""
-    mine_label = "👑 Mine (Himanshu) ✅" if acc_idx == 1 else "👑 Mine (Himanshu)"
-    anuj_label = "👤 Anuj Sharma ✅" if acc_idx == 2 else "👤 Anuj Sharma"
-    btn_mine = InlineKeyboardButton(mine_label, callback_data=f"acc_{view}_1")
-    btn_anuj = InlineKeyboardButton(anuj_label, callback_data=f"acc_{view}_2")
-    btn_all = InlineKeyboardButton("🌐 All Accounts Overview", callback_data="acc_all_summary")
-    
-    if view == "pos":
-        toggle_btn = InlineKeyboardButton("📜 View All Closed Trades (Purane + New)", callback_data=f"acc_trades_{acc_idx}")
-    else:
-        toggle_btn = InlineKeyboardButton("🟢 View Active Positions & Margin", callback_data=f"acc_pos_{acc_idx}")
-        
-    refresh_btn = InlineKeyboardButton("🔄 Refresh", callback_data=f"acc_refresh_{acc_idx}_{view}")
-    
-    keyboard = [
-        [btn_mine, btn_anuj],
-        [toggle_btn],
-        [refresh_btn, btn_all]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def build_account_positions_card(acc, session, acc_idx: int = 1) -> str:
+async def build_account_positions_card(acc, session, acc_idx: int = 1, is_admin: bool = False) -> str:
     from web_dashboard import fetch_live_market_price
     bal_str = await acc.get_wallet_balance_summary(session)
+    if not bal_str:
+        bal_str = "💼 <b>Futures Wallet:</b> <i>Balance loading or broker syncing...</i>"
     positions = await acc.get_open_positions(session)
     open_orders = await acc.get_open_orders(session)
     
@@ -1105,17 +1324,34 @@ async def build_account_positions_card(acc, session, acc_idx: int = 1) -> str:
         mark_p = await fetch_live_market_price(session, sym)
         if mark_p <= 0:
             mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
+        sl_p = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
+        tp_p = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
+
+        usd_rate = getattr(acc, "usd_inr_rate", 102.0)
         if side == "SHORT":
             upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
             pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
         else:
             upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
             pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-        upnl_inr = upnl_usd * 102.0
+        upnl_inr = upnl_usd * usd_rate
         pnl_sign = "+" if upnl_inr >= 0 else ""
         pct_sign = "+" if pct >= 0 else ""
         icon = "🟢" if upnl_inr >= 0 else "🔴"
-        pos_lines.append(f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>\n     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)")
+
+        sl_tp_info = []
+        if sl_p > 0:
+            sl_tp_info.append(f"SL: <code>{sl_p}</code>")
+        if tp_p > 0:
+            sl_tp_info.append(f"TP: <code>{tp_p}</code>")
+        sl_tp_str = f"\n     {' | '.join(sl_tp_info)}" if sl_tp_info else ""
+
+        pos_lines.append(
+            f"  {icon} <b>{sym}</b> [{side}] Qty: {sz}\n"
+            f"     Entry: <code>{entry_p}</code> | Mark: <code>{mark_p}</code>"
+            f"{sl_tp_str}\n"
+            f"     Floating PnL: <b>{pnl_sign}₹{upnl_inr:,.2f}</b> ({pct_sign}{pct:.2f}%)"
+        )
         
     pos_str = "\n".join(pos_lines) if pos_lines else "  • <i>No open active positions right now.</i>"
     
@@ -1129,10 +1365,15 @@ async def build_account_positions_card(acc, session, acc_idx: int = 1) -> str:
             ord_lines.append(f"  • <b>{osym}</b> [{oside}] Limit @ <code>{opx}</code> (Qty: {oqty})")
     ord_str = "\n".join(ord_lines[:6]) if ord_lines else "  • <i>No resting entry limit orders.</i>"
     
-    tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else f"👤 <b>{acc.name.upper()}</b>"
+    if not is_admin:
+        tag = "👤 <b>ANUJ SHARMA (PERSONAL PORTFOLIO)</b>"
+        footer = "<i>Status: Strict Personal Isolation Active (Direct Broker Link)</i>"
+    else:
+        tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else "👤 <b>ANUJ SHARMA (ACCOUNT 2)</b>"
+        footer = "<i>Status: Multi-Account Management Active</i>"
     
     card = (
-        f"🦈 <b>SHARK EXCHANGE — ISOLATED ACCOUNT VIEW</b>\n"
+        f"🦈 <b>SHARK EXCHANGE — ISOLATED POSITIONS VIEW</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Account: {tag}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1142,14 +1383,19 @@ async def build_account_positions_card(acc, session, acc_idx: int = 1) -> str:
         f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
         f"{ord_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Status: Strict Account Isolation Active (No mixed data)</i>"
+        f"{footer}"
     )
     return card
 
 
-async def build_account_trades_card(acc, session, acc_idx: int = 1) -> str:
+async def build_account_trades_card(acc, session, acc_idx: int = 1, is_admin: bool = False) -> str:
     st_cl, closed_raw = await acc.shark_get(session, "/v1/positions/CLOSED")
-    tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else f"👤 <b>{acc.name.upper()}</b>"
+    if not is_admin:
+        tag = "👤 <b>ANUJ SHARMA (PERSONAL PORTFOLIO)</b>"
+        footer = "<i>Strictly filtered to Anuj Sharma — No other account's trades mixed here.</i>"
+    else:
+        tag = "👑 <b>MINE (HIMANSHU - ADMIN)</b>" if acc_idx == 1 else "👤 <b>ANUJ SHARMA (ACCOUNT 2)</b>"
+        footer = f"<i>Filtered to {acc.name} — Admin View</i>"
     
     if st_cl != 200 or not isinstance(closed_raw, list):
         return (
@@ -1182,7 +1428,6 @@ async def build_account_trades_card(acc, session, acc_idx: int = 1) -> str:
         pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
         up_at = str(cp.get("updatedAt") or cp.get("createdAt") or "")
         
-        # Format timestamp cleanly
         ts_clean = up_at[:16].replace("T", " ") if up_at else "Recent"
         
         if abs(pnl_inr) <= 15.0:
@@ -1227,7 +1472,7 @@ async def build_account_trades_card(acc, session, acc_idx: int = 1) -> str:
         f"<b>Closed Trades Ledger (Most Recent):</b>\n"
         f"{recent_display}{more_txt}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Strictly filtered to {acc.name} — No other account's trades mixed here.</i>"
+        f"{footer}"
     )
     return card
 
@@ -1267,13 +1512,38 @@ async def on_account_filter_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     data = query.data or ""
     
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    
     from executor import executor
     import aiohttp
     
     async with aiohttp.ClientSession() as s:
+        # Non-admin users (e.g., Anuj): strictly locked to Account 2
+        if not is_admin:
+            acc_idx = 2
+            acc = executor.get_account("2") or executor.primary
+            if data.startswith("acc_pos_"):
+                view = "pos"
+                card = await build_account_positions_card(acc, s, acc_idx=2, is_admin=False)
+            elif data.startswith("acc_trades_"):
+                view = "trades"
+                card = await build_account_trades_card(acc, s, acc_idx=2, is_admin=False)
+            else:
+                view = "front"
+                card = await build_front_page_card(acc, s, acc_idx=2, is_admin=False)
+
+            kb = get_account_keyboard(acc_idx=2, view=view, is_admin=False)
+            try:
+                await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
+            except Exception as e_edit:
+                logger.debug(f"Edit message skipped: {e_edit}")
+            return
+
+        # Admin (Himanshu)
         if data == "acc_all_summary":
             card = await build_all_accounts_summary_card(s)
-            kb = get_account_keyboard(acc_idx=1, view="pos")
+            kb = get_account_keyboard(acc_idx=1, view="pos", is_admin=True)
             try:
                 await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
             except Exception:
@@ -1281,34 +1551,31 @@ async def on_account_filter_callback(update: Update, context: ContextTypes.DEFAU
             return
             
         parts = data.split("_")
-        # formats: acc_pos_1, acc_trades_2, acc_refresh_1_pos, acc_refresh_2_trades
+        # formats: acc_pos_1, acc_trades_2, acc_front_1, acc_refresh_1_front, acc_refresh_2_pos
+        view = "front"
+        acc_idx = 1
         if len(parts) >= 3:
             action = parts[1]
             if action == "refresh":
                 acc_idx = int(parts[2])
-                view = parts[3] if len(parts) > 3 else "pos"
-            elif action in ("pos", "trades"):
+                view = parts[3] if len(parts) > 3 else "front"
+            elif action in ("pos", "trades", "front"):
                 view = action
                 acc_idx = int(parts[2])
-            else:
-                acc_idx = 1
-                view = "pos"
                 
-            acc = executor.get_account(str(acc_idx))
-            if not acc:
-                acc = executor.primary
-                acc_idx = 1
-                
-            if view == "trades":
-                card = await build_account_trades_card(acc, s, acc_idx=acc_idx)
-            else:
-                card = await build_account_positions_card(acc, s, acc_idx=acc_idx)
-                
-            kb = get_account_keyboard(acc_idx=acc_idx, view=view)
-            try:
-                await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
-            except Exception as e_edit:
-                logger.debug(f"Edit message skipped: {e_edit}")
+        acc = executor.get_account(str(acc_idx)) or executor.primary
+        if view == "trades":
+            card = await build_account_trades_card(acc, s, acc_idx=acc_idx, is_admin=True)
+        elif view == "pos":
+            card = await build_account_positions_card(acc, s, acc_idx=acc_idx, is_admin=True)
+        else:
+            card = await build_front_page_card(acc, s, acc_idx=acc_idx, is_admin=True)
+            
+        kb = get_account_keyboard(acc_idx=acc_idx, view=view, is_admin=True)
+        try:
+            await query.edit_message_text(card, reply_markup=kb, parse_mode="HTML")
+        except Exception as e_edit:
+            logger.debug(f"Edit message skipped: {e_edit}")
 
 
 async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1316,11 +1583,17 @@ async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    if not is_admin:
+        await cmd_start(update, context)
+        return
+
     import aiohttp
     from executor import executor
     async with aiohttp.ClientSession() as s:
         card = await build_all_accounts_summary_card(s)
-        kb = get_account_keyboard(acc_idx=1, view="pos")
+        kb = get_account_keyboard(acc_idx=1, view="pos", is_admin=True)
         await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
 
 
@@ -1329,6 +1602,12 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    if not is_admin:
+        await msg.reply_text("⛔ Admin permission required.")
+        return
+
     import aiohttp
     from executor import executor
     from web_dashboard import fetch_live_market_price
@@ -1387,101 +1666,96 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
-    arg = context.args[0].lower() if context.args else "1"
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+
+    if is_admin and context.args:
+        arg = context.args[0].lower()
+        acc_idx = 2 if arg in ("2", "anuj", "sharma") else 1
+    elif not is_admin:
+        acc_idx = 2
+
     from executor import executor
     import aiohttp
-    acc_idx = 2 if arg in ("2", "anuj", "sharma") else 1
-    acc = executor.get_account(str(acc_idx))
+    acc = executor.get_account(str(acc_idx)) or executor.primary
     async with aiohttp.ClientSession() as s:
-        card = await build_account_trades_card(acc, s, acc_idx=acc_idx)
-        kb = get_account_keyboard(acc_idx=acc_idx, view="trades")
+        card = await build_account_trades_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+        kb = get_account_keyboard(acc_idx=acc_idx, view="trades", is_admin=is_admin)
         await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
 
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reports real-time Paper Trading Strategy Lookout or Shark Live Status."""
+    """Reports real-time Shark Live Positions & Margins."""
     msg = update.message
     if not msg:
         return
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+
     try:
-        from config import PAPER_TRADING_ENABLED
         from executor import executor
         import aiohttp
 
-        # If Paper Trading is DISABLED and Shark is Configured -> Show strictly Live Exchange
-        if not PAPER_TRADING_ENABLED and executor.is_configured():
-            arg = context.args[0].lower() if context.args else "1"
+        if is_admin and context.args:
+            arg = context.args[0].lower()
             if arg in ("all", "overview", "summary"):
                 async with aiohttp.ClientSession() as s:
                     card = await build_all_accounts_summary_card(s)
-                    kb = get_account_keyboard(acc_idx=1, view="pos")
+                    kb = get_account_keyboard(acc_idx=1, view="pos", is_admin=True)
                     await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
                     return
             acc_idx = 2 if arg in ("2", "anuj", "sharma") else 1
-            acc = executor.get_account(str(acc_idx))
-            async with aiohttp.ClientSession() as s:
-                card = await build_account_positions_card(acc, s, acc_idx=acc_idx)
-                kb = get_account_keyboard(acc_idx=acc_idx, view="pos")
-                await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
-                return
+        elif not is_admin:
+            acc_idx = 2
 
-        # Default: Paper Trading or Combined View
-        from paper_trader import generate_strategy_lookout_card, generate_trades_ledger_card
-        cmd_text = (msg.text or "").strip().lower()
-        if "trade" in cmd_text:
-            card = await generate_trades_ledger_card()
-        else:
-            card = await generate_strategy_lookout_card()
-        await msg.reply_text(card, parse_mode="HTML")
-        return
+        acc = executor.get_account(str(acc_idx)) or executor.primary
+        async with aiohttp.ClientSession() as s:
+            card = await build_account_positions_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+            kb = get_account_keyboard(acc_idx=acc_idx, view="pos", is_admin=is_admin)
+            await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
         logger.error(f"cmd_positions error: {e}")
         await msg.reply_text(f"⚠️ Error querying positions: {e}")
 
-        if executor.is_configured():
-            try:
-                async with aiohttp.ClientSession() as s:
-                    shark_bal = await executor.get_wallet_balance_summary(s)
-                    shark_pos = await executor.get_open_positions(s)
-                    if shark_bal:
-                        from web_dashboard import fetch_live_market_price
-                        pos_lines = []
-                        for p in shark_pos:
-                            sym = executor.clean_sym(p)
-                            pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-                            side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-                            sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-                            entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-                            mark_p = await fetch_live_market_price(s, sym)
-                            if mark_p <= 0:
-                                mark_p = float(p.get("markPrice") or p.get("lastPrice") or entry_p)
-                            if side == "SHORT":
-                                upnl_usd = (entry_p - mark_p) * sz if entry_p > 0 else 0.0
-                                pct = ((entry_p - mark_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-                            else:
-                                upnl_usd = (mark_p - entry_p) * sz if entry_p > 0 else 0.0
-                                pct = ((mark_p - entry_p) / entry_p * 100.0 * 10) if entry_p > 0 else 0.0
-                            upnl_inr = upnl_usd * 102.0
-                            pnl_sign = "+" if upnl_inr >= 0 else ""
-                            pct_sign = "+" if pct >= 0 else ""
-                            pos_lines.append(f"  • {sym} [{side}] Qty: {sz} (Floating: {pnl_sign}₹{upnl_inr:,.2f} ({pct_sign}{pct:.2f}%))")
-                        pos_str = "\n".join(pos_lines) if pos_lines else "  • No open exchange positions."
-                        shark_header = (
-                            f"🦈 <b>SHARK EXCHANGE LIVE AUTO-TRADING</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"{shark_bal}\n"
-                            f"🟢 <b>Active Positions ({len(shark_pos)}):</b>\n"
-                            f"{pos_str}\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        )
-                        card = shark_header + card
-            except Exception as e_sh:
-                logger.warning(f"Could not append Shark balance in cmd_positions: {e_sh}")
 
-        await msg.reply_text(card, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Error in cmd_positions: {e}")
-        await msg.reply_text(f"⚠️ Error fetching trading details: {e}")
+async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles taps on the persistent docked keyboard buttons."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    text = msg.text.strip()
+    if text.startswith("/"):
+        return
+
+    chat_id = str(update.effective_chat.id)
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    t_lower = text.lower()
+
+    if "front" in t_lower or "home" in t_lower or "dashboard" in t_lower or (t_lower == "🔄 refresh"):
+        from executor import executor
+        import aiohttp
+        acc = executor.get_account(str(acc_idx)) or executor.primary
+        async with aiohttp.ClientSession() as s:
+            card = await build_front_page_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+            kb = get_account_keyboard(acc_idx=acc_idx, view="front", is_admin=is_admin)
+            await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
+    elif "live" in t_lower or "position" in t_lower or "active" in t_lower:
+        await cmd_positions(update, context)
+    elif "profit" in t_lower or "scorecard" in t_lower or "stat" in t_lower:
+        await cmd_trades(update, context)
+    elif "trade" in t_lower or "history" in t_lower or "ledger" in t_lower or "closed" in t_lower:
+        await cmd_trades(update, context)
+    elif "filter" in t_lower or "setting" in t_lower:
+        await msg.reply_text(
+            "⚙️ <b>Signal Filter & Alert Settings:</b>\n\n"
+            "Open @Alpha_Crypto_SignalBot to customize your coin watchlists, setups (Crossover/Retest), and star quality!",
+            parse_mode="HTML"
+        )
+    elif "all account" in t_lower or "overview" in t_lower:
+        if is_admin:
+            await cmd_accounts(update, context)
+        else:
+            await cmd_start(update, context)
 
 
 async def on_any_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1766,7 +2040,7 @@ def get_application() -> Application:
         from telegram.ext import MessageHandler, filters, ChatMemberHandler
         
         # Core bot command handlers
-        _app_instance.add_handler(CommandHandler(["start", "help"], cmd_start))
+        _app_instance.add_handler(CommandHandler(["start", "help", "menu", "front", "dashboard"], cmd_start))
         _app_instance.add_handler(CommandHandler(["accounts", "account", "users", "filter"], cmd_accounts))
         _app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
         _app_instance.add_handler(CommandHandler(["sync", "syncaccounts", "copysync"], cmd_sync))
@@ -1792,6 +2066,9 @@ def get_application() -> Application:
         _app_instance.add_handler(MessageHandler(filters.FORWARDED, on_forwarded_message))
         _app_instance.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_any_channel_message))
         
+        # User persistent keyboard button taps (Private DM)
+        _app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_user_quick_button_text))
+
         # Auto-detect channel posts and membership updates
         _app_instance.add_handler(MessageHandler(filters.ALL, on_channel_activity))
         _app_instance.add_handler(ChatMemberHandler(on_channel_activity))
@@ -1804,6 +2081,24 @@ async def start_telegram_bot_service():
     logger.info("Initializing Telegram Interactive Bot Application...")
     await app.initialize()
     await app.start()
+
+    # Configure permanent Telegram [Menu] button and commands
+    try:
+        from telegram import BotCommand, MenuButtonCommands
+        commands = [
+            BotCommand("start", "🏠 Front Page Dashboard"),
+            BotCommand("positions", "🟢 Live Active Trades"),
+            BotCommand("trades", "📜 Closed Trades Ledger"),
+            BotCommand("accounts", "💼 Account Overview"),
+            BotCommand("today", "📊 Today's Signals Summary"),
+            BotCommand("help", "ℹ️ Help & Status"),
+        ]
+        await app.bot.set_my_commands(commands)
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Permanent Telegram Menu button successfully registered for @Ema_signals_alerts_bot")
+    except Exception as e_cmd:
+        logger.warning(f"Could not set permanent bot commands: {e_cmd}")
+
     await app.updater.start_polling(
         allowed_updates=["message", "channel_post", "my_chat_member", "chat_member", "callback_query"],
         drop_pending_updates=False

@@ -372,20 +372,48 @@ async def cmd_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_prefs.get_user_prefs(chat_id, user_obj=update.effective_user)
-    text = (
-        f"👋 <b>Welcome to AlphaCryptoSignals!</b>\n\n"
-        f"Control exactly what signals you want to receive:\n"
-        f"• <b>Setups:</b> Fresh Crossovers and/or Live Retests\n"
-        f"• <b>Confluence Quality:</b> 3★ & 4★ Stars or 4★ Only\n"
-        f"• <b>Coins:</b> Core 10, Top 25 Alts, Commodities, US Stocks, or Custom\n"
-        f"• <b>Custom Coins:</b> Tap coin buttons or simply type coin names in chat!"
+    from telegram_bot import (
+        resolve_user_account_context,
+        get_permanent_reply_keyboard,
+        build_front_page_card,
+        get_account_keyboard
     )
-    await update.message.reply_text(text, parse_mode="HTML")
-    await update.message.reply_text(
-        build_dashboard_text(chat_id),
-        reply_markup=get_filter_menu_keyboard(chat_id),
-        parse_mode="HTML"
-    )
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    reply_kb = get_permanent_reply_keyboard(is_admin=is_admin)
+
+    # For Anuj Sharma (1010973596) or Himanshu (771305593), render isolated Front Page directly
+    if chat_id in ("1010973596", "771305593"):
+        user = update.effective_user
+        name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Trader"
+        welcome_text = (
+            f"👋 <b>Welcome {name}!</b>\n"
+            f"⚡ <i>Permanent Navigation Menu is docked below ⬇️</i>\n"
+            f"📋 <b>Your Chat ID:</b> <code>{chat_id}</code>"
+        )
+        await update.message.reply_text(welcome_text, reply_markup=reply_kb, parse_mode="HTML")
+        
+        from executor import executor
+        import aiohttp
+        acc = executor.get_account(str(acc_idx)) or executor.primary
+        async with aiohttp.ClientSession() as s:
+            card = await build_front_page_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+            kb = get_account_keyboard(acc_idx=acc_idx, view="front", is_admin=is_admin)
+            await update.message.reply_text(card, reply_markup=kb, parse_mode="HTML")
+    else:
+        text = (
+            f"👋 <b>Welcome to AlphaCryptoSignals!</b>\n\n"
+            f"Control exactly what signals you want to receive:\n"
+            f"• <b>Setups:</b> Fresh Crossovers and/or Live Retests\n"
+            f"• <b>Confluence Quality:</b> 3★ & 4★ Stars or 4★ Only\n"
+            f"• <b>Coins:</b> Core 10, Top 25 Alts, Commodities, US Stocks, or Custom\n"
+            f"• <b>Custom Coins:</b> Tap coin buttons or simply type coin names in chat!"
+        )
+        await update.message.reply_text(text, reply_markup=reply_kb, parse_mode="HTML")
+        await update.message.reply_text(
+            build_dashboard_text(chat_id),
+            reply_markup=get_filter_menu_keyboard(chat_id),
+            parse_mode="HTML"
+        )
 
 async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -432,7 +460,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(resp, parse_mode="HTML")
 
 async def on_user_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Allows user to simply type coin names in chat to add/remove them directly."""
+    """Allows user to simply type coin names in chat to add/remove them directly or use quick docked buttons."""
     msg = update.message
     if not msg or not msg.text:
         return
@@ -441,6 +469,43 @@ async def on_user_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     chat_id = str(update.effective_chat.id)
+    from telegram_bot import resolve_user_account_context, build_front_page_card, get_account_keyboard
+    acc_idx, is_admin = resolve_user_account_context(chat_id)
+    t_lower = text.lower()
+
+    # Intercept permanent docked reply keyboard buttons
+    if "front" in t_lower or "home" in t_lower or "dashboard" in t_lower or (t_lower == "🔄 refresh"):
+        from executor import executor
+        import aiohttp
+        acc = executor.get_account(str(acc_idx)) or executor.primary
+        async with aiohttp.ClientSession() as s:
+            card = await build_front_page_card(acc, s, acc_idx=acc_idx, is_admin=is_admin)
+            kb = get_account_keyboard(acc_idx=acc_idx, view="front", is_admin=is_admin)
+            await msg.reply_text(card, reply_markup=kb, parse_mode="HTML")
+        return
+    elif "live" in t_lower or "position" in t_lower or "active" in t_lower:
+        from telegram_bot import cmd_positions
+        await cmd_positions(update, context)
+        return
+    elif "profit" in t_lower or "scorecard" in t_lower or "stat" in t_lower:
+        from telegram_bot import cmd_trades
+        await cmd_trades(update, context)
+        return
+    elif "trade" in t_lower or "history" in t_lower or "ledger" in t_lower or "closed" in t_lower:
+        from telegram_bot import cmd_trades
+        await cmd_trades(update, context)
+        return
+    elif "filter" in t_lower or "setting" in t_lower or "menu" in t_lower:
+        await cmd_filter(update, context)
+        return
+    elif "all account" in t_lower or "overview" in t_lower:
+        from telegram_bot import cmd_accounts
+        if is_admin:
+            await cmd_accounts(update, context)
+        else:
+            await cmd_start(update, context)
+        return
+
     tokens = text.replace(",", " ").split()
     added = []
     removed = []
@@ -858,23 +923,42 @@ async def start_filter_bot_service():
     try:
         _filter_app_instance = Application.builder().token(FILTER_BOT_TOKEN).build()
         _filter_app_instance.add_error_handler(error_handler)
-        _filter_app_instance.add_handler(CommandHandler(["start", "help"], cmd_start))
-        _filter_app_instance.add_handler(CommandHandler(["filter", "settings", "menu"], cmd_filter))
+        _filter_app_instance.add_handler(CommandHandler(["start", "help", "menu", "front", "dashboard"], cmd_start))
+        _filter_app_instance.add_handler(CommandHandler(["filter", "settings"], cmd_filter))
         _filter_app_instance.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
         _filter_app_instance.add_handler(CommandHandler(["admin", "users", "subscribers"], cmd_admin))
         _filter_app_instance.add_handler(CommandHandler(["broadcast"], cmd_broadcast))
         _filter_app_instance.add_handler(CommandHandler(["removeuser", "deleteuser", "kick", "ban", "unban"], cmd_remove_user))
         _filter_app_instance.add_handler(CommandHandler(["del", "delete", "purge"], cmd_delete))
-        from telegram_bot import cmd_accounts, cmd_trades, cmd_positions, cmd_sync
+        from telegram_bot import cmd_accounts, cmd_trades, cmd_positions, cmd_sync, on_account_filter_callback
         _filter_app_instance.add_handler(CommandHandler(["accounts", "account"], cmd_accounts))
         _filter_app_instance.add_handler(CommandHandler(["trades", "trade", "history", "closed", "ledger"], cmd_trades))
         _filter_app_instance.add_handler(CommandHandler(["positions", "paper", "wallet"], cmd_positions))
         _filter_app_instance.add_handler(CommandHandler(["sync", "syncaccounts", "copysync"], cmd_sync))
+        _filter_app_instance.add_handler(CallbackQueryHandler(on_account_filter_callback, pattern=r"^acc_"))
         _filter_app_instance.add_handler(CallbackQueryHandler(on_button_callback))
         _filter_app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_user_text_message))
 
         await _filter_app_instance.initialize()
         await _filter_app_instance.start()
+
+        # Register permanent Telegram [Menu] button and commands
+        try:
+            from telegram import BotCommand, MenuButtonCommands
+            commands = [
+                BotCommand("start", "🏠 Front Page Dashboard"),
+                BotCommand("positions", "🟢 Live Active Trades"),
+                BotCommand("trades", "📜 Closed Trades Ledger"),
+                BotCommand("filter", "⚙️ Filter Settings"),
+                BotCommand("watch", "🎯 Custom Watchlist"),
+                BotCommand("help", "ℹ️ Help & Info"),
+            ]
+            await _filter_app_instance.bot.set_my_commands(commands)
+            await _filter_app_instance.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            logger.info("Permanent Telegram Menu button successfully registered for @Alpha_Crypto_SignalBot")
+        except Exception as e_cmd:
+            logger.warning(f"Could not set permanent filter bot commands: {e_cmd}")
+
         await _filter_app_instance.updater.start_polling(drop_pending_updates=True)
         logger.info("🚀 New Filter Bot Service (@Alpha_Crypto_SignalBot) started polling successfully!")
 
