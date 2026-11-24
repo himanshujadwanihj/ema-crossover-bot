@@ -21,11 +21,30 @@ TELEGRAM_TRADING_CHANNEL_ID: str = "771305593"        # Personal DM Chat ID for 
 # ── New Filter Mini App Bot (AlphaCryptoSignals @Alpha_Crypto_SignalBot) ───────
 FILTER_BOT_TOKEN: str = os.getenv("FILTER_BOT_TOKEN", "8990708294:AAHQAUYGrFSPs7Pi2bAYNvLexheJeqZeAMM")
 
-# ── Shark Exchange Auto-Trader Settings ────────────────────────────────────────
+# ── Shark Exchange Auto-Trader Settings (Multi-Account Enabled) ───────────────
 AUTO_TRADING_ENABLED: bool = True   # Live Real Money Auto-Trading on Shark Exchange
 PAPER_TRADING_ENABLED: bool = False  # User Directive: Paper trading completely paused; 100% focus on Live Trading
-SHARK_API_KEY: str         = os.getenv("SHARK_API_KEY", "052e905d55872cc219fdf28b92012287")
-SHARK_API_SECRET: str      = os.getenv("SHARK_API_SECRET", "b8c561b45bd6328ea3aa5cbb789847e4")
+
+# Account 1 (Main Account / Master)
+SHARK_ACC1_NAME: str         = os.getenv("SHARK_ACC1_NAME", "Main_Account")
+SHARK_API_KEY: str           = os.getenv("SHARK_API_KEY", "052e905d55872cc219fdf28b92012287")
+SHARK_API_SECRET: str        = os.getenv("SHARK_API_SECRET", "b8c561b45bd6328ea3aa5cbb789847e4")
+SHARK_ACC1_API_KEY: str      = os.getenv("SHARK_ACC1_API_KEY", SHARK_API_KEY)
+SHARK_ACC1_API_SECRET: str   = os.getenv("SHARK_ACC1_API_SECRET", SHARK_API_SECRET)
+SHARK_ACC1_CHAT_ID: str      = os.getenv("SHARK_ACC1_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "771305593"))
+
+# Account 2 (Anuj Sharma)
+SHARK_ACC2_NAME: str         = os.getenv("SHARK_ACC2_NAME", "Anuj Sharma")
+SHARK_ACC2_API_KEY: str      = os.getenv("SHARK_ACC2_API_KEY", "3388882595bbe761da4328eaa43462a8")
+SHARK_ACC2_API_SECRET: str   = os.getenv("SHARK_ACC2_API_SECRET", "2e238b3211066e1db5480110c71b377b")
+SHARK_ACC2_CHAT_ID: str      = os.getenv("SHARK_ACC2_CHAT_ID", "")
+
+# Account 3 (Optional 3rd Account)
+SHARK_ACC3_NAME: str         = os.getenv("SHARK_ACC3_NAME", "Account_3")
+SHARK_ACC3_API_KEY: str      = os.getenv("SHARK_ACC3_API_KEY", "")
+SHARK_ACC3_API_SECRET: str   = os.getenv("SHARK_ACC3_API_SECRET", "")
+SHARK_ACC3_CHAT_ID: str      = os.getenv("SHARK_ACC3_CHAT_ID", "")
+
 SHARK_BASE_URL: str        = os.getenv("SHARK_BASE_URL", "https://api.sharkexchange.in")
 AUTO_TRADE_MARGIN_INR: float = float(os.getenv("AUTO_TRADE_MARGIN_INR", "1500.0"))
 AUTO_TRADE_LEVERAGE: int     = int(os.getenv("AUTO_TRADE_LEVERAGE", "10"))
@@ -37,6 +56,44 @@ AUTO_TRADE_EXCLUDED_SYMBOLS: list = [
     "ASTER/USDT", "ASTR/USDT", "AST/USDT", "ASTER", "ASTR", "AST",
     "PAXG/USDT", "PAXGUSDT", "PAXG"
 ]
+
+def get_shark_accounts() -> list:
+    """Returns list of configured Shark Exchange accounts for multi-account copy trading."""
+    accounts = []
+    # Account 1 (Main)
+    if SHARK_ACC1_API_KEY and SHARK_ACC1_API_SECRET and len(SHARK_ACC1_API_KEY) > 10:
+        accounts.append({
+            "id": 1,
+            "name": SHARK_ACC1_NAME,
+            "api_key": SHARK_ACC1_API_KEY,
+            "api_secret": SHARK_ACC1_API_SECRET,
+            "telegram_chat_id": str(SHARK_ACC1_CHAT_ID or "771305593"),
+            "leverage": AUTO_TRADE_LEVERAGE,
+            "risk_pct": AUTO_TRADE_RISK_PER_TRADE_PCT
+        })
+    # Account 2 (Anuj Sharma)
+    if SHARK_ACC2_API_KEY and SHARK_ACC2_API_SECRET and len(SHARK_ACC2_API_KEY) > 10:
+        accounts.append({
+            "id": 2,
+            "name": SHARK_ACC2_NAME,
+            "api_key": SHARK_ACC2_API_KEY,
+            "api_secret": SHARK_ACC2_API_SECRET,
+            "telegram_chat_id": str(SHARK_ACC2_CHAT_ID or SHARK_ACC1_CHAT_ID or "771305593"),
+            "leverage": AUTO_TRADE_LEVERAGE,
+            "risk_pct": AUTO_TRADE_RISK_PER_TRADE_PCT
+        })
+    # Account 3 (Optional 3rd Account)
+    if SHARK_ACC3_API_KEY and SHARK_ACC3_API_SECRET and len(SHARK_ACC3_API_KEY) > 10:
+        accounts.append({
+            "id": 3,
+            "name": SHARK_ACC3_NAME,
+            "api_key": SHARK_ACC3_API_KEY,
+            "api_secret": SHARK_ACC3_API_SECRET,
+            "telegram_chat_id": str(SHARK_ACC3_CHAT_ID or SHARK_ACC1_CHAT_ID or "771305593"),
+            "leverage": AUTO_TRADE_LEVERAGE,
+            "risk_pct": AUTO_TRADE_RISK_PER_TRADE_PCT
+        })
+    return accounts
 
 # ── US Stock Tokens Exclusion (Crypto Only) ───────────────────────────────────
 # IMPORTANT: Only include tokens that are UNAMBIGUOUSLY US stock synthetics.
