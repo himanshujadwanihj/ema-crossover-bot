@@ -7,8 +7,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
+    ReplyKeyboardRemove,
     BotCommand,
     MenuButtonCommands
 )
@@ -1100,28 +1099,6 @@ def resolve_user_account_context(chat_id: str | int) -> tuple[int, bool]:
     return 1, False
 
 
-def get_permanent_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    """
-    Builds a permanent bottom docked keyboard (is_persistent=True) so the user
-    always has instant menu access docked right at their keyboard bar.
-    """
-    if is_admin:
-        kb = [
-            [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
-            [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
-            [KeyboardButton("📜 Trade History"), KeyboardButton("🌐 Web Dashboard")],
-            [KeyboardButton("🌐 All Accounts"), KeyboardButton("🔄 Refresh")]
-        ]
-    else:
-        kb = [
-            [KeyboardButton("🏠 Front Page"), KeyboardButton("🟢 Live Trades")],
-            [KeyboardButton("📡 Active Radars"), KeyboardButton("💰 Realized Profits")],
-            [KeyboardButton("📜 Trade History"), KeyboardButton("🌐 Web Dashboard")],
-            [KeyboardButton("🔄 Refresh"), KeyboardButton("⚙️ Filter Settings")]
-        ]
-    return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
-
-
 def get_account_keyboard(acc_idx: int = 1, view: str = "front", is_admin: bool = False) -> InlineKeyboardMarkup:
     """
     Builds interactive inline buttons.
@@ -1538,7 +1515,7 @@ async def build_front_page_card(acc, session, acc_idx: int = 1, is_admin: bool =
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responds to /start by loading the permanent docked menu and Front Page Dashboard."""
+    """Responds to /start by removing any sticky bottom keyboard and loading Front Page Dashboard."""
     msg = update.message
     if not msg:
         return
@@ -1548,14 +1525,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acc_idx, is_admin = resolve_user_account_context(chat_id)
     logger.info(f"📩 /start received from {name} (Chat ID: {chat_id}, acc_idx: {acc_idx}, is_admin: {is_admin})")
 
-    # Send docked persistent keyboard first
-    reply_kb = get_permanent_reply_keyboard(is_admin=is_admin)
+    # Actively remove any previously cached sticky ReplyKeyboard so it never blocks screen space;
+    # users use the clean ≡ Menu button on the bottom-left and inline dashboard buttons below cards.
     welcome_text = (
         f"👋 <b>Welcome {name}!</b>\n"
-        f"⚡ <i>Permanent Navigation Menu is docked below ⬇️</i>\n"
-        f"📋 <b>Your Chat ID:</b> <code>{chat_id}</code>"
+        f"📋 <b>Your Chat ID:</b> <code>{chat_id}</code>\n"
+        f"≡ <i>Use the <b>Menu</b> button (bottom-left) anytime for quick commands.</i>"
     )
-    await msg.reply_text(welcome_text, reply_markup=reply_kb, parse_mode="HTML")
+    await msg.reply_text(welcome_text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
 
     from executor import executor
     import aiohttp
@@ -1956,7 +1933,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles taps on the persistent docked keyboard buttons."""
+    """Handles any leftover taps from old sticky keyboard buttons by removing it cleanly and routing."""
     msg = update.message
     if not msg or not msg.text:
         return
@@ -1967,6 +1944,12 @@ async def on_user_quick_button_text(update: Update, context: ContextTypes.DEFAUL
     chat_id = str(update.effective_chat.id)
     acc_idx, is_admin = resolve_user_account_context(chat_id)
     t_lower = text.lower()
+    known_keywords = ("front", "home", "dashboard", "refresh", "live", "position", "active", "profit", "scorecard", "stat", "radar", "coiling", "squeeze", "trade", "history", "ledger", "closed", "filter", "setting", "web", "site", "url", "portfolio", "all account", "overview")
+    if any(k in t_lower for k in known_keywords):
+        try:
+            await msg.reply_text("🧹 <i>Sticky bar removed — use ≡ Menu or card buttons.</i>", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        except Exception:
+            pass
 
     if "front" in t_lower or "home" in t_lower or "dashboard" in t_lower or (t_lower == "🔄 refresh"):
         from executor import executor
