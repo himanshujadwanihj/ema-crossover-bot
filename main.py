@@ -1721,6 +1721,7 @@ async def main_loop():
                                 # USER DIRECTIVE: Portfolio cap removed completely — execute ALL eligible setups without limit
                                 top_candidates = eligible_candidates
                                 logger.info(f"🏆 ALL {len(top_candidates)} ELIGIBLE SETUP(S) SELECTED FOR SHARK EXECUTION (No portfolio cap).")
+                                batch_submitted_by_dir = {"BUY": [], "SELL": []}
                                 for cand in top_candidates:
                                     sym = cand["symbol"]
                                     sig = cand["signal"]
@@ -1740,24 +1741,24 @@ async def main_loop():
                                             if pos_dir == sig_dir:
                                                 is_same_dir_continuation = True
 
-                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction Trades Shield (Max 5 LONG, Max 5 SHORT)
-                                    # Allows up to 5 concurrent LONGs and 5 concurrent SHORTs simultaneously.
+                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction At-Risk Trades Shield (Max 5 LONG, Max 5 SHORT)
+                                    # Trades whose live SL is moved to Breakeven (entry price) or Profit-Lock are Zero-Risk & EXEMPT!
+                                    cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
                                     if not is_same_dir_continuation:
-                                        all_shark_pos = await executor.get_open_positions(session)
-                                        cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
-                                        cand_dir_label = "LONG" if cand_dir == "BUY" else "SHORT"
-                                        same_dir_count = 0
-                                        active_same_syms = []
-                                        for p_check in all_shark_pos:
-                                            p_q = abs(float(p_check.get("quantity") or p_check.get("positionAmount") or 0))
-                                            if p_q > 0:
-                                                p_dr = str(p_check.get("positionType") or p_check.get("positionSide") or p_check.get("side") or "").upper()
-                                                p_d = "BUY" if p_dr in ("LONG", "BUY") else "SELL"
-                                                if p_d == cand_dir:
-                                                    same_dir_count += 1
-                                                    active_same_syms.append(executor.clean_sym(p_check))
-                                        if same_dir_count >= 5:
-                                            basket_reason = f"Directional Limit Reached (Already {same_dir_count} active {cand_dir_label} positions: {', '.join(active_same_syms)}). Max 5 {cand_dir_label} trades allowed at a time."
+                                        slot_info = await executor.get_directional_risk_slots(
+                                            session,
+                                            signal=sig,
+                                            max_at_risk=5,
+                                            batch_submitted_syms=batch_submitted_by_dir[cand_dir],
+                                        )
+                                        if slot_info["breakeven_syms"]:
+                                            logger.info(
+                                                f"🛡️ Directional Risk Slots [{cand_dir}]: {slot_info['at_risk_count']}/5 at-risk "
+                                                f"({', '.join(slot_info['at_risk_syms']) or 'None'}) | Breakeven-exempt: "
+                                                f"{', '.join(slot_info['breakeven_syms'])}"
+                                            )
+                                        if not slot_info["allowed"]:
+                                            basket_reason = slot_info["reason"]
                                             logger.info(f"Skipping {sym} — {basket_reason}")
                                             await notify_signal_rejection(sym, sig, basket_reason, cand=cand)
                                             continue
@@ -1784,6 +1785,10 @@ async def main_loop():
                                         continue
 
                                     if shark_res and shark_res.get("status") in ("success", "partial_success"):
+                                        from executor import to_shark_symbol
+                                        sh_sym = to_shark_symbol(sym)
+                                        if sh_sym not in batch_submitted_by_dir[cand_dir]:
+                                            batch_submitted_by_dir[cand_dir].append(sh_sym)
                                         from state import update_trade_progress, _make_key
                                         state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
                                         t_qty = shark_res.get("total_qty", 0)

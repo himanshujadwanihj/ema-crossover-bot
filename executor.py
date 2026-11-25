@@ -742,6 +742,121 @@ class SharkExchangeExecutor:
 
         return False
 
+    async def get_directional_risk_slots(
+        self,
+        session: aiohttp.ClientSession,
+        signal: str,
+        max_at_risk: int = 5,
+        batch_submitted_syms: list = None,
+    ) -> dict:
+        """
+        Evaluates same-direction concurrent trade slots, exempting any active position
+        whose live Stop-Loss on Shark Exchange is already moved to Breakeven (entry price)
+        or locked in profit (SL >= Entry for LONG, SL <= Entry for SHORT).
+        Zero-risk breakeven trades do not block new concurrent trades.
+        """
+        cand_dir = "BUY" if str(signal).upper() in ("BUY", "LONG") else "SELL"
+        cand_label = "LONG" if cand_dir == "BUY" else "SHORT"
+        positions = await self.get_open_positions(session)
+        open_orders = await self.get_open_orders(session)
+
+        orders_by_sym = {}
+        for o in open_orders:
+            s_o = self.clean_sym(o)
+            if s_o:
+                orders_by_sym.setdefault(s_o, []).append(o)
+
+        at_risk_syms = []
+        breakeven_syms = []
+
+        for p in positions:
+            p_sym = self.clean_sym(p)
+            if not p_sym:
+                continue
+            p_q = 0.0
+            for qk in ("quantity", "holdQty", "openQty", "posQty", "size", "amount", "positionAmount"):
+                val = p.get(qk)
+                if val is not None:
+                    try:
+                        fv = abs(float(val))
+                        if fv > 0:
+                            p_q = fv
+                            break
+                    except Exception:
+                        pass
+            if p_q <= 0:
+                continue
+
+            p_dr = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
+            p_d = "BUY" if p_dr in ("LONG", "BUY") else "SELL"
+            if p_d != cand_dir:
+                continue
+
+            entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+            if entry_p <= 0:
+                pos_sz = abs(float(p.get("positionSize") or 0))
+                if pos_sz > 0 and p_q > 0:
+                    entry_p = pos_sz / p_q
+
+            # Extract all live SL prices attached to this position
+            sl_prices = []
+            for o_ord in orders_by_sym.get(p_sym, []):
+                typ_u = str(o_ord.get("type") or "").upper()
+                sub_u = str(o_ord.get("subType") or "").upper()
+                lnk_u = str(o_ord.get("linkType") or "").upper()
+                place_u = str(o_ord.get("placeType") or "").upper()
+                is_sl = (
+                    typ_u in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                    or sub_u == "STOP_LOSS"
+                    or lnk_u == "ORDER_SL"
+                    or (place_u == "POSITION" and (o_ord.get("stopLossPrice") or o_ord.get("stopPrice")))
+                ) and not (place_u == "ORDER_FORM" and typ_u == "LIMIT")
+                if is_sl:
+                    px = float(o_ord.get("stopLossPrice") or o_ord.get("stopPrice") or o_ord.get("triggerPrice") or o_ord.get("price") or 0)
+                    if px > 0:
+                        sl_prices.append(px)
+
+            # Position is Breakeven / Zero-Risk ONLY if it has an active live SL on exchange
+            # placed at or beyond Entry (0.05% tolerance for exchange price tick rounding).
+            is_breakeven = False
+            if entry_p > 0 and sl_prices:
+                if cand_dir == "BUY":
+                    worst_sl = min(sl_prices)
+                    if worst_sl >= entry_p * 0.9995:
+                        is_breakeven = True
+                else:
+                    worst_sl = max(sl_prices)
+                    if worst_sl <= entry_p * 1.0005:
+                        is_breakeven = True
+
+            if is_breakeven:
+                breakeven_syms.append(p_sym)
+            else:
+                at_risk_syms.append(p_sym)
+
+        # Account for new same-direction trades already submitted earlier in this batch loop
+        extra_syms = [
+            s for s in (batch_submitted_syms or [])
+            if s not in at_risk_syms and s not in breakeven_syms
+        ]
+        all_at_risk = at_risk_syms + extra_syms
+        at_risk_count = len(all_at_risk)
+        allowed = at_risk_count < max_at_risk
+
+        be_note = f" | Breakeven-exempt (Zero-Risk): {len(breakeven_syms)} ({', '.join(breakeven_syms)})" if breakeven_syms else ""
+        reason = (
+            f"Directional Limit Reached (Already {at_risk_count}/{max_at_risk} at-risk {cand_label} trades: "
+            f"{', '.join(all_at_risk)}{be_note}). Max {max_at_risk} at-risk {cand_label} trades allowed at a time."
+        )
+        return {
+            "allowed": allowed,
+            "at_risk_count": at_risk_count,
+            "max_at_risk": max_at_risk,
+            "at_risk_syms": all_at_risk,
+            "breakeven_syms": breakeven_syms,
+            "reason": reason,
+        }
+
     async def trail_position_on_new_signal(
         self,
         session: aiohttp.ClientSession,
@@ -2811,6 +2926,20 @@ class MultiAccountExecutor:
             for acc in configured_accs
         ], return_exceptions=True)
         return all(isinstance(c, bool) and c for c in checks)
+
+    async def get_directional_risk_slots(
+        self,
+        session: aiohttp.ClientSession,
+        signal: str,
+        max_at_risk: int = 5,
+        batch_submitted_syms: list = None,
+    ) -> dict:
+        return await self.primary.get_directional_risk_slots(
+            session,
+            signal=signal,
+            max_at_risk=max_at_risk,
+            batch_submitted_syms=batch_submitted_syms,
+        )
 
     async def execute_signal_trade(
         self,
