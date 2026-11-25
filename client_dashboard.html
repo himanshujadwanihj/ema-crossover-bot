@@ -334,14 +334,9 @@
   </main>
 
   <script>
-    // Determine Account Identifier from URL Query Params or Defaults to '2' (Anuj Sharma)
+    // Strictly Locked to Account 2 (Anuj Sharma) — ignores any ?account=1 override
     function getTargetAccount() {
-      const urlParams = new URLSearchParams(window.location.search);
-      const acc = urlParams.get('account') || urlParams.get('acc');
-      if (acc) return acc;
-      const path = window.location.pathname.toLowerCase();
-      if (path.includes('anuj')) return '2';
-      return '2'; // Default is Account 2 (Client Dashboard)
+      return '2';
     }
 
     const currentAccount = getTargetAccount();
@@ -381,7 +376,10 @@
       if (manual && refreshIcon) refreshIcon.classList.add('spinning');
 
       try {
-        const response = await fetch(`/api/live-stats?account=${currentAccount}&t=${Date.now()}`);
+        const host = (window.location.hostname || '').toLowerCase();
+        const isLocalOrRailway = host.includes('railway.app') || host === 'localhost' || host === '127.0.0.1';
+        const apiBase = isLocalOrRailway ? '' : 'https://worker-production-e82be7c6.up.railway.app';
+        const response = await fetch(`${apiBase}/api/live-stats?account=2&isolated=1&t=${Date.now()}`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         renderDashboard(data);

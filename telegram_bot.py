@@ -251,6 +251,66 @@ def _is_telegram_alert_in_cooldown(symbol: str, tf_label: str, signal: str, cros
     _RECENT_ALERT_TIMESTAMPS[key] = now
     return False
 
+
+def _compute_signal_ai_analysis(
+    symbol: str,
+    signal: str,
+    rsi,
+    adx,
+    tf_data,
+    tf_label: str,
+    aligned_count: int,
+    cross_type: str = "9/26 EMA Cross",
+) -> dict:
+    """Computes AI Signal Analyser score & components from OHLCV dataframe + indicators."""
+    from signal_analyser import analyse_signal
+
+    df_tf = None
+    if isinstance(tf_data, dict):
+        df_tf = tf_data.get(tf_label)
+        if df_tf is None:
+            df_tf = tf_data.get("1H")
+
+    vol_now = None
+    vol_sma_now = None
+    body_ratio_now = None
+    macd_line_now = None
+    macd_sig_now = None
+
+    if df_tf is not None and len(df_tf) >= 22:
+        try:
+            vol_now = float(df_tf["volume"].iloc[-2])
+            vol_sma_now = float(df_tf["volume"].iloc[-22:-2].mean())
+            c_open = float(df_tf["open"].iloc[-2])
+            c_high = float(df_tf["high"].iloc[-2])
+            c_low = float(df_tf["low"].iloc[-2])
+            c_close = float(df_tf["close"].iloc[-2])
+            c_body = abs(c_close - c_open)
+            c_range = max(c_high - c_low, 1e-8)
+            body_ratio_now = c_body / c_range
+            macd_line_ser = df_tf["close"].ewm(span=12, adjust=False).mean() - df_tf["close"].ewm(span=26, adjust=False).mean()
+            macd_sig_ser = macd_line_ser.ewm(span=9, adjust=False).mean()
+            macd_line_now = float(macd_line_ser.iloc[-2])
+            macd_sig_now = float(macd_sig_ser.iloc[-2])
+        except Exception:
+            pass
+
+    return analyse_signal(
+        symbol=symbol,
+        signal=signal,
+        rsi=rsi,
+        adx=adx,
+        volume=vol_now,
+        volume_sma=vol_sma_now,
+        macd_line=macd_line_now,
+        macd_signal_val=macd_sig_now,
+        body_ratio=body_ratio_now,
+        aligned_count=aligned_count,
+        tf_label=tf_label,
+        cross_type=cross_type,
+    )
+
+
 async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_type="9/26 EMA Cross", last_1h_cross_time=None, candle_time=None, macro_struct="Unknown", rr=1.5, tp_label="BSL Pool", tf_data=None, tp1=None, tp2=None, tp3=None, rr1=None, rr2=None, rr3=None, lbl1=None, lbl2=None, lbl3=None, is_special_list=False, rsi=None, adx=None, **kwargs):
     """Queues an alert in memory instead of sending instantly. Flushed at the end of the scan loop."""
     # AIRTIGHT ANTI-DUPLICATE SHIELD: Prevent repeated notifications
@@ -311,35 +371,52 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
                 logger.info(f"BLOCKED {signal} crossover for {symbol} ({tf_label}) — {aligned_count}/4 stars (minimum 3 required for HTF).")
                 return False
 
-    # STRICT RSI MOMENTUM GATE:
-    # All signals MUST strictly satisfy healthy RSI momentum range:
-    # Trap Reversals: BUY <= 45.0 (oversold bounce), SELL >= 55.0 (overbought flush)
-    # Trend Setups: BUY: 42.0 <= RSI <= 62.0, SELL: 38.0 <= RSI <= 58.0
+    # STRICT RSI MOMENTUM GATE (Bypassed for 3★/4★ setups with AI Score > 77):
     if rsi is not None:
         try:
             f_rsi = float(rsi)
+            rsi_blocked_reason = None
             if is_trap_type:
                 if signal == "BUY" and f_rsi > 45.0:
-                    logger.info(f"🚫 BLOCKED {symbol} Bear Trap BUY ({tf_label}) — RSI {f_rsi:.1f} not oversold enough (> 45.0).")
-                    return False
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} not oversold enough (> 45.0)."
                 elif signal == "SELL" and f_rsi < 55.0:
-                    logger.info(f"🚫 BLOCKED {symbol} Bull Trap SELL ({tf_label}) — RSI {f_rsi:.1f} not overbought enough (< 55.0).")
-                    return False
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} not overbought enough (< 55.0)."
             elif is_squeeze_type or kwargs.get("is_dedicated_squeeze", False):
-                # Squeeze Breakouts: High momentum candles naturally surge!
-                # Healthy breakout bounds: BUY [42.0 - 78.0], SELL [22.0 - 58.0]
                 if signal == "BUY" and not (42.0 <= f_rsi <= 78.0):
-                    logger.info(f"🚫 BLOCKED {symbol} Squeeze BUY ({tf_label}) — RSI {f_rsi:.1f} outside squeeze breakout bounds [42, 78].")
-                    return False
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} outside squeeze breakout bounds [42, 78]."
                 elif signal == "SELL" and not (22.0 <= f_rsi <= 58.0):
-                    logger.info(f"🚫 BLOCKED {symbol} Squeeze SELL ({tf_label}) — RSI {f_rsi:.1f} outside squeeze breakdown bounds [22, 58].")
-                    return False
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} outside squeeze breakdown bounds [22, 58]."
             else:
                 if signal == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                    logger.info(f"🚫 BLOCKED {symbol} BUY ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62] (Overbought peak/exhausted).")
-                    return False
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} outside healthy momentum bounds [42, 62]."
                 elif signal == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                    logger.info(f"🚫 BLOCKED {symbol} SELL ({tf_label}) — RSI {f_rsi:.1f} outside healthy momentum bounds [38, 58] (Oversold bottom/exhausted < 38).")
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} outside healthy momentum bounds [38, 58]."
+
+            if rsi_blocked_reason:
+                bypass_rsi_ai = False
+                if aligned_count >= 3:
+                    try:
+                        ai_check = _compute_signal_ai_analysis(
+                            symbol=symbol,
+                            signal=signal,
+                            rsi=f_rsi,
+                            adx=adx,
+                            tf_data=tf_data,
+                            tf_label=tf_label,
+                            aligned_count=aligned_count,
+                            cross_type=cross_type,
+                        )
+                        if ai_check.get("score", 0) > 77:
+                            bypass_rsi_ai = True
+                            logger.info(
+                                f"🚀 QUEUE AI OVERRIDE for {symbol} [{signal} {tf_label}]: "
+                                f"Score {ai_check.get('score')}/100 > 77 with {aligned_count}★. "
+                                f"Bypassing RSI gate ({rsi_blocked_reason})."
+                            )
+                    except Exception:
+                        pass
+                if not bypass_rsi_ai:
+                    logger.info(f"🚫 BLOCKED {symbol} {signal} ({tf_label}) — {rsi_blocked_reason}")
                     return False
         except (ValueError, TypeError):
             pass
@@ -607,46 +684,14 @@ def _build_single_coin_block(data, index=None):
         
     # -- AI SIGNAL ANALYSIS BLOCK --
     try:
-        df_tf = None
-        if isinstance(data.get("tf_data"), dict):
-            df_tf = data["tf_data"].get(data.get("tf_label")) or data["tf_data"].get("1H")
-
-        vol_now = None
-        vol_sma_now = None
-        body_ratio_now = None
-        macd_line_now = None
-        macd_sig_now = None
-
-        if df_tf is not None and len(df_tf) >= 22:
-            try:
-                vol_now = float(df_tf["volume"].iloc[-2])
-                vol_sma_now = float(df_tf["volume"].iloc[-22:-2].mean())
-                c_open  = float(df_tf["open"].iloc[-2])
-                c_high  = float(df_tf["high"].iloc[-2])
-                c_low   = float(df_tf["low"].iloc[-2])
-                c_close = float(df_tf["close"].iloc[-2])
-                c_body  = abs(c_close - c_open)
-                c_range = max(c_high - c_low, 1e-8)
-                body_ratio_now = c_body / c_range
-                macd_line_ser  = df_tf["close"].ewm(span=12, adjust=False).mean() - df_tf["close"].ewm(span=26, adjust=False).mean()
-                macd_sig_ser   = macd_line_ser.ewm(span=9, adjust=False).mean()
-                macd_line_now  = float(macd_line_ser.iloc[-2])
-                macd_sig_now   = float(macd_sig_ser.iloc[-2])
-            except Exception:
-                pass
-
-        analysis = analyse_signal(
+        analysis = _compute_signal_ai_analysis(
             symbol=symbol,
             signal=signal,
             rsi=data.get("rsi"),
             adx=data.get("adx"),
-            volume=vol_now,
-            volume_sma=vol_sma_now,
-            macd_line=macd_line_now,
-            macd_signal_val=macd_sig_now,
-            body_ratio=body_ratio_now,
-            aligned_count=aligned_count,
+            tf_data=data.get("tf_data"),
             tf_label=tf_label,
+            aligned_count=aligned_count,
             cross_type=cross_type,
         )
         # Background only -- do NOT append to Telegram message
@@ -929,6 +974,12 @@ async def cmd_setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Target channel linked to: <code>{chat.id}</code> ({chat.title})", parse_mode="HTML")
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    _, is_admin = resolve_user_account_context(chat_id)
+    if not is_admin:
+        await cmd_start(update, context)
+        return
+
     from state import get_all_signals
     import zoneinfo
     tz = zoneinfo.ZoneInfo(TIMEZONE)
@@ -2369,10 +2420,10 @@ async def start_telegram_bot_service():
     await app.initialize()
     await app.start()
 
-    # Configure permanent Telegram [Menu] button and commands
+    # Configure permanent Telegram [Menu] button and chat-scoped commands
     try:
-        from telegram import BotCommand, MenuButtonCommands
-        commands = [
+        from telegram import BotCommand, BotCommandScopeChat, MenuButtonCommands
+        admin_commands = [
             BotCommand("start", "🏠 Front Page Dashboard"),
             BotCommand("positions", "🟢 Live Active Trades"),
             BotCommand("trades", "📜 Closed Trades Ledger"),
@@ -2382,9 +2433,20 @@ async def start_telegram_bot_service():
             BotCommand("today", "📊 Today's Signals Summary"),
             BotCommand("help", "ℹ️ Help & Status"),
         ]
-        await app.bot.set_my_commands(commands)
+        client_commands = [
+            BotCommand("start", "🏠 Front Page Dashboard"),
+            BotCommand("positions", "🟢 Live Active Trades"),
+            BotCommand("trades", "📜 Closed Trades Ledger"),
+            BotCommand("web", "🌐 Personal Web Dashboard"),
+            BotCommand("help", "ℹ️ Help & Status"),
+        ]
+        await app.bot.set_my_commands(client_commands)
+        await app.bot.set_my_commands(client_commands, scope=BotCommandScopeChat(chat_id=1010973596))
+        await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=771305593))
         await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        logger.info("Permanent Telegram Menu button successfully registered for @Ema_signals_alerts_bot")
+        await app.bot.set_chat_menu_button(chat_id=1010973596, menu_button=MenuButtonCommands())
+        await app.bot.set_chat_menu_button(chat_id=771305593, menu_button=MenuButtonCommands())
+        logger.info("Permanent Telegram Menu button & scoped commands registered for @Ema_signals_alerts_bot")
     except Exception as e_cmd:
         logger.warning(f"Could not set permanent bot commands: {e_cmd}")
 

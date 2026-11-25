@@ -319,14 +319,16 @@ async def fetch_live_market_price(session, symbol: str) -> float:
 
     return 0.0
 
-async def get_real_live_dashboard_payload_async(session, account_identifier: str = None) -> dict:
+async def get_real_live_dashboard_payload_async(session, account_identifier: str = None, isolated: bool = False) -> dict:
     """Extracts 100% genuine real-time data from Shark Exchange Native API for specified account."""
     global _last_real_stats_cache
     now_t = time.time()
 
     from executor import executor
+    if isolated:
+        account_identifier = "2"
     target_acc = executor.get_account(account_identifier) or executor.primary
-    acc_key = target_acc.name
+    acc_key = f"{target_acc.name}_{'iso' if isolated else 'adm'}"
 
     if isinstance(_last_real_stats_cache, dict) and acc_key in _last_real_stats_cache:
         cached_t, cached_payload = _last_real_stats_cache[acc_key]
@@ -614,7 +616,11 @@ async def get_real_live_dashboard_payload_async(session, account_identifier: str
                 "id": 1 if target_acc == executor.accounts[0] else (2 if len(executor.accounts) > 1 and target_acc == executor.accounts[1] else 1),
                 "api_status": st,
                 "api_raw_balance": raw_total,
-                "all_accounts": [{"id": i + 1, "name": a.name} for i, a in enumerate(executor.accounts) if a.is_configured()]
+                "all_accounts": (
+                    [{"id": 2, "name": target_acc.name}]
+                    if isolated
+                    else [{"id": i + 1, "name": a.name} for i, a in enumerate(executor.accounts) if a.is_configured()]
+                ),
             }
         }
         if not isinstance(_last_real_stats_cache, dict):
@@ -629,12 +635,15 @@ async def get_real_live_dashboard_payload_async(session, account_identifier: str
 async def api_live_stats_handler(request: web.Request) -> web.Response:
     """Returns real-time performance JSON with CORS enabled (Direct Shark Live Sync with Account Filter)."""
     account_param = request.query.get("account") or request.query.get("acc")
+    isolated_q = str(request.query.get("isolated") or "").lower() in ("1", "true", "yes")
+    referer = str(request.headers.get("Referer") or "").lower()
+    isolated = isolated_q or any(k in referer for k in ("/anuj", "/client", "/portfolio", "client_dashboard"))
     from config import PAPER_TRADING_ENABLED
     from executor import executor
     if not PAPER_TRADING_ENABLED and executor.is_configured():
         import aiohttp
         async with aiohttp.ClientSession() as s:
-            data = await get_real_live_dashboard_payload_async(s, account_identifier=account_param)
+            data = await get_real_live_dashboard_payload_async(s, account_identifier=account_param, isolated=isolated)
     else:
         data = get_live_performance_payload()
 

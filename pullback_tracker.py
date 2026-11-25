@@ -400,6 +400,20 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                 }
 
                 cur_rsi = float(row['rsi']) if ('rsi' in row and not pd.isna(row['rsi'])) else None
+                c_open = float(row.get('open', 0))
+                c_close = float(row.get('close', 0))
+                c_high = float(row.get('high', 0))
+                c_low = float(row.get('low', 0))
+                c_range = max(c_high - c_low, 1e-8)
+                b_ratio = abs(c_close - c_open) / c_range
+
+                # Use prev_row volume (closed candle) since current row is a live forming candle
+                p_vol = float(prev_row.get('volume', 0)) if 'volume' in prev_row else (float(row.get('volume', 0)) if 'volume' in row else None)
+                p_vol_sma = float(prev_row.get('vol_sma_20', 0)) if 'vol_sma_20' in prev_row else (float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None)
+                adx_val = float(prev_row.get('adx', row.get('adx', 25.0))) if ('adx' in prev_row and not pd.isna(prev_row['adx'])) else (float(row.get('adx', 25.0)) if ('adx' in row and not pd.isna(row['adx'])) else 25.0)
+                macd_line_val = float(row.get('macd_line', 0)) if 'macd_line' in row and not pd.isna(row.get('macd_line')) else None
+                macd_sig_val = float(row.get('macd_signal', 0)) if 'macd_signal' in row and not pd.isna(row.get('macd_signal')) else None
+
                 # Strict RSI Retest Filter (ensures healthy pullbacks, rejects falling knives)
                 if cur_rsi is not None:
                     rsi_buy_min, rsi_buy_max = (40.0, 65.0) if tf_label in ["5M", "15M"] else (42.0, 62.0)
@@ -418,7 +432,20 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                         if al_cnt >= 3:
                             try:
                                 from signal_analyser import analyse_signal
-                                pb_ai = analyse_signal(symbol=symbol, signal=sig_type, rsi=cur_rsi, aligned_count=al_cnt, tf_label=tf_label)
+                                pb_ai = analyse_signal(
+                                    symbol=symbol,
+                                    signal=sig_type,
+                                    rsi=cur_rsi,
+                                    adx=adx_val,
+                                    volume=p_vol,
+                                    volume_sma=p_vol_sma,
+                                    macd_line=macd_line_val,
+                                    macd_signal_val=macd_sig_val,
+                                    body_ratio=b_ratio,
+                                    aligned_count=al_cnt,
+                                    tf_label=tf_label,
+                                    cross_type=f"{ema_name} {action_name}",
+                                )
                                 if pb_ai.get("score", 0) > 77:
                                     bypass_retest_rsi = True
                                     logger.info(f"🚀 RETEST AI OVERRIDE for {symbol} [{sig_type}]: Score {pb_ai.get('score')}/100 > 77 with {al_cnt}★. Bypassing RSI filter.")
@@ -445,7 +472,8 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     lbl1=lbl1, lbl2=lbl2,
                     tf_data=tf_data,
                     is_special_list=is_special,
-                    rsi=cur_rsi
+                    rsi=cur_rsi,
+                    adx=adx_val,
                 )
                 if not is_ret_queued:
                     continue
@@ -463,18 +491,6 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     tf_states.get("4H", "").lower() == target_trend and
                     tf_states.get("1D", "").lower() == target_trend
                 )
-                
-                c_open = float(row.get('open', 0))
-                c_close = float(row.get('close', 0))
-                c_high = float(row.get('high', 0))
-                c_low = float(row.get('low', 0))
-                c_range = max(c_high - c_low, 1e-8)
-                b_ratio = abs(c_close - c_open) / c_range
-
-                # Use prev_row volume (closed candle) since current row is a live forming candle
-                p_vol = float(prev_row.get('volume', 0)) if 'volume' in prev_row else (float(row.get('volume', 0)) if 'volume' in row else None)
-                p_vol_sma = float(prev_row.get('vol_sma_20', 0)) if 'vol_sma_20' in prev_row else (float(row.get('vol_sma_20', 0)) if 'vol_sma_20' in row else None)
-                adx_val = float(prev_row.get('adx', row.get('adx', 25.0))) if ('adx' in prev_row and not pd.isna(prev_row['adx'])) else (float(row.get('adx', 25.0)) if ('adx' in row and not pd.isna(row['adx'])) else 25.0)
 
                 retest_cands.append({
                     "symbol": symbol,
@@ -496,8 +512,8 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
                     "adx": adx_val,
                     "volume": p_vol,
                     "volume_sma": p_vol_sma,
-                    "macd_line": float(row.get('macd_line', 0)) if 'macd_line' in row else None,
-                    "macd_signal_val": float(row.get('macd_signal', 0)) if 'macd_signal' in row else None,
+                    "macd_line": macd_line_val,
+                    "macd_signal_val": macd_sig_val,
                     "body_ratio": b_ratio,
                     "tf_label": tf_label,
                     "cross_type": f"{ema_name} {action_name}",

@@ -978,17 +978,15 @@ class SharkExchangeExecutor:
 
             if sl_updated or tp_updated:
                 self._tp_sl_heal_lock[clean_sym + "_continuation_trail"] = time.time()
-                # Update local state
-                from state import get_latest_symbol_state, _load, _save
-                st_map = _load()
-                for k_st in list(st_map.keys()):
-                    if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
-                        if sl_updated:
-                            st_map[k_st]["cur_sl"] = clean_new_sl
-                        if tp_updated:
-                            st_map[k_st]["tp1"] = clean_new_tp
-                        _save(st_map)
-                        break
+                if tp_updated:
+                    self._tp_sl_heal_lock[clean_sym + "_tp1_realigned"] = True
+                from state import update_latest_shark_state
+                st_updates = {"continuation_trailed": True}
+                if sl_updated:
+                    st_updates["cur_sl"] = clean_new_sl
+                if tp_updated:
+                    st_updates["tp1"] = clean_new_tp
+                update_latest_shark_state(clean_sym, st_updates)
 
                 from telegram_bot import send_text_alert
                 sl_info = f"🛡️ <b>SL Trailed:</b> ${current_sl} → <b>${clean_new_sl}</b> (Risk Locked)\n" if sl_updated else f"🛡️ <b>SL:</b> ${current_sl}\n"
@@ -1254,6 +1252,8 @@ class SharkExchangeExecutor:
             order_id = data.get("orderId") or data.get("id") or "CONFIRMED"
             actual_cid = data.get("clientOrderId") or ""
             logger.info(f"SHARK ORDER PLACED SUCCESSFULLY: {clean_sym} OrderID={order_id} ClientID={actual_cid}")
+            self._tp_sl_heal_lock.pop(clean_sym + "_continuation_trail", None)
+            self._tp_sl_heal_lock.pop(clean_sym + "_tp1_realigned", None)
             self._session_active_symbols[clean_sym] = time.time()
             self._pending_entry_orders[clean_sym] = {
                 "clientOrderId": actual_cid,
@@ -1400,39 +1400,40 @@ class SharkExchangeExecutor:
                 if st_entry_check:
                     target_r = float(st_entry_check.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_entry_check.get("unique_key", "")) or "Squeeze" in str(st_entry_check.get("unique_key", "")) else 1.5))
 
+                is_cont_trailed = bool(st_entry_check and st_entry_check.get("continuation_trailed"))
+                trailed_tp_candidate = float((st_entry_check.get("tp1") if st_entry_check else 0) or tp1 or 0)
+
                 # Validate & recalculate TPs if state TPs clash with live position direction (e.g. stale signal in state)
                 risk = abs(fill_price - actual_sl) if (actual_sl and actual_sl != fill_price) else (fill_price * 0.015)
                 if pos_direction == "BUY":
-                    if actual_sl >= fill_price:
+                    if actual_sl >= fill_price and not is_cont_trailed:
                         actual_sl = round_price(clean_sym, fill_price - risk)
-                    tp1 = round_price(clean_sym, fill_price + target_r * risk)
+                    if is_cont_trailed and trailed_tp_candidate > fill_price:
+                        tp1 = round_price(clean_sym, trailed_tp_candidate)
+                    else:
+                        tp1 = round_price(clean_sym, fill_price + target_r * risk)
                     if not tp2 or tp2 <= tp1:
                         tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 3.5 * risk))
                     if not tp3 or tp3 <= tp2:
                         tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 3.5 * risk))
                 else:  # SHORT
-                    if actual_sl <= fill_price:
+                    if actual_sl <= fill_price and not is_cont_trailed:
                         actual_sl = round_price(clean_sym, fill_price + risk)
-                    tp1 = round_price(clean_sym, fill_price - target_r * risk)
+                    if is_cont_trailed and 0 < trailed_tp_candidate < fill_price:
+                        tp1 = round_price(clean_sym, trailed_tp_candidate)
+                    else:
+                        tp1 = round_price(clean_sym, fill_price - target_r * risk)
                     if not tp2 or tp2 >= tp1:
                         tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 3.5 * risk))
                     if not tp3 or tp3 >= tp2:
                         tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 3.5 * risk))
 
                 # Update state so downstream monitoring uses correct direction TPs
-                from state import update_trade_progress, get_latest_symbol_state
-                st_entry = get_latest_symbol_state(clean_sym)
-                if st_entry:
-                    from state import _make_key, _load, _save
-                    st_map = _load()
-                    for k_st in list(st_map.keys()):
-                        if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
-                            st_map[k_st]["tp1"] = tp1
-                            st_map[k_st]["tp2"] = tp2
-                            st_map[k_st]["tp3"] = tp3
-                            st_map[k_st]["initial_sl"] = actual_sl
-                            _save(st_map)
-                            break
+                from state import update_latest_shark_state
+                st_updates = {"tp1": tp1, "tp2": tp2, "tp3": tp3}
+                if not is_cont_trailed or not (st_entry_check and st_entry_check.get("initial_sl")):
+                    st_updates["initial_sl"] = actual_sl
+                update_latest_shark_state(clean_sym, st_updates)
 
                 if pos_id and actual_qty > 0:
                     logger.info(f"place_tp_limits: Placing SL={actual_sl} + 3 TPs ({tp1}/{tp2}/{tp3}) for {clean_sym} fill@{fill_price} qty={actual_qty}")
@@ -2601,11 +2602,15 @@ class SharkExchangeExecutor:
                 realigned_key = sym + "_tp1_realigned"
                 has_distant_tp1 = False
                 st_heal = get_latest_symbol_state(sym)
+                is_continuation_trailed = bool(
+                    (st_heal and st_heal.get("continuation_trailed"))
+                    or self._tp_sl_heal_lock.get(sym + "_continuation_trail")
+                )
                 target_r = 1.5
                 if st_heal:
                     target_r = float(st_heal.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_heal.get("unique_key", "")) or "Squeeze" in str(st_heal.get("unique_key", "")) else 1.5))
 
-                if not tp1_already_hit and pos_qty_abs > 0 and tp_orders and not self._tp_sl_heal_lock.get(realigned_key):
+                if not tp1_already_hit and pos_qty_abs > 0 and tp_orders and not is_continuation_trailed and not self._tp_sl_heal_lock.get(realigned_key):
                     valid_tp_prices = [float(o.get("price") or 0) for o in tp_orders if float(o.get("price") or 0) > 0]
                     if valid_tp_prices:
                         if direction == "BUY":
@@ -2622,7 +2627,11 @@ class SharkExchangeExecutor:
                     last_heal = self._tp_sl_heal_lock.get(sym + "_tp", 0)
                     never_healed = last_heal == 0  # Fresh fill — first time we see 0 TPs
                     if never_healed or (time.time() - last_heal > 60):
-                        calc_tp1 = round_price(sym, entry_price + target_r * risk_step if direction == "BUY" else entry_price - target_r * risk_step)
+                        trailed_tp_val = float((st_heal.get("tp1") if st_heal else 0) or 0)
+                        if is_continuation_trailed and trailed_tp_val > 0:
+                            calc_tp1 = round_price(sym, trailed_tp_val)
+                        else:
+                            calc_tp1 = round_price(sym, entry_price + target_r * risk_step if direction == "BUY" else entry_price - target_r * risk_step)
                         reason_lbl = f"{target_r}R realignment" if has_distant_tp1 else ("scale-in expansion" if is_tp_undersized else ("missing TP heal" if current_tp_count == 0 else "re-heal"))
                         logger.warning(f"⚠️ {sym}: {reason_lbl} for qty={pos_qty_abs} — enforcing TP limits now (TP1={calc_tp1})")
                         st_heal = get_latest_symbol_state(sym)
@@ -2634,14 +2643,8 @@ class SharkExchangeExecutor:
                         if has_distant_tp1:
                             self._tp_sl_heal_lock[realigned_key] = True
                         if is_tp_undersized:
-                            from state import _load, _save
-                            st_map = _load()
-                            for k_st in list(st_map.keys()):
-                                if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
-                                    st_map[k_st]["tp1_hit"] = False
-                                    st_map[k_st]["total_qty"] = pos_qty_abs
-                                    _save(st_map)
-                                    break
+                            from state import update_latest_shark_state
+                            update_latest_shark_state(sym, {"tp1_hit": False, "total_qty": pos_qty_abs})
 
                 self._tp_order_count_cache[sym] = current_tp_count
 
