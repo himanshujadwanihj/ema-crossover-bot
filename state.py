@@ -149,6 +149,11 @@ def has_active_opposite_trade(symbol: str, signal: str) -> bool:
             return True
     
     return False
+def _symbol_matches_key(key: str, clean_sym: str, shark_sym: str) -> bool:
+    raw_coin = key.split("|")[0]
+    return to_shark_symbol(raw_coin) == shark_sym or clean_contract_symbol(raw_coin) == clean_sym
+
+
 def get_latest_symbol_state(symbol: str) -> dict:
     """
     Finds the LATEST state entry for a given symbol.
@@ -160,10 +165,6 @@ def get_latest_symbol_state(symbol: str) -> dict:
     clean_sym = clean_contract_symbol(symbol)
     shark_sym = to_shark_symbol(symbol)
     state = _load()
-    
-    def _matches(k: str) -> bool:
-        raw_coin = k.split("|")[0]
-        return to_shark_symbol(raw_coin) == shark_sym or clean_contract_symbol(raw_coin) == clean_sym
 
     def _prepare(key, val):
         res = dict(val)
@@ -184,7 +185,7 @@ def get_latest_symbol_state(symbol: str) -> dict:
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if _matches(k):
+        if _symbol_matches_key(k, clean_sym, shark_sym):
             if v.get("shark_order_placed") and v.get("outcome") == "PENDING":
                 return _prepare(k, v)
                 
@@ -192,7 +193,7 @@ def get_latest_symbol_state(symbol: str) -> dict:
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if _matches(k):
+        if _symbol_matches_key(k, clean_sym, shark_sym):
             if v.get("shark_order_placed"):
                 return _prepare(k, v)
                 
@@ -200,10 +201,41 @@ def get_latest_symbol_state(symbol: str) -> dict:
     for k, v in reversed(list(state.items())):
         if not isinstance(v, dict) or k.startswith("cooldown|"):
             continue
-        if _matches(k):
+        if _symbol_matches_key(k, clean_sym, shark_sym):
             return _prepare(k, v)
             
     return {}
+
+
+def update_latest_shark_state(symbol: str, updates: dict) -> bool:
+    """
+    Updates fields on the active/latest Shark Exchange trade entry for `symbol`
+    using the exact same reverse + PENDING-first priority as `get_latest_symbol_state`.
+    """
+    if not updates:
+        return False
+    clean_sym = clean_contract_symbol(symbol)
+    shark_sym = to_shark_symbol(symbol)
+    st_map = _load()
+
+    target_key = None
+    for pass_pending in (True, False):
+        for k, v in reversed(list(st_map.items())):
+            if not isinstance(v, dict) or k.startswith("cooldown|"):
+                continue
+            if _symbol_matches_key(k, clean_sym, shark_sym) and v.get("shark_order_placed"):
+                if not pass_pending or v.get("outcome") == "PENDING":
+                    target_key = k
+                    break
+        if target_key:
+            break
+
+    if not target_key:
+        return False
+    for uk, uv in updates.items():
+        st_map[target_key][uk] = uv
+    _save(st_map)
+    return True
 
 
 

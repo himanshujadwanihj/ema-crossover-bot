@@ -12,8 +12,13 @@ Features:
 
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply,
+    BotCommand, BotCommandScopeChat, MenuButtonCommands
+)
+from telegram.error import RetryAfter
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 )
@@ -23,6 +28,9 @@ import user_prefs
 logger = logging.getLogger("filter_bot")
 
 _filter_app_instance = None
+_FILTER_SEND_LOCK = None
+_LAST_SENT_BY_CHAT: dict = {}
+_CHAT_COOLDOWN_UNTIL: dict = {}
 
 # Popular Trending & High-Beta coins for 1-Tap Quick Selection
 POPULAR_CUSTOM_COINS = [
@@ -372,14 +380,14 @@ async def cmd_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_prefs.get_user_prefs(chat_id, user_obj=update.effective_user)
+    from telegram import ReplyKeyboardRemove
     from telegram_bot import (
         resolve_user_account_context,
-        get_permanent_reply_keyboard,
         build_front_page_card,
         get_account_keyboard
     )
     acc_idx, is_admin = resolve_user_account_context(chat_id)
-    reply_kb = get_permanent_reply_keyboard(is_admin=is_admin)
+    reply_kb = ReplyKeyboardRemove()
 
     # For Anuj Sharma (1010973596) or Himanshu (771305593), render isolated Front Page directly
     if chat_id in ("1010973596", "771305593"):
@@ -387,7 +395,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Trader"
         welcome_text = (
             f"👋 <b>Welcome {name}!</b>\n"
-            f"⚡ <i>Permanent Navigation Menu is docked below ⬇️</i>\n"
+            f"⚡ <i>Use the ≡ Menu button below or inline buttons to navigate.</i>\n"
             f"📋 <b>Your Chat ID:</b> <code>{chat_id}</code>"
         )
         await update.message.reply_text(welcome_text, reply_markup=reply_kb, parse_mode="HTML")
@@ -779,6 +787,59 @@ async def on_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 logger.error(f"Error refreshing dashboard: {edit_e}")
 
+async def _send_filter_message_safe(bot, chat_id: str, text: str):
+    """Rate-limited Telegram sender with per-chat cooldown to prevent flood bans."""
+    global _FILTER_SEND_LOCK
+    if _FILTER_SEND_LOCK is None:
+        _FILTER_SEND_LOCK = asyncio.Lock()
+
+    cid = str(chat_id)
+    async with _FILTER_SEND_LOCK:
+        now = time.monotonic()
+        cooldown_until = _CHAT_COOLDOWN_UNTIL.get(cid, 0.0)
+        if now < cooldown_until:
+            remaining = int(cooldown_until - now)
+            logger.debug(f"Skipping filter alert to {cid}: flood cooldown active ({remaining}s left)")
+            return None
+
+        last_sent = _LAST_SENT_BY_CHAT.get(cid, 0.0)
+        min_gap = 1.15
+        if now - last_sent < min_gap:
+            await asyncio.sleep(min_gap - (now - last_sent))
+
+        try:
+            msg = await bot.send_message(
+                chat_id=cid,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            _LAST_SENT_BY_CHAT[cid] = time.monotonic()
+            await asyncio.sleep(0.08)
+            return msg
+        except RetryAfter as rf:
+            wait_s = float(getattr(rf, "retry_after", 30) or 30)
+            if wait_s <= 15:
+                await asyncio.sleep(wait_s + 0.5)
+                try:
+                    msg = await bot.send_message(
+                        chat_id=cid,
+                        text=text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    _LAST_SENT_BY_CHAT[cid] = time.monotonic()
+                    return msg
+                except RetryAfter as rf2:
+                    wait_s = float(getattr(rf2, "retry_after", 30) or 30)
+                except Exception as e_retry:
+                    logger.warning(f"Filter retry send failed for {cid}: {e_retry}")
+                    return None
+            _CHAT_COOLDOWN_UNTIL[cid] = time.monotonic() + wait_s + 2.0
+            logger.warning(f"Filter Bot FloodControl for {cid}: cooling down for {int(wait_s)}s")
+            return None
+
+
 async def dispatch_filtered_alert(alert_data: dict, formatted_message: str):
     """
     Dispatches alerts to all registered subscribers whose multi-selected filter settings match.
@@ -797,13 +858,9 @@ async def dispatch_filtered_alert(alert_data: dict, formatted_message: str):
     admin_allowed = user_prefs.is_alert_allowed_for_user(admin_id, alert_data)
     if admin_allowed:
         try:
-            sent_admin = await _filter_app_instance.bot.send_message(
-                chat_id=admin_id,
-                text=formatted_message,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            admin_msg_id = sent_admin.message_id
+            sent_admin = await _send_filter_message_safe(_filter_app_instance.bot, admin_id, formatted_message)
+            if sent_admin:
+                admin_msg_id = sent_admin.message_id
         except Exception as e_adm:
             logger.warning(f"Failed to dispatch alert to admin {admin_id}: {e_adm}")
 
@@ -813,13 +870,9 @@ async def dispatch_filtered_alert(alert_data: dict, formatted_message: str):
             continue
         try:
             if user_prefs.is_alert_allowed_for_user(cid, alert_data):
-                m = await _filter_app_instance.bot.send_message(
-                    chat_id=cid,
-                    text=formatted_message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-                recipients.append({"bot_type": "filter", "chat_id": str(cid), "message_id": m.message_id})
+                m = await _send_filter_message_safe(_filter_app_instance.bot, str(cid), formatted_message)
+                if m:
+                    recipients.append({"bot_type": "filter", "chat_id": str(cid), "message_id": m.message_id})
         except Exception as e:
             logger.error(f"Failed to dispatch filtered alert to {cid}: {e}")
 
@@ -947,9 +1000,8 @@ async def start_filter_bot_service():
         await _filter_app_instance.initialize()
         await _filter_app_instance.start()
 
-        # Register permanent Telegram [Menu] button and commands
+        # Register permanent Telegram [Menu] button and scoped commands
         try:
-            from telegram import BotCommand, MenuButtonCommands
             commands = [
                 BotCommand("start", "🏠 Front Page Dashboard"),
                 BotCommand("positions", "🟢 Live Active Trades"),
@@ -959,7 +1011,16 @@ async def start_filter_bot_service():
                 BotCommand("watch", "🎯 Custom Watchlist"),
                 BotCommand("help", "ℹ️ Help & Info"),
             ]
+            anuj_commands = [
+                BotCommand("start", "🏠 Front Page Dashboard"),
+                BotCommand("positions", "🟢 Live Active Trades"),
+                BotCommand("trades", "📜 Closed Trades Ledger"),
+                BotCommand("filter", "⚙️ Filter Settings"),
+                BotCommand("watch", "🎯 Custom Watchlist"),
+                BotCommand("help", "ℹ️ Help & Info"),
+            ]
             await _filter_app_instance.bot.set_my_commands(commands)
+            await _filter_app_instance.bot.set_my_commands(anuj_commands, scope=BotCommandScopeChat(chat_id=1010973596))
             await _filter_app_instance.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
             logger.info("Permanent Telegram Menu button successfully registered for @Alpha_Crypto_SignalBot")
         except Exception as e_cmd:

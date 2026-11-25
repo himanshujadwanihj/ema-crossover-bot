@@ -514,12 +514,14 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 logger.info(f"🛑 RADAR INVALIDATED for {symbol}: {invalidation_reason}")
                                 has_radar = False
 
-                            # 2. 4-Hour Expiration Check:
+                            # 2. 4-Hour Expiration Check (use immutable first_detected_at so re-coiling doesn't reset the timer):
                             if has_radar:
-                                created_str = radar_entry.get("created_at")
+                                created_str = radar_entry.get("first_detected_at") or radar_entry.get("created_at")
                                 if created_str:
                                     try:
                                         created_dt = datetime.fromisoformat(created_str)
+                                        if created_dt.tzinfo is None:
+                                            created_dt = created_dt.replace(tzinfo=timezone.utc)
                                         if (datetime.now(timezone.utc) - created_dt).total_seconds() > 14400:
                                             from state import mark_radar_expired
                                             from telegram_bot import send_radar_status_update
