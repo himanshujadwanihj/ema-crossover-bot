@@ -506,46 +506,52 @@ def is_radar_on_cooldown(symbol: str, cooldown_hours: float = 4.0) -> bool:
         pass
     return False
 
-def record_pre_squeeze_radar(symbol: str, radar_data: dict) -> None:
-    """Records a new active Pre-Squeeze Radar alert into state."""
+def record_pre_squeeze_radar(symbol: str, radar_data: dict, is_broadcast: bool = False) -> None:
+    """
+    Records a new active Pre-Squeeze Radar alert into state.
+    Only sets Telegram alert cooldown when is_broadcast=True (broadcast winner).
+    Silent candidates maintain active status for Stage 2 breakout without cooldown lock.
+    """
     state = _load()
     sym = symbol.upper()
     now_str = datetime.now(timezone.utc).isoformat()
-    state[f"RADAR_COOLDOWN|{sym}"] = now_str
+    if is_broadcast:
+        state[f"RADAR_COOLDOWN|{sym}"] = now_str
+        state["GLOBAL_RADAR_LAST_SENT"] = now_str
     if "ACTIVE_RADARS" not in state or not isinstance(state["ACTIVE_RADARS"], dict):
         state["ACTIVE_RADARS"] = {}
+    
+    existing = state["ACTIVE_RADARS"].get(sym, {})
+    first_detected = existing.get("first_detected_at") or existing.get("created_at") or now_str
+    was_broadcast = is_broadcast or existing.get("is_broadcast", False)
+    
     state["ACTIVE_RADARS"][sym] = {
+        "symbol": sym,
         "direction": radar_data.get("direction", "BUY"),
         "squeeze_type": radar_data.get("squeeze_type", "SHORT SQUEEZE"),
         "trigger_entry": radar_data.get("trigger_entry", 0.0),
         "invalidation_sl": radar_data.get("invalidation_sl", 0.0),
         "compression_pct": radar_data.get("compression_pct", 0.0),
         "created_at": now_str,
-        "status": "WATCHING"
+        "first_detected_at": first_detected,
+        "status": "WATCHING",
+        "is_broadcast": was_broadcast,
+        "tf_label": radar_data.get("tf_label", "1H"),
+        "coiling_score": radar_data.get("coiling_score", 0.0)
     }
     _save(state)
 
 def get_active_radar(symbol: str) -> dict:
-    """Returns active radar data if symbol is currently on Radar Watchlist and not expired (4h max)."""
+    """Returns active radar data if symbol is currently on Radar Watchlist and in WATCHING state."""
     state = _load()
     radars = state.get("ACTIVE_RADARS", {})
     entry = radars.get(symbol.upper())
     if entry and entry.get("status") == "WATCHING":
-        created_str = entry.get("created_at")
-        if created_str:
-            try:
-                created = datetime.fromisoformat(created_str)
-                if (datetime.now(timezone.utc) - created) > timedelta(hours=4.0):
-                    entry["status"] = "EXPIRED"
-                    _save(state)
-                    return None
-            except Exception:
-                pass
         return entry
     return None
 
 def mark_radar_triggered(symbol: str) -> None:
-    """Marks an active radar as TRIGGERED when Stage 2 entry fires."""
+    """Marks an active radar as TRIGGERED when Stage 2 breakout entry fires successfully."""
     state = _load()
     radars = state.get("ACTIVE_RADARS", {})
     sym = symbol.upper()
@@ -553,6 +559,44 @@ def mark_radar_triggered(symbol: str) -> None:
         radars[sym]["status"] = "TRIGGERED"
         radars[sym]["triggered_at"] = datetime.now(timezone.utc).isoformat()
         _save(state)
+
+def mark_radar_failed(symbol: str, reason: str) -> None:
+    """Marks an active radar as FAILED when a breakout attempt fails, rejects, or wicks back."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "FAILED"
+        radars[sym]["failed_at"] = datetime.now(timezone.utc).isoformat()
+        radars[sym]["fail_reason"] = reason
+        _save(state)
+
+def mark_radar_invalidated(symbol: str, reason: str) -> None:
+    """Marks an active radar as INVALIDATED when price breaches the structure invalidation SL."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "INVALIDATED"
+        radars[sym]["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+        radars[sym]["invalidation_reason"] = reason
+        _save(state)
+
+def mark_radar_expired(symbol: str) -> None:
+    """Marks an active radar as EXPIRED after 4 hours without a breakout."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    sym = symbol.upper()
+    if sym in radars:
+        radars[sym]["status"] = "EXPIRED"
+        radars[sym]["expired_at"] = datetime.now(timezone.utc).isoformat()
+        _save(state)
+
+def get_all_active_radars() -> dict:
+    """Returns all radars currently active in WATCHING state."""
+    state = _load()
+    radars = state.get("ACTIVE_RADARS", {})
+    return {k: v for k, v in radars.items() if isinstance(v, dict) and v.get("status") == "WATCHING"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,6 +655,8 @@ def is_trading_paused() -> tuple:
 def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_minutes: int = 60, max_consecutive_sl: int = 5) -> tuple:
     """
     Records a trade outcome (SL or TP/WIN) for the daily circuit breaker.
+    - Deduplicates simultaneous multi-account closes of the same symbol within 180s
+      so copy-trading accounts don't double-count 1 SL/TP twice.
     - If SL: increments consecutive_sl_count. If >= max_consecutive_sl (5), pauses trading for pause_minutes (60 min).
     - If WIN/TP/BE: resets consecutive_sl_count to 0.
     Returns (circuit_breaker_triggered: bool, cb_state: dict).
@@ -620,12 +666,21 @@ def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_m
     now_ts = time.time()
     triggered = False
 
+    sym_norm = clean_contract_symbol(symbol) if symbol else ""
+    last_event_key = f"{sym_norm}|{'SL' if is_sl else 'TP'}"
+    if sym_norm and cb.get("last_recorded_event") == last_event_key and (now_ts - float(cb.get("last_recorded_ts") or 0.0) < 180.0):
+        logger.debug(f"Circuit breaker dedup: {last_event_key} already recorded within 180s across multi-account close.")
+        return False, cb
+
+    cb["last_recorded_event"] = last_event_key
+    cb["last_recorded_ts"] = now_ts
+
     if is_sl:
         cb["consecutive_sl_count"] = int(cb.get("consecutive_sl_count", 0)) + 1
         cb["total_sl_today"] = int(cb.get("total_sl_today", 0)) + 1
         cb["last_trigger_symbol"] = symbol
 
-        # Check threshold (10 consecutive SLs)
+        # Check threshold (5 consecutive SLs)
         if cb["consecutive_sl_count"] >= max_consecutive_sl:
             cb["paused_until"] = now_ts + (pause_minutes * 60)
             cb["pause_reason"] = f"Circuit Breaker: {cb['consecutive_sl_count']} Consecutive SLs Hit in a Day"
@@ -649,6 +704,22 @@ def record_trade_result(is_sl: bool, symbol: str = "", pnl: float = 0.0, pause_m
     state["_CIRCUIT_BREAKER_STATE"] = cb
     _save(state)
     return triggered, cb
+
+
+def get_last_lookout_ts() -> float:
+    """Returns persisted unix timestamp of last hourly live lookout dispatch."""
+    state = _load()
+    try:
+        return float(state.get("_LAST_LIVE_LOOKOUT_TS") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def set_last_lookout_ts(ts: float = None) -> None:
+    """Persists timestamp of last hourly live lookout dispatch across restarts."""
+    state = _load()
+    state["_LAST_LIVE_LOOKOUT_TS"] = float(ts if ts is not None else time.time())
+    _save(state)
 
 
 def resume_trading_manually() -> None:

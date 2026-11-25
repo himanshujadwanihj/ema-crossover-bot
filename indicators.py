@@ -866,27 +866,10 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         # For commodities like Gold (XAU/USD) and US Stock tokens, bypass crypto dollar volume threshold
         is_gold = "XAU" in sym_clean or "GOLD" in sym_clean
         is_gold_or_stock = is_gold or (sym_base in stock_tokens)
-        if not is_gold_or_stock and vol_24h_usd < 10_000_000.0:
-            return {"eligible": False, "reason": f"24h volume ${vol_24h_usd/1e6:.1f}M below $10M threshold"}
+        if not is_gold_or_stock and vol_24h_usd < 2_500_000.0:
+            return {"eligible": False, "reason": f"24h volume ${vol_24h_usd/1e6:.1f}M below $2.5M threshold"}
 
-        # ── TICK 2: GENUINE RANGE COMPRESSION (Tailored for 1H TF: 0.60% <= comp <= 3.50%) ──
-        recent_12 = df_tf.iloc[-12:]
-        range_high = float(recent_12['high'].max())
-        range_low = float(recent_12['low'].min())
-        curr_price = float(df_tf['close'].iloc[-1])
-        if curr_price <= 0:
-            return {"eligible": False, "reason": "Invalid price"}
-
-        compression_pct = ((range_high - range_low) / curr_price) * 100.0
-        min_comp = 0.50 if tf_label.upper() == "1H" else 0.40
-        max_comp = 4.25 if tf_label.upper() == "1H" else 2.20
-
-        if compression_pct < min_comp:
-            return {"eligible": False, "reason": f"Dead flatline (compression {compression_pct:.2f}% < {min_comp}%)"}
-        if compression_pct > max_comp:
-            return {"eligible": False, "reason": f"Not coiled (compression {compression_pct:.2f}% > {max_comp}%)"}
-
-        # ── TICK 3: VOLATILITY SQUEEZE PINCH (TTM Squeeze or BB Width Pinch) ──
+        # ── TICK 2: VOLATILITY SQUEEZE PINCH (TTM Squeeze or BB Width Pinch) ──
         close = df_tf['close']
         bb_mid = close.rolling(20).mean()
         bb_std = close.rolling(20).std()
@@ -904,11 +887,28 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         kc_lower = kc_mid - (1.5 * atr_20)
 
         ttm_squeeze = bool((bb_lower.iloc[-1] >= kc_lower.iloc[-1]) and (bb_upper.iloc[-1] <= kc_upper.iloc[-1]))
-        max_bb_width = 4.00 if tf_label.upper() == "1H" else 2.20
+        max_bb_width = 5.00 if tf_label.upper() == "1H" else 2.50
         is_bb_pinched = bb_width_pct <= max_bb_width
 
         if not (ttm_squeeze or is_bb_pinched):
             return {"eligible": False, "reason": f"No squeeze pinch (TTM: {ttm_squeeze}, BB width: {bb_width_pct:.2f}%)"}
+
+        # ── TICK 3: GENUINE RANGE COMPRESSION (Tailored for 1H TF: 0.40% <= comp <= 5.80% / 6.80%) ──
+        recent_12 = df_tf.iloc[-12:]
+        range_high = float(recent_12['high'].max())
+        range_low = float(recent_12['low'].min())
+        curr_price = float(df_tf['close'].iloc[-1])
+        if curr_price <= 0:
+            return {"eligible": False, "reason": "Invalid price"}
+
+        compression_pct = ((range_high - range_low) / curr_price) * 100.0
+        min_comp = 0.40 if tf_label.upper() == "1H" else 0.30
+        max_comp = (6.80 if ttm_squeeze else 5.80) if tf_label.upper() == "1H" else 2.50
+
+        if compression_pct < min_comp:
+            return {"eligible": False, "reason": f"Dead flatline (compression {compression_pct:.2f}% < {min_comp}%)"}
+        if compression_pct > max_comp:
+            return {"eligible": False, "reason": f"Not coiled (compression {compression_pct:.2f}% > {max_comp}%)"}
 
         # ── TICK 4: SMART MONEY ACCUMULATION (Neutral/Positive OI; reject only heavy dumping < -1.50%) ──
         micro = micro or {}

@@ -490,42 +490,110 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                     # DUAL ENGINE: BRANCH B — CONTINUATION BREAKDOWN / BREAKOUT CHASER
                     # ─────────────────────────────────────────────────────────────
                     if not sq_signal:
-                        # MODE A: Dedicated Pre-Squeeze Radar (if active on Radar)
+                        # MODE A: Dedicated Pre-Squeeze Radar (Continuous Lifecycle Tracking)
                         if has_radar:
                             radar_trigger = float(radar_entry.get('trigger_entry', 0.0))
+                            radar_invalidation = float(radar_entry.get('invalidation_sl', 0.0))
                             radar_dir = str(radar_entry.get('direction', '')).upper()
-                            if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
-                                sq_signal = 'BUY'
-                            elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
-                                sq_signal = 'SELL'
+
+                            # 1. Structure Invalidation Check:
+                            is_invalidated = False
+                            invalidation_reason = ""
+                            if radar_dir == 'BUY' and radar_invalidation > 0 and (c_low <= radar_invalidation or candle_close <= radar_invalidation):
+                                is_invalidated = True
+                                invalidation_reason = f"Price breached below support invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
+                            elif radar_dir == 'SELL' and radar_invalidation > 0 and (c_high >= radar_invalidation or candle_close >= radar_invalidation):
+                                is_invalidated = True
+                                invalidation_reason = f"Price breached above resistance invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
+
+                            if is_invalidated:
+                                from state import mark_radar_invalidated
+                                from telegram_bot import send_radar_status_update
+                                mark_radar_invalidated(symbol, invalidation_reason)
+                                await send_radar_status_update(radar_entry, status="INVALIDATED", reason=invalidation_reason, candle_close=candle_close)
+                                logger.info(f"🛑 RADAR INVALIDATED for {symbol}: {invalidation_reason}")
+                                has_radar = False
+
+                            # 2. 4-Hour Expiration Check:
+                            if has_radar:
+                                created_str = radar_entry.get("created_at")
+                                if created_str:
+                                    try:
+                                        created_dt = datetime.fromisoformat(created_str)
+                                        if (datetime.now(timezone.utc) - created_dt).total_seconds() > 14400:
+                                            from state import mark_radar_expired
+                                            from telegram_bot import send_radar_status_update
+                                            exp_reason = "4 hours elapsed without breakout trigger. Consolidation lost momentum."
+                                            mark_radar_expired(symbol)
+                                            await send_radar_status_update(radar_entry, status="EXPIRED", reason=exp_reason, candle_close=candle_close)
+                                            logger.info(f"⏱️ RADAR EXPIRED for {symbol} after 4h coiling window.")
+                                            has_radar = False
+                                    except Exception:
+                                        pass
+
+                            # 3. Breakout vs Fakeout Rejection Check:
+                            if has_radar:
+                                attempted_breakout = False
+                                if radar_dir == 'BUY' and (c_high >= radar_trigger or candle_close >= radar_trigger):
+                                    attempted_breakout = True
+                                elif radar_dir == 'SELL' and (c_low <= radar_trigger or candle_close <= radar_trigger):
+                                    attempted_breakout = True
+
+                                if attempted_breakout:
+                                    if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
+                                        sq_signal = 'BUY'
+                                    elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
+                                        sq_signal = 'SELL'
+                                    else:
+                                        # Wicked past trigger, but closed back inside!
+                                        wick_p = c_high if radar_dir == 'BUY' else c_low
+                                        fail_reason = (
+                                            f"Price wicked to {format_price(wick_p, symbol)} beyond trigger "
+                                            f"({format_price(radar_trigger, symbol)}), but closed back inside range at "
+                                            f"{format_price(candle_close, symbol)}. Fakeout wick rejection!"
+                                        )
+                                        from state import mark_radar_failed
+                                        from telegram_bot import send_radar_status_update
+                                        mark_radar_failed(symbol, fail_reason)
+                                        await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
+                                        logger.info(f"⚠️ RADAR FAILED (Fakeout): {symbol} — {fail_reason}")
+                                        has_radar = False
+
                         # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout
+                        # User Directive: Short Squeezes & Long Squeezes are genuine breakout moves;
+                        # they must NOT be blocked by counter HTF trend!
                         elif is_valid_consolidation:
-                            h4_trend = tf_states.get("4H") if tf_states and tf_states.get("4H") else "neutral"
-                            if candle_close <= (range_low * 0.998) and h4_trend != "bullish":
+                            if candle_close <= (range_low * 0.998):
                                 sq_signal = 'SELL'
-                            elif candle_close >= (range_high * 1.002) and h4_trend != "bearish":
+                            elif candle_close >= (range_high * 1.002):
                                 sq_signal = 'BUY'
 
                         if sq_signal:
-                            # Chaser Validation Rules:
-                            if body_ratio < 0.45:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Candle Body Ratio {body_ratio:.1%} < 45% (Weak expansion / long wick trap).")
+                            # Chaser Validation Rules (Responsive triggers for pre-vetted Radar setups):
+                            req_body = 0.35 if has_radar else 0.45
+                            fail_reason = None
+                            if body_ratio < req_body:
+                                fail_reason = f"Candle body ratio {body_ratio:.1%} < {req_body:.0%} (Weak expansion / long wick trap)."
+                            elif sq_signal == 'BUY' and (sq_rsi > (85.0 if has_radar else 78.0) or sq_rsi < (35.0 if has_radar else 42.0)):
+                                fail_reason = f"RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar})."
+                            elif sq_signal == 'SELL' and (sq_rsi < (15.0 if has_radar else 22.0) or sq_rsi > (65.0 if has_radar else 58.0)):
+                                fail_reason = f"RSI {sq_rsi:.1f} outside healthy momentum (has_radar={has_radar})."
+                            elif sq_signal == 'BUY' and upper_wick_ratio > (0.45 if has_radar else 0.38):
+                                fail_reason = f"Upper rejection wick {upper_wick_ratio:.1%} > {'45%' if has_radar else '38%'} (Shooting star / whale trap)."
+                            elif sq_signal == 'SELL' and lower_wick_ratio > (0.45 if has_radar else 0.38):
+                                fail_reason = f"Lower rejection wick {lower_wick_ratio:.1%} > {'45%' if has_radar else '38%'} (Hammer / bear trap)."
+                            elif vol_20_sma > 0 and breakout_vol < ((1.05 if has_radar else 1.25) * vol_20_sma):
+                                fail_reason = f"Volume {breakout_vol:.0f} < {'1.05x' if has_radar else '1.25x'} 20-SMA {vol_20_sma:.0f} (Volume surge missing)."
+
+                            if fail_reason:
+                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — {fail_reason}")
                                 sq_signal = None
-                            elif sq_signal == 'BUY' and (sq_rsi > 62.0 or sq_rsi < 42.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — RSI {sq_rsi:.1f} outside healthy momentum [42.0, 62.0].")
-                                sq_signal = None
-                            elif sq_signal == 'SELL' and (sq_rsi < 38.0 or sq_rsi > 58.0):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — RSI {sq_rsi:.1f} outside healthy momentum [38.0, 58.0].")
-                                sq_signal = None
-                            elif sq_signal == 'BUY' and upper_wick_ratio > 0.38:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} BUY rejected — Upper rejection wick > 38% (Shooting star / whale trap).")
-                                sq_signal = None
-                            elif sq_signal == 'SELL' and lower_wick_ratio > 0.38:
-                                logger.info(f"FILTERED 1H CHASER: {symbol} SELL rejected — Lower rejection wick > 38% (Hammer / bear trap).")
-                                sq_signal = None
-                            elif vol_20_sma > 0 and breakout_vol < (1.25 * vol_20_sma):
-                                logger.info(f"FILTERED 1H CHASER: {symbol} rejected — Volume {breakout_vol:.0f} < 1.25x 20-SMA {vol_20_sma:.0f} (Volume surge missing).")
-                                sq_signal = None
+                                if has_radar:
+                                    from state import mark_radar_failed
+                                    from telegram_bot import send_radar_status_update
+                                    mark_radar_failed(symbol, fail_reason)
+                                    await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
+                                    has_radar = False
 
                     if sq_signal:
                         from market_cache import is_btc_safe_for_altcoins
@@ -533,6 +601,13 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         if not is_safe:
                             logger.info(f"FILTERED 1H SIGNAL: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
                             sq_signal = None
+                            if has_radar:
+                                from state import mark_radar_failed
+                                from telegram_bot import send_radar_status_update
+                                btc_fail = f"BTC Micro-Gate safety block: {btc_reason} (Market crash risk)."
+                                mark_radar_failed(symbol, btc_fail)
+                                await send_radar_status_update(radar_entry, status="FAILED", reason=btc_fail, candle_close=candle_close)
+                                has_radar = False
 
                         # Breakout Freshness Guard: Reject historical signals older than 65 minutes
                         if sq_signal and candle_ts:
@@ -635,55 +710,63 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                     lbl1 = f"{target_r}R Target"
                                     lbl2 = f"{rr2}R Extended"
 
-                                from telegram_bot import queue_alert
-                                sq_queued = await queue_alert(
-                                    symbol=symbol,
-                                    tf_label="1H",
-                                    signal=sq_signal,
-                                    entry=entry,
-                                    sl=dyn_sl,
-                                    tp=tp1,
-                                    tf_states=tf_states,
-                                    cross_type=cross_type,
-                                    candle_time=candle_ts,
-                                    macro_struct=macro_struct,
-                                    tp1=tp1, tp2=tp2,
-                                    rr1=rr1, rr2=rr2,
-                                    lbl1=lbl1, lbl2=lbl2,
-                                    tf_data=tf_data,
-                                    is_special_list=(symbol in SPECIAL_LIST),
-                                    rsi=sq_rsi,
-                                    is_dedicated_squeeze=True,
-                                    is_trap_reversal=is_trap_reversal
-                                )
-                                if sq_queued:
-                                    mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
-                                    if has_radar:
-                                        mark_radar_triggered(symbol)
-                                    logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
+                                    from telegram_bot import queue_alert
+                                    sq_queued = await queue_alert(
+                                        symbol=symbol,
+                                        tf_label="1H",
+                                        signal=sq_signal,
+                                        entry=entry,
+                                        sl=dyn_sl,
+                                        tp=tp1,
+                                        tf_states=tf_states,
+                                        cross_type=cross_type,
+                                        candle_time=candle_ts,
+                                        macro_struct=macro_struct,
+                                        tp1=tp1, tp2=tp2,
+                                        rr1=rr1, rr2=rr2,
+                                        lbl1=lbl1, lbl2=lbl2,
+                                        tf_data=tf_data,
+                                        is_special_list=(symbol in SPECIAL_LIST),
+                                        rsi=sq_rsi,
+                                        is_dedicated_squeeze=True,
+                                        is_trap_reversal=is_trap_reversal
+                                    )
+                                    if sq_queued:
+                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
+                                        if has_radar:
+                                            mark_radar_triggered(symbol)
+                                        logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
 
-                                    # AUTO-TRADING ENROLLMENT:
-                                    # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
-                                    sq_candidate = {
-                                        "symbol": symbol,
-                                        "signal": sq_signal,
-                                        "entry": entry,
-                                        "sl": dyn_sl,
-                                        "tp1": tp1,
-                                        "tp2": tp2,
-                                        "tp": tp1,
-                                        "target_r": target_r,
-                                        "aligned_count": 4,  # High-conviction verified setup with CVD + volume
-                                        "is_3_htf_aligned": True,
-                                        "is_30m_early": False,
-                                        "is_special": (symbol in SPECIAL_LIST),
-                                        "is_dedicated_squeeze": True,
-                                        "is_trap_reversal": is_trap_reversal,
-                                        "unique_key": unique_sq_key,
-                                        "candle_ts": candle_ts,
-                                        "rr2": target_r,
-                                        "rsi": sq_rsi,
-                                    }
+                                        # AUTO-TRADING ENROLLMENT:
+                                        # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
+                                        sq_candidate = {
+                                            "symbol": symbol,
+                                            "signal": sq_signal,
+                                            "entry": entry,
+                                            "sl": dyn_sl,
+                                            "tp1": tp1,
+                                            "tp2": tp2,
+                                            "tp": tp1,
+                                            "target_r": target_r,
+                                            "aligned_count": 4,  # High-conviction verified setup with CVD + volume
+                                            "is_3_htf_aligned": True,
+                                            "is_30m_early": False,
+                                            "is_special": (symbol in SPECIAL_LIST),
+                                            "is_dedicated_squeeze": True,
+                                            "is_trap_reversal": is_trap_reversal,
+                                            "unique_key": unique_sq_key,
+                                            "candle_ts": candle_ts,
+                                            "rr2": target_r,
+                                            "rsi": sq_rsi,
+                                        }
+                            elif has_radar:
+                                cvd_fail = "Whale CVD Divergence: Aggressive delta selling detected during breakout candle."
+                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} — {cvd_fail}")
+                                from state import mark_radar_failed
+                                from telegram_bot import send_radar_status_update
+                                mark_radar_failed(symbol, cvd_fail)
+                                await send_radar_status_update(radar_entry, status="FAILED", reason=cvd_fail, candle_close=candle_close)
+                                has_radar = False
             except Exception as e_sq_eng:
                 logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
 
@@ -849,6 +932,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                 from telegram_bot import queue_alert
                 is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, rr1=rr1, rr2=rr2, lbl1=lbl1, lbl2=lbl2, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
                 if not is_queued:
+                    # Mark candle sent so it doesn't endlessly re-process the exact same completed candle every 5 seconds
+                    mark_sent(symbol, unique_key, signal, candle_ts, entry=entry, sl=sl, tp=tp, tp1=tp1, tp2=tp2)
                     continue
                 
                 is_3_htf_aligned = (
@@ -917,15 +1002,13 @@ async def scan_single_symbol_async(session, symbol, semaphore):
             if not is_weekend_trading_blocked(symbol):
                 df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
                 if df_1h is not None and len(df_1h) >= 25:
-                    from state import is_radar_on_cooldown
-                    if not is_radar_on_cooldown(symbol, cooldown_hours=4.0):
-                        from fetcher import fetch_futures_microstructure_async
-                        micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
-                        from indicators import evaluate_watchlist_coiling_candidate
-                        eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H")
-                        if eval_res.get("eligible"):
-                            radar_cand = eval_res
-                            logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
+                    from fetcher import fetch_futures_microstructure_async
+                    micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
+                    from indicators import evaluate_watchlist_coiling_candidate
+                    eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H")
+                    if eval_res.get("eligible"):
+                        radar_cand = eval_res
+                        logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
         except Exception as e_rad:
             logger.debug(f"Watchlist coiling evaluation error for {symbol}: {e_rad}")
 
@@ -960,13 +1043,15 @@ async def scan_single_symbol_async(session, symbol, semaphore):
         # BUG #1 FIX: process_symbol_async now returns a LIST of candidates (all TF crossovers)
         crossover_cands = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data)
 
-        # Build unified trades list: crossovers (all TFs) + retest candidate
+        # Build unified trades list: crossovers (all TFs) + retest candidates
         trade_cands = []
         if isinstance(crossover_cands, list):
             trade_cands.extend(crossover_cands)
         elif isinstance(crossover_cands, dict):
             trade_cands.append(crossover_cands)  # Backward compat
-        if isinstance(retest_cand, dict):
+        if isinstance(retest_cand, list):
+            trade_cands.extend(retest_cand)
+        elif isinstance(retest_cand, dict):
             trade_cands.append(retest_cand)
 
         return {
@@ -998,39 +1083,48 @@ async def shark_native_tp_sl_monitor(session):
 _rejection_notified_cache = {}
 
 async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: dict = None):
-    """Notifies the user immediately via Telegram when a signal is rejected/filtered from Shark execution."""
+    """Notifies the user reliably via Telegram when a signal is rejected/filtered from Shark execution."""
+    import html as _html
     cand = cand or {}
-    uniq_k = cand.get("unique_key") or "signal"
+    uniq_k = str(cand.get("unique_key") or "signal")
     c_ts = str(cand.get("candle_ts") or "")
     stars = cand.get("aligned_count", 0)
     rsi_val = cand.get("rsi")
     entry_p = cand.get("entry")
-    
-    dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason[:25]}"
+    tf_lbl = str(cand.get("tf_label") or "")
+    setup_lbl = str(cand.get("cross_type") or "")
+
+    reason_str = str(reason or "Unspecified rejection reason")
+    dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason_str[:35]}"
     now_ts = time.time()
-    
+
     # Prune old cache (> 2 hours)
     for k, ts in list(_rejection_notified_cache.items()):
         if now_ts - ts > 7200:
             _rejection_notified_cache.pop(k, None)
-            
+
     if dedup_key in _rejection_notified_cache and (now_ts - _rejection_notified_cache[dedup_key] < 1800):
         return  # Deduplicated within 30 minutes
-        
-    _rejection_notified_cache[dedup_key] = now_ts
-    
+
+    safe_sym = _html.escape(str(symbol), quote=False)
+    safe_sig = _html.escape(str(signal).upper(), quote=False)
+    safe_reason = _html.escape(reason_str, quote=False)
+    safe_setup = _html.escape(f"{setup_lbl} ({tf_lbl})".strip(), quote=False) if (setup_lbl or tf_lbl) else ""
+
     stars_str = f"{stars}/4 Stars" if stars > 0 else "Signal"
     rsi_str = f" | 📊 <b>RSI:</b> <code>{float(rsi_val):.1f}</code>" if rsi_val is not None else ""
     funding_val = cand.get("funding_pct")
     funding_str = f" | ⚡ <b>Funding:</b> <code>{funding_val:+.4f}%</code>" if funding_val is not None else ""
-    entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{entry_p}</code>" if entry_p else ""
-    
+    entry_str = f"\n🎯 <b>Signal Entry:</b> <code>{_html.escape(str(entry_p), quote=False)}</code>" if entry_p else ""
+    setup_line = f"\n📐 <b>Setup:</b> {safe_setup}" if safe_setup else ""
+
     score_val = cand.get("quality_score") or (cand.get("analysis") or {}).get("score")
     score_verdict = (cand.get("analysis") or {}).get("verdict")
     comps = (cand.get("analysis") or {}).get("components") or {}
-    
+
     score_block = ""
     if score_val is not None:
+        safe_verdict = _html.escape(str(score_verdict or ""), quote=False)
         comp_lines = ""
         if comps:
             comp_lines = (
@@ -1040,24 +1134,42 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
                 f"  • MACD: <code>{comps.get('macd', 0)}/10</code> | Candle Body: <code>{comps.get('body', 0)}/10</code>\n"
                 f"  • Session: <code>{comps.get('session', 0)}/10</code>"
             )
-        score_block = f"\n🧠 <b>AI Quality Score:</b> <code>{score_val}/100</code> ({score_verdict}){comp_lines}"
+        score_block = f"\n🧠 <b>AI Quality Score:</b> <code>{score_val}/100</code> ({safe_verdict}){comp_lines}"
+
+    rl = reason_str.lower()
+    if "maintenance" in rl:
+        footer_note = "🌙 <i>Night Maintenance Window (12:30 AM–05:30 AM IST) active — zero new trades executed.</i>"
+    elif "circuit breaker" in rl or "weekend" in rl:
+        footer_note = "🛡️ <i>Scheduled risk protection pause active — capital preserved.</i>"
+    elif "shark broker" in rl or "partial" in rl or "margin" in rl:
+        footer_note = "⚠️ <i>Broker/Account execution error reported above — check account margin or order state.</i>"
+    elif "already exists" in rl or "directional limit" in rl:
+        footer_note = "🛡️ <i>Portfolio risk shield prevented duplicate or over-concentrated exposure.</i>"
+    else:
+        footer_note = "💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>"
 
     msg = (
-        f"🛡️ <b>SHARK AUTO-TRADE FILTER NOTICE</b>\n"
+        f"🛡️ <b>SHARK AUTO-TRADE REJECTION NOTICE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 <b>Pair:</b> <code>{symbol}</code> [<b>{signal.upper()}</b>]\n"
+        f"🪙 <b>Pair:</b> <code>{safe_sym}</code> [<b>{safe_sig}</b>]{setup_line}\n"
         f"⭐ <b>Confluence:</b> {stars_str}{rsi_str}{funding_str}{entry_str}{score_block}\n"
-        f"🚫 <b>Execution Status:</b> Order Suppressed by Shield\n"
-        f"📋 <b>Exact Reason:</b> {reason}\n\n"
-        f"💡 <i>Low-probability or weak score setup filtered out to prevent unnecessary SL loss.</i>\n"
+        f"🚫 <b>Execution Status:</b> Not Executed on Broker\n"
+        f"📋 <b>Exact Reason:</b> {safe_reason}\n\n"
+        f"{footer_note}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
-        from telegram_bot import send_trading_update
-        await send_trading_update(msg)
-        logger.info(f"Dispatched trade rejection notice for {symbol} [{signal}]: {reason}")
+        from telegram_bot import send_text_to_chat
+        from config import TELEGRAM_CHAT_ID
+        target = str(TELEGRAM_CHAT_ID or "771305593").strip()
+        sent = await send_text_to_chat(target, msg)
+        if sent is not None:
+            _rejection_notified_cache[dedup_key] = now_ts
+            logger.info(f"Dispatched trade rejection notice for {symbol} [{signal}]: {reason_str}")
+        else:
+            logger.error(f"Telegram returned None dispatching rejection notice for {symbol} [{signal}]")
     except Exception as e_ntf:
-        logger.error(f"Error dispatching rejection notice: {e_ntf}")
+        logger.error(f"Error dispatching rejection notice for {symbol}: {e_ntf}", exc_info=True)
 
 async def main_loop():
     validate_config()
@@ -1132,7 +1244,8 @@ async def main_loop():
                 logger.info("⚡ Fast TP/SL Monitor Worker STARTED (Polling every 5s for real-time exchange TP/SL hit alerts & order sweeps)")
                 from executor import executor
                 from paper_trader import evaluate_paper_trades_async, load_wallet, generate_strategy_lookout_card, notify_telegram
-                last_lookout_time = time.time()
+                from state import get_last_lookout_ts, set_last_lookout_ts
+                last_lookout_time = get_last_lookout_ts()
                 while True:
                     try:
                         await executor.sync_and_manage_live_orders(session)
@@ -1148,7 +1261,7 @@ async def main_loop():
 
                         # Regular Automated Strategy Lookout Update (Every 1 hour when trades are active)
                         now_t = time.time()
-                        if now_t - last_lookout_time >= 3600:
+                        if now_t - last_lookout_time >= 3600 and (now_t - BOT_START_TIME >= 65):
                             try:
                                 wallet = load_wallet()
                                 if wallet.get("active_positions") or wallet.get("resting_orders"):
@@ -1156,142 +1269,36 @@ async def main_loop():
                                     await notify_telegram(card)
                                     logger.info("Dispatched regular hourly paper trading strategy lookout update.")
                                 last_lookout_time = now_t
+                                set_last_lookout_ts(now_t)
                             except Exception as e_look:
                                 logger.error(f"Error sending regular paper lookout update: {e_look}")
                     else:
-                        # REAL LIVE TRADING: Regular Automated Hourly Position Tracking Lookout Update
+                        # REAL LIVE TRADING: Multi-Account Hourly Position Tracking Lookout Update
                         now_t = time.time()
-                        if now_t - last_lookout_time >= 3600:
+                        if now_t - last_lookout_time >= 3600 and (now_t - BOT_START_TIME >= 65):
                             try:
                                 if executor.is_configured():
                                     import zoneinfo
+                                    from telegram_bot import build_hourly_live_lookout_cards, send_text_to_chat
+                                    from config import TELEGRAM_CHAT_ID
                                     ist_h = zoneinfo.ZoneInfo("Asia/Kolkata")
                                     time_str_h = datetime.now(ist_h).strftime("%d %b %Y, %I:%M %p IST")
-                                    shark_bal = await executor.get_wallet_balance_summary(session)
-                                    shark_pos = await executor.get_open_positions(session)
-                                    open_orders = await executor.get_open_orders(session)
 
-                                    pos_lines = []
-                                    from web_dashboard import fetch_live_market_price
-                                    for p in shark_pos:
-                                        p_sym = executor.clean_sym(p)
-                                        pos_dir = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "LONG").upper()
-                                        p_side = "SHORT" if pos_dir in ("SHORT", "SELL") else "LONG"
-                                        p_sz = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
-                                        p_entry = float(p.get("entryPrice", 0) or p.get("avgPrice", 0) or 0)
-                                        
-                                        # Live sub-second market price with multi-exchange fallback
-                                        p_mark = await fetch_live_market_price(session, p_sym)
-                                        if p_mark <= 0:
-                                            p_mark = float(p.get("markPrice", 0) or p.get("lastPrice", 0) or p_entry)
+                                    admin_card, client_dispatches = await build_hourly_live_lookout_cards(session, time_str_h)
+                                    admin_chat = str(TELEGRAM_CHAT_ID or "771305593").strip()
+                                    await send_text_to_chat(admin_chat, admin_card)
+                                    logger.info("Dispatched multi-account hourly real live trading lookout update to Admin Telegram.")
 
-                                        # Real-time Mathematical Floating PnL
-                                        if p_side == "SHORT":
-                                          p_upnl_usd = (
-                                              (p_entry - p_mark) * p_sz
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                          p_pct = (
-                                              (
-                                                  (p_entry - p_mark)
-                                                  / p_entry
-                                                  * 100.0
-                                                  * 10
-                                              )
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                        else:
-                                          p_upnl_usd = (
-                                              (p_mark - p_entry) * p_sz
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-                                          p_pct = (
-                                              (
-                                                  (p_mark - p_entry)
-                                                  / p_entry
-                                                  * 100.0
-                                                  * 10
-                                              )
-                                              if p_entry > 0
-                                              else 0.0
-                                          )
-
-                                        p_upnl_inr = (
-                                            p_upnl_usd * executor.usd_inr_rate
-                                        )
-                                        pnl_sign = (
-                                            "+" if p_upnl_inr >= 0 else ""
-                                        )
-                                        pct_sign = "+" if p_pct >= 0 else ""
-                                        p_entry_disp = format_price(
-                                            p_entry, p_sym
-                                        )
-                                        p_mark_disp = format_price(
-                                            p_mark, p_sym
-                                        )
-                                        pos_lines.append(
-                                            f"  • <b>{p_sym}</b> [{p_side}] Qty:"
-                                            f" {p_sz} | Entry: {p_entry_disp} |"
-                                            f" Mark: {p_mark_disp} | Floating:"
-                                            f" <b>{pnl_sign}₹{p_upnl_inr:,.2f}</b>"
-                                            f" ({pct_sign}{p_pct:.2f}%)"
-                                        )
-
-                                    pos_str = (
-                                        "\n".join(pos_lines)
-                                        if pos_lines
-                                        else (
-                                            "  • <i>No open exchange positions"
-                                            " currently.</i>"
-                                        )
-                                    )
-
-                                    ord_lines = []
-                                    for o in open_orders:
-                                      if (
-                                          not o.get("reduceOnly")
-                                          and o.get("placeType") != "POSITION"
-                                      ):
-                                        o_sym = executor.clean_sym(o)
-                                        o_side = str(
-                                            o.get("side", "BUY")
-                                        ).upper()
-                                        o_px = float(o.get("price", 0) or 0)
-                                        o_qty = float(
-                                            o.get("orderAmount")
-                                            or o.get("quantity")
-                                            or o.get("origQty")
-                                            or 0
-                                        )
-                                        ord_lines.append(
-                                            f"  • <b>{o_sym}</b> [{o_side}]"
-                                            f" Limit @ {format_price(o_px, o_sym)} (Qty: {o_qty})"
-                                        )
-
-                                    ord_str = "\n".join(ord_lines[:8]) if ord_lines else "  • <i>No pending entry orders resting on book.</i>"
-
-                                    live_lookout_card = (
-                                        f"🦈 <b>REAL LIVE TRADING: HOURLY POSITION LOOKOUT</b>\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"⏰ <b>Time:</b> {time_str_h}\n"
-                                        f"💼 <b>Status:</b> 🟢 <b>Real Live Trading Active</b> (Shark Exchange)\n\n"
-                                        f"{shark_bal}\n\n"
-                                        f"🟢 <b>Active Positions ({len(shark_pos)}):</b>\n"
-                                        f"{pos_str}\n\n"
-                                        f"⏳ <b>Resting Entry Orders ({len(ord_lines)}):</b>\n"
-                                        f"{ord_str}\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"<i>Automated Hourly Position Tracker • 100% Target Engine Active</i>"
-                                    )
-                                    from telegram_bot import send_text_alert
-                                    await send_text_alert(live_lookout_card)
-                                    logger.info("Dispatched regular hourly real live trading lookout update to Telegram.")
+                                    for client_chat, client_card in client_dispatches:
+                                        try:
+                                            await send_text_to_chat(client_chat, client_card)
+                                            logger.info(f"Dispatched personal hourly lookout update to client chat {client_chat}.")
+                                        except Exception as e_cli:
+                                            logger.error(f"Error sending personal hourly lookout to {client_chat}: {e_cli}")
                                 last_lookout_time = now_t
+                                set_last_lookout_ts(now_t)
                             except Exception as e_live_look:
-                                logger.error(f"Error sending regular live lookout update: {e_live_look}")
+                                logger.error(f"Error sending regular live lookout update: {e_live_look}", exc_info=True)
 
                     await asyncio.sleep(5)
 
@@ -1323,7 +1330,8 @@ async def main_loop():
                     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
                     today_str = now_ist.strftime("%Y-%m-%d")
                     # USER DIRECTIVE: Night Maintenance Pause (12:30 AM to 05:30 AM IST) strictly enforced
-                    is_night_pause = (now_ist.hour == 0 and now_ist.minute >= 30) or (1 <= now_ist.hour < 5) or (now_ist.hour == 5 and now_ist.minute < 30)
+                    from config import is_night_maintenance_window
+                    is_night_pause = is_night_maintenance_window(datetime.now(timezone.utc))
                     
                     # Always resolve pending active trades (TP / SL / Breakeven Shield)
                     await resolve_pending_trades_async(session, semaphore)
@@ -1377,12 +1385,10 @@ async def main_loop():
                                     json.dump({'morning': _morning_notified_date, 'night': _night_notified_date}, f)
                             except: pass
                             
-                        # BTC Volatility Shock Shield Check
+                        # BTC Volatility Shock Shield Check (Protects crypto from whipsaws; commodities exempt per user directive)
                         is_shock_active, shock_rem = await check_btc_volatility_shock(session, semaphore)
                         if is_shock_active:
-                            logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Skipping scan cycle...")
-                            await asyncio.sleep(15)
-                            continue
+                            logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Altcoins paused; commodities/stocks scanning normally...")
 
                         # DAILY RISK CIRCUIT BREAKER: 5 consecutive SLs -> 60-min pause
                         from state import is_trading_paused
@@ -1409,12 +1415,15 @@ async def main_loop():
                         stock_symbols_set.update({"INTC/USDT", "AMD/USDT", "BABA/USDT", "DIS/USDT", "PYPL/USDT", "BA/USDT", "XOM/USDT", "SOXL/USDT", "SNDK/USDT"})
 
                         if is_weekend:
-                            METALS_LIST = []
+                            COMMODITIES_LIST = []
                             US_STOCKS_LIST = []
                             # Exclude all commodities and US stocks from active scan on weekends (BTC and ETH are active 24/7)
                             weekend_blocked_assets = set(COMMODITIES + US_EQUITIES + list(stock_symbols_set) + ["XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT"])
                         else:
-                            METALS_LIST = ["XAU/USD"]  # Gold Spot only on weekdays
+                            # USER DIRECTIVE: Commodities Active (Gold XAU, Natural Gas NATGAS, Crude Oil CL, Silver XAG)
+                            COMMODITIES_LIST = [
+                                "XAU/USD", "XAU/USDT", "NATGAS/USDT", "CL/USDT", "XAG/USDT"
+                            ]
                             # US Equity Tokens (Binance Spot 24/7 feeds + yfinance fallback): Active all weekdays
                             US_STOCKS_LIST = [
                                 "NVDAB/USDT", "TSLAB/USDT", "MSTRB/USDT", "AAPLB/USDT",
@@ -1424,15 +1433,15 @@ async def main_loop():
                             weekend_blocked_assets = set()
                         
                         # ── USER-DEFINED WEEKDAY vs WEEKEND SCANNING RULES ──
-                        # 1. Mon - Fri: ONLY Top 25 Crypto coins + Commodities (4) + US Equity Tokens (15).
+                        # 1. Mon - Fri: ONLY Top 25 Crypto coins + Commodities (Active) + US Equity Tokens (15).
                         # 2. Sat - Sun (Weekend): ALL Binance Futures coins EXCEPT BTC, ETH, Commodities, and US Equity Tokens.
                         all_futures_pairs = get_top_pairs_by_volume(top_n=None)
                         if not all_futures_pairs: all_futures_pairs = []
 
-                        commodities_set = {"XAU/USDT", "XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT", "OIL/USDT"}
+                        commodities_set = {"XAU/USD", "XAU/USDT", "XAUT/USDT", "XAG/USDT", "NATGAS/USDT", "CL/USDT", "OIL/USDT"}
 
                         if not is_weekend:
-                            # Mon - Fri: ONLY Top 25 Crypto + Commodities (4) + US Equities (15)
+                            # Mon - Fri: ONLY Top 25 Crypto + Commodities + US Equities
                             # User Directive: PAXG is strictly stopped / blocked. Gold trading is strictly XAUUSDT.
                             top_25_crypto = [
                                 sym for sym in all_futures_pairs
@@ -1441,7 +1450,7 @@ async def main_loop():
                                 and "PAXG" not in sym.upper()
                                 and not any(sym.startswith(s) for s in ["XAU", "XAG", "NATGAS", "CL", "SOXL", "SOXS", "SKHY", "KORU", "SPCX"])
                             ][:25]
-                            active_pairs = list(dict.fromkeys(top_25_crypto + METALS_LIST + US_STOCKS_LIST))
+                            active_pairs = list(dict.fromkeys(top_25_crypto + COMMODITIES_LIST + US_STOCKS_LIST))
                         else:
                             # Sat - Sun: ALL Binance Futures + BTC & ETH (Commodities & US Equities remain CLOSED)
                             weekend_blocked = commodities_set.union(stock_symbols_set)
@@ -1456,6 +1465,13 @@ async def main_loop():
                                 if major not in active_pairs:
                                     active_pairs.insert(0, major)
                         
+                        if is_shock_active:
+                            from market_cache import is_commodity_symbol, is_stock_symbol
+                            active_pairs = [sym for sym in active_pairs if is_commodity_symbol(sym) or is_stock_symbol(sym)]
+                            if not active_pairs:
+                                await asyncio.sleep(15)
+                                continue
+
                         tasks = [scan_single_symbol_async(session, sym, semaphore) for sym in active_pairs]
                         results = await asyncio.gather(*tasks)
 
@@ -1475,6 +1491,10 @@ async def main_loop():
                         if raw_candidates:
                             from executor import executor
                             async def _check_auto_trade_eligibility(c):
+                                from config import is_night_maintenance_window
+                                if is_night_maintenance_window():
+                                    return False, "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused to protect capital."
+
                                 sym = c.get("symbol", "")
                                 sym_upper = sym.upper()
                                 sig = c.get("signal", "BUY").upper()
@@ -1534,35 +1554,20 @@ async def main_loop():
                                     if rsi is not None:
                                         try:
                                             f_rsi = float(rsi)
-                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [42.0 - 62.0] (Bull exhaustion/overbought)."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [38.0 - 58.0] (Oversold bear trap < 38.0)."
+                                            # Squeeze breakout candles surge with high momentum: bounds [42.0 - 78.0] for BUY, [22.0 - 58.0] for SELL
+                                            if sig == "BUY" and not (42.0 <= f_rsi <= 78.0):
+                                                return False, f"Squeeze BUY RSI {f_rsi:.1f} is outside healthy zone [42.0 - 78.0] (Exhaustion > 78.0)."
+                                            elif sig == "SELL" and not (22.0 <= f_rsi <= 58.0):
+                                                return False, f"Squeeze SELL RSI {f_rsi:.1f} is outside healthy zone [22.0 - 58.0] (Exhaustion < 22.0)."
                                         except (ValueError, TypeError):
                                             pass
                                     return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"
 
-                                # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups WITH Verified RSI Boost!
+                                # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups!
                                 if stars < 3:
                                     return False, f"Confluence is only {stars}/4 stars (Minimum 3-Star HTF alignment required for execution)."
 
-                                is_gold_or_commodity = any(x in sym.upper() for x in ["XAU", "GOLD", "XAUT", "XAG", "SILVER", "CL", "OIL", "COPPER", "BRONZE", "HG", "NATGAS", "WTI", "BRENT"])
-                                if rsi is not None:
-                                    try:
-                                        f_rsi = float(rsi)
-                                        if is_gold_or_commodity:
-                                            if sig == "BUY" and not (40.0 <= f_rsi <= 65.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity BUY zone [40.0 - 65.0]."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 60.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Commodity SELL zone [38.0 - 60.0] (Oversold bear trap < 38.0)."
-                                        else:
-                                            if sig == "BUY" and not (42.0 <= f_rsi <= 62.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto BUY zone [42.0 - 62.0] (Overbought peak/exhausted > 62.0)."
-                                            elif sig == "SELL" and not (38.0 <= f_rsi <= 58.0):
-                                                return False, f"RSI {f_rsi:.1f} is outside healthy Crypto SELL zone [38.0 - 58.0] (Oversold bottom/exhausted < 38.0)."
-                                    except (ValueError, TypeError):
-                                        pass
-                                # STRICT USER DIRECTIVE: Multi-Factor AI Quality Score >= 75 Hard Gate
+                                # STRICT USER DIRECTIVE: Compute Multi-Factor AI Quality Score FIRST
                                 from signal_analyser import analyse_signal
                                 f_rsi_val = None
                                 if rsi is not None:
@@ -1590,14 +1595,47 @@ async def main_loop():
                                 c["quality_score"] = quality_score
                                 c["analysis"] = analysis
 
-                                if quality_score < 75:
-                                    comps = analysis.get("components", {})
-                                    comp_summary = (
-                                        f"HTF:{comps.get('htf',0)}/20, RSI:{comps.get('rsi',0)}/20, "
-                                        f"Vol:{comps.get('volume',0)}/15, ADX:{comps.get('adx',0)}/15, "
-                                        f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
-                                    )
-                                    return False, f"Multi-Factor Score is {quality_score}/100 (< 75 required | {verdict} | Breakdown: {comp_summary})"
+                                # Check RSI zone
+                                is_rsi_valid = True
+                                rsi_fail_reason = ""
+                                if f_rsi_val is None:
+                                    is_rsi_valid = False
+                                    rsi_fail_reason = "RSI indicator value not available"
+                                else:
+                                    if sig == "BUY" and not (42.0 <= f_rsi_val <= 62.0):
+                                        is_rsi_valid = False
+                                        rsi_fail_reason = f"RSI {f_rsi_val:.1f} is outside healthy BUY zone [42.0 - 62.0]"
+                                    elif sig == "SELL" and not (38.0 <= f_rsi_val <= 58.0):
+                                        is_rsi_valid = False
+                                        rsi_fail_reason = f"RSI {f_rsi_val:.1f} is outside healthy SELL zone [38.0 - 58.0]"
+
+                                is_retest = c.get("is_retest", False) or "retest" in str(c.get("cross_type", "")).lower()
+
+                                # USER DIRECTIVE:
+                                # "If AI score above 77 and RSI sign not there, still execute the trade!
+                                # 3-Star or 4-Star trade RSI sign not there but score above 77 -> execute the trade!"
+                                if not is_rsi_valid:
+                                    if quality_score > 77:
+                                        logger.info(
+                                            f"🚀 AI QUALITY OVERRIDE for {sym} [{sig}]: Score {quality_score}/100 > 77 with {stars}★ Confluence! "
+                                            f"Executing trade despite RSI ({rsi_fail_reason}) per user directive."
+                                        )
+                                    else:
+                                        return False, f"{rsi_fail_reason} (AI Quality Score {quality_score}/100 <= 77; requires healthy RSI)."
+                                else:
+                                    # RSI is healthy!
+                                    # For 3-Star and 4-Star setups with verified healthy RSI:
+                                    # - Retest setups: pullbacks naturally have low volume and rejection wicks; min score 60 required.
+                                    # - 4-Star setups: min score 65 required (allows off-hours session / 24/7 crypto execution).
+                                    min_score_required = 60 if is_retest else (65 if stars >= 4 else 70)
+                                    if quality_score < min_score_required:
+                                        comps = analysis.get("components", {})
+                                        comp_summary = (
+                                            f"HTF:{comps.get('htf',0)}/20, RSI:{comps.get('rsi',0)}/20, "
+                                            f"Vol:{comps.get('volume',0)}/15, ADX:{comps.get('adx',0)}/15, "
+                                            f"MACD:{comps.get('macd',0)}/10, Body:{comps.get('body',0)}/10, Session:{comps.get('session',0)}/10"
+                                        )
+                                        return False, f"Multi-Factor Score is {quality_score}/100 (< {min_score_required} required | {verdict} | Breakdown: {comp_summary})"
 
                                 # USER DIRECTIVE: Funding Rate Squeeze Shield (Live Binance Microstructure)
                                 # Shields against crowded trades (Short Squeezes & Long Liquidations)
@@ -1619,11 +1657,17 @@ async def main_loop():
                                     except Exception as e_fr:
                                         logger.debug(f"Funding rate check bypassed for {sym}: {e_fr}")
 
-                                return True, f"Eligible (3★+ Confluence, RSI Healthy, Score: {quality_score}/100, Funding Clean)"
+                                rsi_status_lbl = "AI Score > 77 Override" if not is_rsi_valid else "RSI Healthy"
+                                return True, f"Eligible ({stars}★ Confluence, {rsi_status_lbl}, Score: {quality_score}/100, Funding Clean)"
 
                             eligible_candidates = []
                             for c in raw_candidates:
-                                is_ok, reason = await _check_auto_trade_eligibility(c)
+                                try:
+                                    is_ok, reason = await _check_auto_trade_eligibility(c)
+                                except Exception as e_elig:
+                                    is_ok = False
+                                    reason = f"Eligibility check error: {e_elig}"
+                                    logger.error(f"Error checking auto-trade eligibility for {c.get('symbol')}: {e_elig}", exc_info=True)
                                 if is_ok:
                                     eligible_candidates.append(c)
                                 else:
@@ -1635,6 +1679,17 @@ async def main_loop():
                                         update_trade_outcome(st_k, "SIGNAL_ONLY_US_STOCK")
                                     else:
                                         await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
+
+                            if eligible_candidates and not executor.is_configured():
+                                from config import PAPER_TRADING_ENABLED
+                                if not PAPER_TRADING_ENABLED:
+                                    for c_unconf in eligible_candidates:
+                                        await notify_signal_rejection(
+                                            c_unconf.get("symbol"),
+                                            c_unconf.get("signal"),
+                                            "Auto-Trading Disabled or Shark Exchange API keys not configured.",
+                                            cand=c_unconf,
+                                        )
 
                             if eligible_candidates and executor.is_configured():
                                 from executor import clean_contract_symbol
@@ -1666,6 +1721,7 @@ async def main_loop():
                                 # USER DIRECTIVE: Portfolio cap removed completely — execute ALL eligible setups without limit
                                 top_candidates = eligible_candidates
                                 logger.info(f"🏆 ALL {len(top_candidates)} ELIGIBLE SETUP(S) SELECTED FOR SHARK EXECUTION (No portfolio cap).")
+                                batch_submitted_by_dir = {"BUY": [], "SELL": []}
                                 for cand in top_candidates:
                                     sym = cand["symbol"]
                                     sig = cand["signal"]
@@ -1685,24 +1741,24 @@ async def main_loop():
                                             if pos_dir == sig_dir:
                                                 is_same_dir_continuation = True
 
-                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction Trades Shield (Max 5 LONG, Max 5 SHORT)
-                                    # Allows up to 5 concurrent LONGs and 5 concurrent SHORTs simultaneously.
+                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction At-Risk Trades Shield (Max 5 LONG, Max 5 SHORT)
+                                    # Trades whose live SL is moved to Breakeven (entry price) or Profit-Lock are Zero-Risk & EXEMPT!
+                                    cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
                                     if not is_same_dir_continuation:
-                                        all_shark_pos = await executor.get_open_positions(session)
-                                        cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
-                                        cand_dir_label = "LONG" if cand_dir == "BUY" else "SHORT"
-                                        same_dir_count = 0
-                                        active_same_syms = []
-                                        for p_check in all_shark_pos:
-                                            p_q = abs(float(p_check.get("quantity") or p_check.get("positionAmount") or 0))
-                                            if p_q > 0:
-                                                p_dr = str(p_check.get("positionType") or p_check.get("positionSide") or p_check.get("side") or "").upper()
-                                                p_d = "BUY" if p_dr in ("LONG", "BUY") else "SELL"
-                                                if p_d == cand_dir:
-                                                    same_dir_count += 1
-                                                    active_same_syms.append(executor.clean_sym(p_check))
-                                        if same_dir_count >= 5:
-                                            basket_reason = f"Directional Limit Reached (Already {same_dir_count} active {cand_dir_label} positions: {', '.join(active_same_syms)}). Max 5 {cand_dir_label} trades allowed at a time."
+                                        slot_info = await executor.get_directional_risk_slots(
+                                            session,
+                                            signal=sig,
+                                            max_at_risk=5,
+                                            batch_submitted_syms=batch_submitted_by_dir[cand_dir],
+                                        )
+                                        if slot_info["breakeven_syms"]:
+                                            logger.info(
+                                                f"🛡️ Directional Risk Slots [{cand_dir}]: {slot_info['at_risk_count']}/5 at-risk "
+                                                f"({', '.join(slot_info['at_risk_syms']) or 'None'}) | Breakeven-exempt: "
+                                                f"{', '.join(slot_info['breakeven_syms'])}"
+                                            )
+                                        if not slot_info["allowed"]:
+                                            basket_reason = slot_info["reason"]
                                             logger.info(f"Skipping {sym} — {basket_reason}")
                                             await notify_signal_rejection(sym, sig, basket_reason, cand=cand)
                                             continue
@@ -1716,20 +1772,36 @@ async def main_loop():
 
                                     action_desc = "CONTINUATION TRAIL SL/TP" if is_same_dir_continuation else "BULK TRADE EXECUTE"
                                     logger.info(f"⚡ {action_desc}: {sym} [{sig}] ({stars}/4 Stars Priority | AI Score: {cand.get('quality_score', 'N/A')}/100)")
-                                    
-                                    shark_res = await executor.execute_signal_trade(
-                                        session, sym, sig, cand["entry"], cand["sl"], 
-                                        cand["tp1"], cand["tp2"],
-                                        aligned_count=stars,
-                                        adx=cand.get("adx")
-                                    )
-                                    
-                                    if shark_res and shark_res.get("status") == "success":
+                                    try:
+                                        shark_res = await executor.execute_signal_trade(
+                                            session, sym, sig, cand["entry"], cand["sl"], 
+                                            cand["tp1"], cand["tp2"],
+                                            aligned_count=stars,
+                                            adx=cand.get("adx")
+                                        )
+                                    except Exception as e_exec:
+                                        logger.error(f"Unhandled exception executing {sym} [{sig}]: {e_exec}", exc_info=True)
+                                        await notify_signal_rejection(sym, sig, f"Shark Broker Exception: {e_exec}", cand=cand)
+                                        continue
+
+                                    if shark_res and shark_res.get("status") in ("success", "partial_success"):
+                                        from executor import to_shark_symbol
+                                        sh_sym = to_shark_symbol(sym)
+                                        if sh_sym not in batch_submitted_by_dir[cand_dir]:
+                                            batch_submitted_by_dir[cand_dir].append(sh_sym)
                                         from state import update_trade_progress, _make_key
                                         state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
                                         t_qty = shark_res.get("total_qty", 0)
                                         update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
                                         logger.info(f"Marked shark_order_placed=True for {state_key}")
+                                        failed_accs = shark_res.get("failed_accounts") or []
+                                        real_failures = [
+                                            f for f in failed_accs
+                                            if "already exists" not in str(f.get("reason", "")).lower()
+                                        ]
+                                        if real_failures:
+                                            part_reason = " | ".join([f"{f['account']}: {f['reason']}" for f in real_failures])
+                                            await notify_signal_rejection(sym, sig, f"Partial Account Rejection: {part_reason}", cand=cand)
                                     elif shark_res and shark_res.get("status") == "trailed":
                                         logger.info(f"✅ Position for {sym} successfully trailed SL/TP on continuation signal.")
                                     elif shark_res and shark_res.get("status") in ("skipped", "error"):
@@ -1749,22 +1821,27 @@ async def main_loop():
                         radar_candidates = [r["radar"] for r in results if isinstance(r, dict) and isinstance(r.get("radar"), dict)]
                         if radar_candidates:
                             from state import is_global_radar_on_cooldown, record_global_radar_sent, record_pre_squeeze_radar, is_radar_on_cooldown
-                            # Re-verify not on symbol cooldown
-                            eligible_radars = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
-                            if eligible_radars and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
+                            # Filter candidates eligible for Telegram broadcast (not on 4-hour alert cooldown)
+                            broadcast_eligible = [c for c in radar_candidates if not is_radar_on_cooldown(c["symbol"], cooldown_hours=4.0)]
+                            if broadcast_eligible and not is_global_radar_on_cooldown(cooldown_minutes=10.0):
                                 # Rank by Coiling Quality Score and select ONLY the #1 single best coiled setup across the market
-                                eligible_radars.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
-                                top_radar = eligible_radars[0]
+                                broadcast_eligible.sort(key=lambda x: x.get("coiling_score", 0.0), reverse=True)
+                                top_radar = broadcast_eligible[0]
 
                                 from telegram_bot import send_pre_squeeze_radar_alert
                                 await send_pre_squeeze_radar_alert(top_radar)
                                 record_global_radar_sent()
-                                record_pre_squeeze_radar(top_radar["symbol"], top_radar)
+                                record_pre_squeeze_radar(top_radar["symbol"], top_radar, is_broadcast=True)
                                 logger.info(f"📡 DISPATCHED TOP #1 WATCHLIST COILING ALERT: {top_radar['symbol']} ({top_radar['direction']}) | Score: {top_radar.get('coiling_score')}")
+
+                                # Silently track all other coiling candidates in state for Stage 2 breakout execution
+                                for cand in radar_candidates:
+                                    if cand["symbol"] != top_radar["symbol"]:
+                                        record_pre_squeeze_radar(cand["symbol"], cand, is_broadcast=False)
                             else:
-                                # Keep track of active radars in state silently for Stage 2 breakout execution
-                                for cand in eligible_radars:
-                                    record_pre_squeeze_radar(cand["symbol"], cand)
+                                # All coiling candidates tracked silently in state for Stage 2 breakout execution
+                                for cand in radar_candidates:
+                                    record_pre_squeeze_radar(cand["symbol"], cand, is_broadcast=False)
                         
                         # SILENTLY EDIT PINNED 4H VOLATILITY DASHBOARD (Every 5 minutes)
                         if time.time() - last_dashboard_update_time >= 300:

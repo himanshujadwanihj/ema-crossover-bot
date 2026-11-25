@@ -161,12 +161,67 @@ def update_btc_pulse(tf_data: dict) -> None:
     except Exception:
         pass
 
+def is_commodity_symbol(symbol: str) -> bool:
+    """
+    Identifies whether a symbol belongs to the Commodities asset class
+    (Gold, Silver, Crude Oil, Natural Gas, Brent, etc.)
+    Decoupled from BTC correlation gates per user directive.
+    """
+    if not symbol:
+        return False
+    s = str(symbol).upper().strip()
+    clean = s.replace("/", "").replace("-", "").replace(":", "").replace("_", "")
+    
+    known_commodities = {
+        "XAUUSD", "XAUUSDT", "XAUTUSDT", "XAUTUSD", "GOLD", "GOLDUSDT",
+        "NATGASUSDT", "NATGASUSD", "NATGAS", "NGF",
+        "CLUSDT", "CLUSD", "CRUDEOIL", "CRUDEOILUSDT", "OILUSDT", "OILUSD", "WTIUSD", "WTICOUSD", "CLF",
+        "XAGUSDT", "XAGUSD", "SILVERUSDT", "SILVERUSD", "SIF",
+        "BZUSDT", "BZUSD", "BRENTUSDT", "BRENTUSD", "BZF",
+        "COPPERUSDT", "COPPERUSD", "HGUSD", "HGF"
+    }
+    if clean in known_commodities or s in known_commodities:
+        return True
+        
+    safe_prefixes = ("XAU", "XAUT", "GOLD", "NATGAS", "CRUDE", "WTI", "XAG", "SILVER", "BRENT")
+    if any(clean.startswith(p) for p in safe_prefixes):
+        return True
+        
+    # Crude Oil specific (avoids collision with CLV altcoin)
+    if clean.startswith("CLUSD") or clean == "CL":
+        return True
+        
+    return False
+
+
+def is_stock_symbol(symbol: str) -> bool:
+    """Identifies US Equity synthetics/tokens decoupled from BTC."""
+    if not symbol:
+        return False
+    s = str(symbol).upper().strip()
+    clean = s.replace("/", "").replace("-", "").replace(":", "").replace("_", "")
+    stock_prefixes = (
+        "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "INTC",
+        "MSTR", "COIN", "PLTR", "NFLX", "BABA", "DIS", "PYPL", "BA", "XOM",
+        "SPY", "QQQ", "SOXL", "SOXS", "SPCX"
+    )
+    return any(clean.startswith(p) for p in stock_prefixes)
+
+
 def is_btc_safe_for_altcoins(signal: str, symbol: str, alt_tf_data: dict = None) -> tuple:
-    clean_sym = symbol.upper().replace("/", "")
-    # BTC itself, Gold, and US Equities are exempt from BTC correlation gate
-    exempt_prefixes = ("BTC", "XAU", "XAUT", "GOLD", "OIL", "NATGAS", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "INTC")
-    if any(clean_sym.startswith(p) for p in exempt_prefixes):
-        return True, "Exempt"
+    clean_sym = symbol.upper().replace("/", "").replace("-", "").replace(":", "").replace("_", "")
+    
+    # 1. BTC itself is exempt
+    if clean_sym.startswith("BTC") or clean_sym.startswith("WBTC"):
+        return True, "Exempt (BTC)"
+
+    # 2. USER DIRECTIVE: Commodities are 100% exempt from BTC Micro-Gate & correlation
+    if is_commodity_symbol(symbol):
+        return True, f"Exempt (Commodity {symbol} decoupled from BTC)"
+
+    # 3. US Equities are exempt
+    if is_stock_symbol(symbol):
+        return True, f"Exempt (Stock {symbol} decoupled from BTC)"
 
     pulse = _BTC_PULSE
     if not pulse:

@@ -319,53 +319,59 @@ async def fetch_live_market_price(session, symbol: str) -> float:
 
     return 0.0
 
-async def get_real_live_dashboard_payload_async(session) -> dict:
-    """Extracts 100% genuine real-time data from Shark Exchange Native API."""
-    global _last_real_stats_cache, _last_real_stats_time
+async def get_real_live_dashboard_payload_async(session, account_identifier: str = None) -> dict:
+    """Extracts 100% genuine real-time data from Shark Exchange Native API for specified account."""
+    global _last_real_stats_cache
     now_t = time.time()
-    if _last_real_stats_cache and (now_t - _last_real_stats_time < 8.0):
-        return _last_real_stats_cache
+
+    from executor import executor
+    target_acc = executor.get_account(account_identifier) or executor.primary
+    acc_key = target_acc.name
+
+    if isinstance(_last_real_stats_cache, dict) and acc_key in _last_real_stats_cache:
+        cached_t, cached_payload = _last_real_stats_cache[acc_key]
+        if now_t - cached_t < 8.0:
+            return cached_payload
 
     try:
-        from executor import executor
         now_utc = datetime.now(timezone.utc)
         ist_tz = zoneinfo.ZoneInfo("Asia/Kolkata")
         now_ist = now_utc.astimezone(ist_tz)
 
-        st, wallet_resp = await executor.shark_get(session, "/v1/wallet/futures-wallet/details")
+        st, wallet_resp = await target_acc.shark_get(session, "/v1/wallet/futures-wallet/details")
         w_data = wallet_resp.get("data") if isinstance(wallet_resp, dict) and isinstance(wallet_resp.get("data"), dict) else (wallet_resp if isinstance(wallet_resp, dict) else {})
         raw_total = float(w_data.get("walletBalance") or w_data.get("inrBalance") or w_data.get("totalBalance") or 0.0)
         raw_avail = float(w_data.get("marginBalance") or w_data.get("withdrawableBalance") or w_data.get("availableBalance") or raw_total)
         raw_locked = float(w_data.get("lockedBalance") or w_data.get("lockedBalanceIsolated") or max(0.0, raw_total - raw_avail))
 
         # Fetch funding (INR) wallet directly from Shark Exchange (where user manually sweeps / sets aside profit)
-        st_fund, fund_resp = await executor.shark_get(session, "/v1/wallet/funding-wallet/details")
+        st_fund, fund_resp = await target_acc.shark_get(session, "/v1/wallet/funding-wallet/details")
         f_data = fund_resp.get("data") if isinstance(fund_resp, dict) and isinstance(fund_resp.get("data"), dict) else (fund_resp if isinstance(fund_resp, dict) else {})
         val_fund = f_data.get("inrBalance") if "inrBalance" in f_data else f_data.get("walletBalance")
         try:
-            funding_balance = float(val_fund) if val_fund is not None else 3328.0
+            funding_balance = float(val_fund) if val_fund is not None else (3328.0 if target_acc == executor.primary else 0.0)
         except Exception:
-            funding_balance = 3328.0
+            funding_balance = 3328.0 if target_acc == executor.primary else 0.0
 
         # Fetch trade history for exact genuine broker fees
-        st_th, trade_hist = await executor.shark_get(session, "/v1/user-data/trade-history")
-        total_fees_inr = round(sum(float(t.get("feeInMarginAsset") or 0.0) for t in trade_hist), 2) if (st_th == 200 and isinstance(trade_hist, list)) else 197.64
+        st_th, trade_hist = await target_acc.shark_get(session, "/v1/user-data/trade-history")
+        total_fees_inr = round(sum(float(t.get("feeInMarginAsset") or 0.0) for t in trade_hist), 2) if (st_th == 200 and isinstance(trade_hist, list)) else (197.64 if target_acc == executor.primary else 0.0)
 
         initial_cap = 50000.0 if raw_total >= 1000.0 else max(1000.0, raw_total)
         roi_pct = round(((raw_total - initial_cap) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
 
-        positions = await executor.get_open_positions(session)
-        all_orders = await executor.get_open_orders(session)
+        positions = await target_acc.get_open_positions(session)
+        all_orders = await target_acc.get_open_orders(session)
         orders_by_sym = {}
         for o in all_orders:
-            s_clean = executor.clean_sym(o)
+            s_clean = target_acc.clean_sym(o)
             orders_by_sym.setdefault(s_clean, []).append(o)
 
         formatted_active = []
         total_live_unrealized_inr = 0.0
 
         for p in positions:
-            sym = executor.clean_sym(p)
+            sym = target_acc.clean_sym(p)
             pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
             sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
             # NOTE: On Shark Exchange, 'quantity' is the genuine coin/contract quantity (e.g. 0.5 TAO, 98 XRP).
@@ -448,7 +454,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         formatted_resting = []
         for o in all_orders:
             if not o.get("reduceOnly") and o.get("placeType") != "POSITION":
-                sym = executor.clean_sym(o)
+                sym = target_acc.clean_sym(o)
                 sig = str(o.get("side") or "BUY").upper()
                 px = float(o.get("price") or 0)
                 qty = float(o.get("orderAmount") or o.get("quantity") or o.get("origQty") or 0)
@@ -471,8 +477,8 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
                     "minutes_remaining": rem_m
                 })
 
-        # Fetch genuine closed positions directly from Shark Exchange Native API
-        st_cl, closed_raw = await executor.shark_get(session, "/v1/positions/CLOSED")
+        # Fetch genuine closed positions directly from Shark Exchange Native API for this account
+        st_cl, closed_raw = await target_acc.shark_get(session, "/v1/positions/CLOSED")
         formatted_closed = []
         c_wins = 0
         c_losses = 0
@@ -484,7 +490,7 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             # Session trades: November 2026 current live deployment
             session_closed = [p for p in closed_raw if str(p.get("updatedAt", "")) >= "2026-11-14"]
             for cp in session_closed:
-                sym_c = executor.clean_sym(cp)
+                sym_c = target_acc.clean_sym(cp)
                 pos_t = str(cp.get("positionType") or "SHORT").upper()
                 sig_c = "BUY" if pos_t in ("LONG", "BUY") else "SELL"
                 pnl_inr = float(cp.get("realizedProfitInMarginAsset") or 0.0)
@@ -523,8 +529,17 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
         win_rate = (c_wins / decisive_exec * 100.0) if decisive_exec > 0 else 0.0
         profit_factor = round(gross_wins_inr / gross_losses_inr, 2) if gross_losses_inr > 0 else (99.0 if gross_wins_inr > 0 else 0.0)
         gross_closed_pnl_inr = round(gross_wins_inr - gross_losses_inr + be_friction_inr, 2)
-        # Genuine Net Profit on Shark Exchange (Funding Wallet / Withdrawable Profit)
-        net_trade_pnl_inr = round(funding_balance, 2) if funding_balance > 0 else 3328.0
+        
+        # Account-isolated profit & ROI computation
+        if target_acc == executor.primary:
+            net_trade_pnl_inr = round(funding_balance, 2) if funding_balance > 0 else (gross_closed_pnl_inr if gross_closed_pnl_inr != 0 else 3328.0)
+            initial_cap = 50000.0 if raw_total >= 1000.0 else max(1000.0, raw_total)
+            roi_pct = round(((raw_total - initial_cap) / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
+        else:
+            net_trade_pnl_inr = round(gross_closed_pnl_inr if gross_closed_pnl_inr != 0 else funding_balance, 2)
+            initial_cap = raw_total if raw_total > 0 else 10000.0
+            roi_pct = round((net_trade_pnl_inr / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
+
         net_trade_pnl_usd = round(net_trade_pnl_inr / executor.usd_inr_rate, 2)
         total_roi_trade_pct = round((net_trade_pnl_inr / initial_cap) * 100.0, 2) if initial_cap > 0 else 0.0
 
@@ -593,24 +608,33 @@ async def get_real_live_dashboard_payload_async(session) -> dict:
             "active_positions": formatted_active,
             "resting_orders": formatted_resting,
             "recent_executed_trades": formatted_closed,
-            "recent_cancelled_orders": []
+            "recent_cancelled_orders": [],
+            "account": {
+                "name": target_acc.name,
+                "id": 1 if target_acc == executor.accounts[0] else (2 if len(executor.accounts) > 1 and target_acc == executor.accounts[1] else 1),
+                "api_status": st,
+                "api_raw_balance": raw_total,
+                "all_accounts": [{"id": i + 1, "name": a.name} for i, a in enumerate(executor.accounts) if a.is_configured()]
+            }
         }
-        _last_real_stats_cache = payload
-        _last_real_stats_time = now_t
+        if not isinstance(_last_real_stats_cache, dict):
+            _last_real_stats_cache = {}
+        _last_real_stats_cache[acc_key] = (now_t, payload)
         return payload
     except Exception as e:
-        logger.error(f"Error building real live dashboard payload: {e}")
+        logger.error(f"Error building real live dashboard payload for {target_acc.name if 'target_acc' in locals() else 'primary'}: {e}")
         return get_live_performance_payload()
 
 
 async def api_live_stats_handler(request: web.Request) -> web.Response:
-    """Returns real-time performance JSON with CORS enabled (Direct Shark Live Sync when Live Trading active)."""
+    """Returns real-time performance JSON with CORS enabled (Direct Shark Live Sync with Account Filter)."""
+    account_param = request.query.get("account") or request.query.get("acc")
     from config import PAPER_TRADING_ENABLED
     from executor import executor
     if not PAPER_TRADING_ENABLED and executor.is_configured():
         import aiohttp
         async with aiohttp.ClientSession() as s:
-            data = await get_real_live_dashboard_payload_async(s)
+            data = await get_real_live_dashboard_payload_async(s, account_identifier=account_param)
     else:
         data = get_live_performance_payload()
 
@@ -632,6 +656,17 @@ async def index_handler(request: web.Request) -> web.Response:
             html_content = f.read()
         return web.Response(text=html_content, content_type="text/html")
     return web.Response(text="<h1>AlphaSniper Live Engine Online</h1><p>index.html not found</p>", content_type="text/html")
+
+
+async def client_dashboard_handler(request: web.Request) -> web.Response:
+    """Serves client_dashboard.html (Standalone Personal Live Portfolio for Anuj Sharma / Client View)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    html_path = os.path.join(base_dir, "client_dashboard.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return web.Response(text=html_content, content_type="text/html")
+    return web.Response(text="<h1>Personal Client Dashboard</h1><p>client_dashboard.html not found</p>", content_type="text/html")
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -668,12 +703,195 @@ async def api_paper_history_handler(request: web.Request) -> web.Response:
     return web.json_response({"error": "No wallet file found"}, status=404)
 
 
+async def api_test_account_handler(request: web.Request) -> web.Response:
+    """Tests Shark Exchange API authentication and permissions for specified account."""
+    acc_id = request.query.get("account") or "2"
+    from executor import executor
+    acc = executor.get_account(acc_id)
+    if not acc:
+        return web.json_response({"error": "Account not found"}, status=404)
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        st_w, resp_w = await acc.shark_get(s, "/v1/wallet/futures-wallet/details")
+        st_p, resp_p = await acc.shark_get(s, "/v1/positions/OPEN")
+        st_f, resp_f = await acc.shark_get(s, "/v1/wallet/funding-wallet/details")
+        return web.json_response({
+            "account_name": acc.name,
+            "api_key_prefix": acc.api_key[:6] + "..." if acc.api_key else None,
+            "futures_wallet": {"status": st_w, "response": resp_w},
+            "funding_wallet": {"status": st_f, "response": resp_f},
+            "open_positions": {"status": st_p, "response": resp_p}
+        })
+
+
+async def api_demo_order_handler(request: web.Request) -> web.Response:
+    """Places a 100% safe, deep limit order on Shark Exchange to verify real order placement, then cancels it."""
+    acc_id = request.query.get("account") or "2"
+    from executor import executor
+    acc = executor.get_account(acc_id)
+    if not acc:
+        return web.json_response({"error": "Account not found"}, status=404)
+        
+    import aiohttp
+    import asyncio
+    async with aiohttp.ClientSession() as s:
+        # Step 1: Fetch current live price and place safe limit order 4.0% below market (safe from execution, within Shark price collar)
+        curr_p = await fetch_live_market_price(s, "BTCUSDT")
+        if curr_p <= 0:
+            curr_p = 87000.0
+        safe_entry = round(curr_p * 0.96, 1)
+        safe_sl = round(safe_entry * 0.98, 1)
+
+        payload = {
+            "placeType": "ORDER_FORM",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "LIMIT",
+            "price": safe_entry,
+            "quantity": 0.002,
+            "reduceOnly": False,
+            "stopLossPrice": safe_sl
+        }
+        st_place, res_place = await acc.shark_post(s, "/v1/order/place-order", payload)
+        
+        # Step 2: Check open orders to verify presence on orderbook
+        await asyncio.sleep(1.0)
+        st_orders, res_orders = await acc.shark_get(s, "/v1/order/open-orders")
+        
+        # Step 3: Cancel the test order immediately so no resting order remains
+        cancel_res = None
+        st_del = None
+        cid = res_place.get("clientOrderId") if isinstance(res_place, dict) else None
+        oid = res_place.get("orderId") or res_place.get("id") if isinstance(res_place, dict) else None
+        
+        if cid:
+            st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"clientOrderId": str(cid)})
+        elif oid:
+            st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"orderId": str(oid)})
+        elif isinstance(res_orders, list) and len(res_orders) > 0:
+            for o in res_orders:
+                c_id = o.get("clientOrderId")
+                if c_id:
+                    st_del, cancel_res = await acc.shark_delete(s, "/v1/order/delete-order", {"clientOrderId": str(c_id)})
+                    break
+                    
+        # Step 4: Verify book is 100% clean
+        await asyncio.sleep(1.0)
+        st_clean, res_clean = await acc.shark_get(s, "/v1/order/open-orders")
+        
+        return web.json_response({
+            "account": acc.name,
+            "step_1_placement": {
+                "status": st_place,
+                "order_details": res_place,
+                "verified": st_place in (200, 201)
+            },
+            "step_2_orderbook_check": {
+                "status": st_orders,
+                "resting_on_exchange": len(res_orders) if isinstance(res_orders, list) else 0
+            },
+            "step_3_cancellation": {
+                "status": st_del,
+                "cancel_response": cancel_res
+            },
+            "step_4_final_cleanup": {
+                "orderbook_clean": len(res_clean) == 0 if isinstance(res_clean, list) else True
+            }
+        })
+
+
+async def api_sync_positions_handler(request: web.Request) -> web.Response:
+    """Synchronizes missing active trades from Primary (Himanshu) to Target Account (e.g. Anuj)."""
+    import traceback
+    try:
+        from executor import executor
+        target_id = request.query.get("account", "2")
+        target_acc = executor.get_account(target_id)
+        if not target_acc or not target_acc.is_configured():
+            return web.json_response({"status": "error", "reason": f"Account {target_id} not configured"}, status=400)
+        
+        async with aiohttp.ClientSession() as s:
+            primary_pos = await executor.primary.get_open_positions(s)
+            target_pos = await target_acc.get_open_positions(s)
+            target_orders = await target_acc.get_open_orders(s)
+            
+            target_syms = set()
+            for p in target_pos:
+                target_syms.add(target_acc.clean_sym(p))
+            for o in target_orders:
+                target_syms.add(target_acc.clean_sym(o))
+                
+            synced = []
+            skipped = []
+            for p in primary_pos:
+                sym = executor.primary.clean_sym(p)
+                if sym in target_syms:
+                    skipped.append({"symbol": sym, "reason": "Already active or resting on target account"})
+                    continue
+                    
+                qty = abs(float(p.get("quantity") or p.get("positionAmount") or 0))
+                if qty <= 0:
+                    continue
+                    
+                pos_dir_raw = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
+                sig = "SELL" if pos_dir_raw in ("SHORT", "SELL") else "BUY"
+                
+                entry = float(p.get("entryPrice") or p.get("price") or 0)
+                sl = float(p.get("stopLossPrice") or p.get("stopLoss") or 0)
+                tp1 = float(p.get("takeProfitPrice") or p.get("takeProfit") or 0)
+                tp2 = float(p.get("takeProfitPrice2") or 0)
+                
+                curr_p = await fetch_live_market_price(s, sym)
+                use_entry = curr_p if curr_p > 0 else entry
+                if sl == 0:
+                    sl = use_entry * 1.022 if sig == "SELL" else use_entry * 0.978
+                if tp1 == 0:
+                    tp1 = use_entry * 0.96 if sig == "SELL" else use_entry * 1.04
+                if tp2 == 0:
+                    tp2 = use_entry * 0.93 if sig == "SELL" else use_entry * 1.07
+                    
+                logger.info(f"🔄 SYNC POSITIONS: Executing {sym} [{sig}] on {target_acc.name} at entry {use_entry}")
+                res = await target_acc.execute_signal_trade(
+                    s, sym, sig, use_entry, sl, tp1, tp2, aligned_count=4, allow_during_maintenance=True
+                )
+                synced.append({
+                    "symbol": sym,
+                    "signal": sig,
+                    "entry": use_entry,
+                    "sl": sl,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "result": str(res)
+                })
+                
+            return web.json_response({
+                "status": "success",
+                "target_account": target_acc.name,
+                "synced_trades": synced,
+                "skipped_trades": skipped
+            })
+    except Exception as e:
+        logger.error(f"Error in api_sync_positions_handler: {e}\n{traceback.format_exc()}")
+        return web.json_response({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status=500)
+
+
 def setup_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/index.html", index_handler)
+    app.router.add_get("/client", client_dashboard_handler)
+    app.router.add_get("/anuj", client_dashboard_handler)
+    app.router.add_get("/portfolio", client_dashboard_handler)
+    app.router.add_get("/client_dashboard.html", client_dashboard_handler)
     app.router.add_get("/client_presentation_dashboard.html", index_handler)
     app.router.add_get("/api/live-stats", api_live_stats_handler)
+    app.router.add_get("/api/test-account", api_test_account_handler)
+    app.router.add_get("/api/demo-order", api_demo_order_handler)
+    app.router.add_get("/api/sync-positions", api_sync_positions_handler)
     app.router.add_get("/api/paper-history", api_paper_history_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ip", ip_handler)

@@ -85,8 +85,22 @@ def _adx_score(adx: float) -> tuple[int, str]:
         return 3, f"ADX {adx:.0f} ❌ Ranging market"
 
 
-def _volume_score(vol: float, vol_sma: float) -> tuple[int, str]:
+def _volume_score(vol: float, vol_sma: float, symbol: str = "") -> tuple[int, str]:
     """Score volume surge (0-15)."""
+    # Commodities (Gold, Silver, Crude, Natgas) use CFD/tick feeds where exchange SMA ratio is unrepresentative
+    try:
+        from market_cache import is_commodity_symbol
+        if symbol and is_commodity_symbol(symbol):
+            if vol is not None and vol_sma is not None and vol_sma > 0:
+                ratio = vol / vol_sma
+                if ratio >= 2.0:
+                    return 15, f"Vol {ratio:.1f}x avg 🚀 Huge spike"
+                elif ratio >= 1.3:
+                    return 12, f"Vol {ratio:.1f}x avg ✅ Above avg"
+            return 10, "Vol: Commodity Baseline ✅"
+    except Exception:
+        pass
+
     if vol is None or vol_sma is None or vol_sma == 0:
         return 7, "Volume: N/A"
     ratio = vol / vol_sma
@@ -196,7 +210,7 @@ def analyse_signal(
         # --- Individual component scores ---
         s_rsi,     l_rsi     = _rsi_score(rsi, signal)
         s_adx,     l_adx     = _adx_score(adx)
-        s_vol,     l_vol     = _volume_score(volume, volume_sma)
+        s_vol,     l_vol     = _volume_score(volume, volume_sma, symbol=symbol)
         s_htf,     l_htf     = _htf_score(aligned_count, signal)
         s_macd,    l_macd    = _macd_score(macd_line, macd_signal_val, signal)
         s_session, l_session = _session_score(is_good_session)

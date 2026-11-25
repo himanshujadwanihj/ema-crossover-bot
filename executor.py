@@ -129,7 +129,7 @@ def round_price(symbol: str, price: float):
         rounded = round(p, 1)
     elif any(c in clean for c in ('ETH', 'SOL', 'BNB', 'XAU', 'CL', 'OIL', 'WTI', 'BRENT', 'LTC', 'BCH', 'AAVE', 'LINK', 'AVAX', 'DOT', 'NEAR', 'ATOM', 'ETC')):
         rounded = round(p, 2)
-    elif any(c in clean for c in ('XAG', 'SILVER', 'COPPER', 'BRONZE', 'HG')):
+    elif any(c in clean for c in ('XAG', 'SILVER', 'COPPER', 'BRONZE', 'HG', 'NATGAS')):
         rounded = round(p, 3)
     elif p >= 1000:
         rounded = round(p, 1)
@@ -281,6 +281,8 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
         rounded = max(0.02, round(f_qty, 3))
     elif any(c in clean_sym for c in ('XAU', 'PAXG')):
         rounded = max(0.005, round(f_qty, 3))
+    elif any(c in clean_sym for c in ('NATGAS',)):
+        rounded = max(1, int(round(f_qty)))
     elif 'SOL' in clean_sym:
         rounded = max(0.1, round(f_qty, 2))
     elif 'BNB' in clean_sym:
@@ -337,10 +339,12 @@ class SharkExchangeExecutor:
     and trailing SL updates directly on Shark Exchange Native API (India).
     """
 
-    def __init__(self):
-        self.api_key = os.getenv("SHARK_API_KEY", SHARK_API_KEY)
-        self.api_secret = os.getenv("SHARK_API_SECRET", SHARK_API_SECRET)
-        self.base_url = os.getenv("SHARK_BASE_URL", SHARK_BASE_URL)
+    def __init__(self, name="Main_Account", api_key=None, api_secret=None, base_url=None, telegram_chat_id=None):
+        self.name = name
+        self.api_key = api_key or os.getenv("SHARK_API_KEY", SHARK_API_KEY)
+        self.api_secret = api_secret or os.getenv("SHARK_API_SECRET", SHARK_API_SECRET)
+        self.base_url = base_url or os.getenv("SHARK_BASE_URL", SHARK_BASE_URL)
+        self.telegram_chat_id = telegram_chat_id or os.getenv("TELEGRAM_CHAT_ID", "771305593")
         self.margin_inr = 1000.0
         self.leverage = AUTO_TRADE_LEVERAGE
         self.max_concurrent_trades = AUTO_TRADE_MAX_CONCURRENT
@@ -357,6 +361,25 @@ class SharkExchangeExecutor:
         self._notified_filled_positions = set()  # set of positionIds already notified of entry fill to Telegram
         self._last_positions_fetch_ok = True
         self._last_orders_fetch_ok = True
+
+    async def send_alert(self, message: str):
+        """Sends isolated alert to this specific account's Telegram DM and CCs Master Admin."""
+        from telegram_bot import send_text_to_chat
+        target = str(self.telegram_chat_id or "771305593")
+        acc_tag = f"👤 <b>Account:</b> <code>{self.name}</code>\n"
+        tagged_msg = acc_tag + message
+        try:
+            await send_text_to_chat(target, tagged_msg)
+        except Exception as e:
+            logger.error(f"Failed to send alert to {target} for {self.name}: {e}")
+        
+        master_admin = str(os.getenv("TELEGRAM_CHAT_ID", "771305593"))
+        if target != master_admin:
+            try:
+                cc_msg = f"📋 <b>[Admin CC: {self.name}]</b>\n" + message
+                await send_text_to_chat(master_admin, cc_msg)
+            except Exception as e_cc:
+                logger.debug(f"Failed to CC master admin: {e_cc}")
 
     def is_configured(self) -> bool:
         """Returns True if API keys are configured and auto trading is enabled."""
@@ -719,6 +742,121 @@ class SharkExchangeExecutor:
 
         return False
 
+    async def get_directional_risk_slots(
+        self,
+        session: aiohttp.ClientSession,
+        signal: str,
+        max_at_risk: int = 5,
+        batch_submitted_syms: list = None,
+    ) -> dict:
+        """
+        Evaluates same-direction concurrent trade slots, exempting any active position
+        whose live Stop-Loss on Shark Exchange is already moved to Breakeven (entry price)
+        or locked in profit (SL >= Entry for LONG, SL <= Entry for SHORT).
+        Zero-risk breakeven trades do not block new concurrent trades.
+        """
+        cand_dir = "BUY" if str(signal).upper() in ("BUY", "LONG") else "SELL"
+        cand_label = "LONG" if cand_dir == "BUY" else "SHORT"
+        positions = await self.get_open_positions(session)
+        open_orders = await self.get_open_orders(session)
+
+        orders_by_sym = {}
+        for o in open_orders:
+            s_o = self.clean_sym(o)
+            if s_o:
+                orders_by_sym.setdefault(s_o, []).append(o)
+
+        at_risk_syms = []
+        breakeven_syms = []
+
+        for p in positions:
+            p_sym = self.clean_sym(p)
+            if not p_sym:
+                continue
+            p_q = 0.0
+            for qk in ("quantity", "holdQty", "openQty", "posQty", "size", "amount", "positionAmount"):
+                val = p.get(qk)
+                if val is not None:
+                    try:
+                        fv = abs(float(val))
+                        if fv > 0:
+                            p_q = fv
+                            break
+                    except Exception:
+                        pass
+            if p_q <= 0:
+                continue
+
+            p_dr = str(p.get("positionType") or p.get("positionSide") or p.get("side") or "").upper()
+            p_d = "BUY" if p_dr in ("LONG", "BUY") else "SELL"
+            if p_d != cand_dir:
+                continue
+
+            entry_p = float(p.get("entryPrice") or p.get("avgPrice") or 0)
+            if entry_p <= 0:
+                pos_sz = abs(float(p.get("positionSize") or 0))
+                if pos_sz > 0 and p_q > 0:
+                    entry_p = pos_sz / p_q
+
+            # Extract all live SL prices attached to this position
+            sl_prices = []
+            for o_ord in orders_by_sym.get(p_sym, []):
+                typ_u = str(o_ord.get("type") or "").upper()
+                sub_u = str(o_ord.get("subType") or "").upper()
+                lnk_u = str(o_ord.get("linkType") or "").upper()
+                place_u = str(o_ord.get("placeType") or "").upper()
+                is_sl = (
+                    typ_u in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                    or sub_u == "STOP_LOSS"
+                    or lnk_u == "ORDER_SL"
+                    or (place_u == "POSITION" and (o_ord.get("stopLossPrice") or o_ord.get("stopPrice")))
+                ) and not (place_u == "ORDER_FORM" and typ_u == "LIMIT")
+                if is_sl:
+                    px = float(o_ord.get("stopLossPrice") or o_ord.get("stopPrice") or o_ord.get("triggerPrice") or o_ord.get("price") or 0)
+                    if px > 0:
+                        sl_prices.append(px)
+
+            # Position is Breakeven / Zero-Risk ONLY if it has an active live SL on exchange
+            # placed at or beyond Entry (0.05% tolerance for exchange price tick rounding).
+            is_breakeven = False
+            if entry_p > 0 and sl_prices:
+                if cand_dir == "BUY":
+                    worst_sl = min(sl_prices)
+                    if worst_sl >= entry_p * 0.9995:
+                        is_breakeven = True
+                else:
+                    worst_sl = max(sl_prices)
+                    if worst_sl <= entry_p * 1.0005:
+                        is_breakeven = True
+
+            if is_breakeven:
+                breakeven_syms.append(p_sym)
+            else:
+                at_risk_syms.append(p_sym)
+
+        # Account for new same-direction trades already submitted earlier in this batch loop
+        extra_syms = [
+            s for s in (batch_submitted_syms or [])
+            if s not in at_risk_syms and s not in breakeven_syms
+        ]
+        all_at_risk = at_risk_syms + extra_syms
+        at_risk_count = len(all_at_risk)
+        allowed = at_risk_count < max_at_risk
+
+        be_note = f" | Breakeven-exempt (Zero-Risk): {len(breakeven_syms)} ({', '.join(breakeven_syms)})" if breakeven_syms else ""
+        reason = (
+            f"Directional Limit Reached (Already {at_risk_count}/{max_at_risk} at-risk {cand_label} trades: "
+            f"{', '.join(all_at_risk)}{be_note}). Max {max_at_risk} at-risk {cand_label} trades allowed at a time."
+        )
+        return {
+            "allowed": allowed,
+            "at_risk_count": at_risk_count,
+            "max_at_risk": max_at_risk,
+            "at_risk_syms": all_at_risk,
+            "breakeven_syms": breakeven_syms,
+            "reason": reason,
+        }
+
     async def trail_position_on_new_signal(
         self,
         session: aiohttp.ClientSession,
@@ -866,7 +1004,7 @@ class SharkExchangeExecutor:
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>New continuation signal detected. SL locked in tighter & TP extended to ride the bigger trend!</i>"
                 )
-                await send_text_alert(msg)
+                await self.send_alert(msg)
                 return True
             else:
                 logger.info(f"Continuation signal for {clean_sym} evaluated: current SL ({current_sl}) and TP ({current_tp}) are already optimal.")
@@ -927,10 +1065,15 @@ class SharkExchangeExecutor:
         tp2: float,
         tp3: float = None,
         aligned_count: int = 4,
-        adx: float = None
+        adx: float = None,
+        allow_during_maintenance: bool = False
     ) -> dict:
         async with _get_execution_lock():
-            res = await self._execute_signal_trade_internal(session, symbol, signal, entry, sl, tp1, tp2, tp3, aligned_count=aligned_count, adx=adx)
+            res = await self._execute_signal_trade_internal(
+                session, symbol, signal, entry, sl, tp1, tp2, tp3,
+                aligned_count=aligned_count, adx=adx,
+                allow_during_maintenance=allow_during_maintenance,
+            )
             # Mandatory 1.5s (1500ms) sequential execution pause between trade submissions
             await asyncio.sleep(1.5)
             return res
@@ -946,7 +1089,8 @@ class SharkExchangeExecutor:
         tp2: float,
         tp3: float = None,
         aligned_count: int = 4,
-        adx: float = None
+        adx: float = None,
+        allow_during_maintenance: bool = False
     ) -> dict:
         """
         Executes a new trade on Shark Exchange from a bot signal.
@@ -999,7 +1143,13 @@ class SharkExchangeExecutor:
             logger.info(f"AUTO-TRADE EXCLUSION: {symbol} is a US Stock token. Skipping auto-trade per user directive. Telegram alert only.")
             return {"status": "skipped", "reason": f"{symbol} is a US stock (auto-trade disabled per directive, alerts only)"}
 
-        # 3. DAILY RISK CIRCUIT BREAKER: 10 Consecutive SLs -> 60-min pause
+        # 3. DAILY RISK CIRCUIT BREAKER & NIGHT MAINTENANCE PAUSE GUARD
+        if not allow_during_maintenance:
+            from config import is_night_maintenance_window
+            if is_night_maintenance_window():
+                logger.info(f"🌙 NIGHT MAINTENANCE ACTIVE: Blocked execution for {clean_sym} [{signal}] (12:30 AM - 05:30 AM IST).")
+                return {"status": "skipped", "reason": "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused."}
+
         from state import is_trading_paused
         is_paused, rem_secs, pause_reason = is_trading_paused()
         if is_paused:
@@ -1047,8 +1197,7 @@ class SharkExchangeExecutor:
                 f"<b>Minimum Required:</b> ₹500 INR (or 2.0% of capital).\n"
                 f"<i>Please deposit/transfer funds into your Shark Exchange Futures Wallet.</i>{bal_block}"
             )
-            from telegram_bot import send_text_alert as _send_alert
-            await _send_alert(msg)
+            await self.send_alert(msg)
             return {"status": "skipped", "reason": f"Insufficient available margin on broker (₹{avail_margin_inr:,.2f} INR)"}
         total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt = self.calculate_position_size(clean_sym, entry, sl_price=sl, available_margin_inr=avail_margin_inr, adx=adx)
         if total_qty <= 0:
@@ -1137,8 +1286,7 @@ class SharkExchangeExecutor:
                 f"🛡️ <b>Stop-Loss Limit:</b> {format_price(clean_sl)}{bal_block}\n\n"
                 f"<i>Status: Entry limit resting on order book. {r_label} Maker Limit TP armed.</i>"
             )
-            from telegram_bot import send_text_alert as _send_alert
-            await _send_alert(exec_card)
+            await self.send_alert(exec_card)
 
             return {
                 "status": "success",
@@ -1159,7 +1307,7 @@ class SharkExchangeExecutor:
             err_msg = str(data)
             logger.error(f"Shark order placement failed for {clean_sym} (Status {status}): {err_msg}")
             
-            # If rejected due to insufficient margin, notify Telegram so user can top up
+            # If rejected due to insufficient margin, notify account owner + Admin CC cleanly
             if "3018" in err_msg or "Insufficient margin" in err_msg:
                 msg = (
                     f"⚠️ <b>SHARK AUTO-ORDER MARGIN ALERT</b>\n\n"
@@ -1168,8 +1316,7 @@ class SharkExchangeExecutor:
                     f"<b>Required:</b> ₹{self.margin_inr:,.0f} INR.\n"
                     f"<i>Please deposit/transfer funds into your Shark Exchange Futures Wallet.</i>"
                 )
-                from telegram_bot import send_text_alert as _send_alert
-                await _send_alert(msg)
+                await self.send_alert(msg)
 
             return {"status": "error", "reason": err_msg, "http_status": status}
 
@@ -1485,8 +1632,7 @@ class SharkExchangeExecutor:
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
                 )
-                from telegram_bot import send_text_alert as _send_alert
-                await _send_alert(fill_msg)
+                await self.send_alert(fill_msg)
             except Exception as e_alert:
                 logger.warning(f"Failed to send fill alert for {clean_sym}: {e_alert}")
 
@@ -1761,6 +1907,10 @@ class SharkExchangeExecutor:
 
             clean_qty = round_coin_qty(clean_sym, qty)
 
+            # FIRST cancel resting open orders so Shark Exchange releases the reserved reduce-only quantity lock
+            await self.cancel_all_open_orders(session, clean_sym)
+            await asyncio.sleep(0.5)
+
             payload = {
                 "placeType": "POSITION",
                 "positionId": pos_id,
@@ -1773,7 +1923,6 @@ class SharkExchangeExecutor:
             st, res = await self.shark_post(session, "/v1/order/place-order", payload)
             if st in (200, 201):
                 logger.info(f"Position for {clean_sym} closed at MARKET on Shark Exchange ({reason}).")
-                await self.cancel_all_open_orders(session, clean_sym)
                 
                 exit_p = float(pos.get("markPrice") or pos.get("lastPrice") or pos.get("entryPrice") or 0)
                 entry_p = float(pos.get("entryPrice") or pos.get("avgPrice") or 0)
@@ -1822,10 +1971,13 @@ class SharkExchangeExecutor:
                         f"💼 <i>Margin released safely on exchange!</i>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
-                await send_text_alert(msg)
+                await self.send_alert(msg)
                 return True
             else:
                 logger.error(f"Failed to close position at market for {clean_sym}: {res}")
+                if "exceeds remaining position size" in str(res).lower() or "3025" in str(res):
+                    logger.warning(f"Position size already reduced or closed on exchange for {clean_sym}. Purging resting orders.")
+                    await self.cancel_all_open_orders(session, clean_sym)
                 return False
         except Exception as e:
             logger.error(f"Error in close_position_market for {clean_sym}: {e}")
@@ -1916,7 +2068,7 @@ class SharkExchangeExecutor:
                                     f"<b>Status:</b> Entry limit not filled within {int(max_minutes)} minutes.\n"
                                     f"<b>Action:</b> ✅ Order cancelled directly on exchange with ₹0 INR loss."
                                 )
-                                await send_text_alert(msg)
+                                await self.send_alert(msg)
                             else:
                                 logger.warning(f"EXCHANGE SWEEPER: Shark returned {st} when cancelling {cid} for {sym}: {res}")
         except Exception as e:
@@ -2038,8 +2190,7 @@ class SharkExchangeExecutor:
                                 f"<i>Broker Position Closed on Shark Exchange</i>{pnl_note}"
                             )
                             try:
-                                from telegram_bot import send_text_alert
-                                await send_text_alert(alert_msg)
+                                await self.send_alert(alert_msg)
                             except Exception as e_alert:
                                 logger.error(f"Failed to send close alert for {c_sym}: {e_alert}")
                         self._known_live_positions.pop(c_sym, None)
@@ -2642,8 +2793,7 @@ class SharkExchangeExecutor:
                     f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
                     f"<i>Trade is now 100% Zero-Risk. Runner trailing for full trend capture!</i>{bal_block}"
                 )
-            from telegram_bot import send_text_alert as _send_alert
-            await _send_alert(msg)
+            await self.send_alert(msg)
 
         elif tp_stage in ("TP2", "TP3", "FULL_WIN"):
             pnl_tp3_usdt = calc_pnl(tp3_qty, target_tp3, real_entry, direction)
@@ -2674,12 +2824,245 @@ class SharkExchangeExecutor:
             except Exception as ce:
                 logger.warning(f"Error cleaning up orders for {clean_sym} after TP3: {ce}")
 
-            from telegram_bot import send_text_alert as _send_alert
-            await _send_alert(msg)
+            await self.send_alert(msg)
 
 
-# Global Singleton Instance
-executor = SharkExchangeExecutor()
+class MultiAccountExecutor:
+    """
+    Multi-Account Copy-Trading Coordinator for Shark Exchange.
+    Wraps multiple SharkExchangeExecutor instances (Account 1, Account 2, etc.)
+    and executes trades, bracket orders, and live order management concurrently.
+    """
+    def __init__(self):
+        self.accounts: list[SharkExchangeExecutor] = []
+        self._init_accounts()
+
+    def _init_accounts(self):
+        from config import get_shark_accounts
+        configs = get_shark_accounts()
+        self.accounts = [
+            SharkExchangeExecutor(
+                name=cfg.get("name", f"Account_{i+1}"),
+                api_key=cfg.get("api_key"),
+                api_secret=cfg.get("api_secret"),
+                telegram_chat_id=cfg.get("telegram_chat_id")
+            )
+            for i, cfg in enumerate(configs)
+        ]
+        logger.info(f"🚀 MultiAccountExecutor initialized with {len(self.accounts)} active account(s): {[a.name for a in self.accounts]}")
+
+    @property
+    def primary(self) -> SharkExchangeExecutor:
+        return self.accounts[0] if self.accounts else SharkExchangeExecutor()
+
+    def __getattr__(self, name):
+        """Transparently delegates any non-overridden attribute/method to the primary account."""
+        if self.accounts:
+            return getattr(self.primary, name)
+        raise AttributeError(f"'MultiAccountExecutor' has no attribute '{name}'")
+
+    def is_configured(self) -> bool:
+        return any(acc.is_configured() for acc in self.accounts)
+
+    def get_account(self, identifier: str = None) -> SharkExchangeExecutor:
+        """Finds account by index (1-based), name, or returns primary if default."""
+        if not self.accounts:
+            return None
+        if not identifier:
+            return self.primary
+        ident = str(identifier).strip().lower()
+        if ident in ("1", "main", "himanshu", "primary", "mine"):
+            return self.accounts[0]
+        if ident in ("2", "anuj", "anuj sharma", "sharma"):
+            return self.accounts[1] if len(self.accounts) > 1 else self.accounts[0]
+        if ident.isdigit():
+            idx = int(ident) - 1
+            if 0 <= idx < len(self.accounts):
+                return self.accounts[idx]
+        for acc in self.accounts:
+            if ident in acc.name.lower():
+                return acc
+        return self.primary
+
+    def get_all_configured_accounts(self) -> list[SharkExchangeExecutor]:
+        return [acc for acc in self.accounts if acc.is_configured()]
+
+    def clean_sym(self, p) -> str:
+        return self.primary.clean_sym(p) if self.primary else ""
+
+    def extract_order_qty(self, obj: dict) -> float:
+        return self.primary.extract_order_qty(obj) if self.primary else 0.0
+
+    async def get_available_margin_inr(self, session: aiohttp.ClientSession) -> float:
+        return await self.primary.get_available_margin_inr(session)
+
+    async def get_open_positions(self, session: aiohttp.ClientSession) -> list:
+        return await self.primary.get_open_positions(session)
+
+    async def get_open_position(self, session: aiohttp.ClientSession, symbol: str) -> dict:
+        # Check primary first, then secondary configured accounts
+        p = await self.primary.get_open_position(session, symbol)
+        if p:
+            return p
+        for acc in self.accounts:
+            if acc != self.primary and acc.is_configured():
+                p_sub = await acc.get_open_position(session, symbol)
+                if p_sub:
+                    return p_sub
+        return None
+
+    async def has_active_trade_on_exchange(self, session: aiohttp.ClientSession, symbol: str, signal: str = None) -> bool:
+        """
+        Multi-Account Single Order Shield:
+        Only returns True if ALL configured accounts already hold an active position or resting order for this symbol.
+        If ANY account lacks the trade, returns False so execute_signal_trade() can place the order on missing accounts
+        while existing accounts automatically trail their SL/TP!
+        """
+        configured_accs = [acc for acc in self.accounts if acc.is_configured()]
+        if not configured_accs:
+            return False
+        checks = await asyncio.gather(*[
+            acc.has_active_trade_on_exchange(session, symbol, signal=signal)
+            for acc in configured_accs
+        ], return_exceptions=True)
+        return all(isinstance(c, bool) and c for c in checks)
+
+    async def get_directional_risk_slots(
+        self,
+        session: aiohttp.ClientSession,
+        signal: str,
+        max_at_risk: int = 5,
+        batch_submitted_syms: list = None,
+    ) -> dict:
+        return await self.primary.get_directional_risk_slots(
+            session,
+            signal=signal,
+            max_at_risk=max_at_risk,
+            batch_submitted_syms=batch_submitted_syms,
+        )
+
+    async def execute_signal_trade(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        signal: str,
+        entry: float,
+        sl: float,
+        tp1: float,
+        tp2: float = None,
+        tp3: float = None,
+        aligned_count: int = 3,
+        adx: float = None,
+        allow_during_maintenance: bool = False
+    ) -> dict:
+        """
+        Executes trade across ALL configured accounts concurrently (Copy Trading)!
+        Each account sizes independently based on its own free margin on Shark Exchange.
+        Reports per-account success, trailing, skipped, and error outcomes explicitly so
+        failures on secondary accounts are never swallowed silently.
+        """
+        configured_accs = [acc for acc in self.accounts if acc.is_configured()]
+        if not configured_accs:
+            logger.warning("No configured Shark Exchange accounts available for execution.")
+            return {"status": "skipped", "reason": "No accounts configured", "failed_accounts": [], "account_results": []}
+
+        if not allow_during_maintenance:
+            from config import is_night_maintenance_window
+            if is_night_maintenance_window():
+                msg = "Night Maintenance Mode active (12:30 AM - 05:30 AM IST) — Auto-execution paused."
+                logger.info(f"🌙 MULTI-ACCOUNT MAINTENANCE SHIELD: Blocked {symbol} [{signal}] ({msg})")
+                return {"status": "skipped", "reason": msg, "failed_accounts": [], "account_results": []}
+
+        logger.info(f"⚡ MULTI-ACCOUNT DISPATCH: Executing {symbol} [{signal}] across {len(configured_accs)} account(s): {[a.name for a in configured_accs]}")
+
+        tasks = [
+            acc.execute_signal_trade(
+                session, symbol, signal, entry, sl, tp1, tp2,
+                tp3=tp3, aligned_count=aligned_count, adx=adx,
+                allow_during_maintenance=allow_during_maintenance,
+            )
+            for acc in configured_accs
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        account_results = []
+        succeeded = []
+        trailed = []
+        failed = []
+        primary_result = None
+
+        for i, res in enumerate(results):
+            acc_name = configured_accs[i].name
+            if isinstance(res, Exception):
+                err_txt = str(res)
+                logger.error(f"❌ Execution exception on [{acc_name}]: {err_txt}")
+                rec = {"account": acc_name, "status": "error", "reason": err_txt}
+                account_results.append(rec)
+                failed.append(rec)
+            elif isinstance(res, dict):
+                st_val = res.get("status", "skipped")
+                rsn_val = res.get("reason", "OK")
+                logger.info(f"✅ Execution result for [{acc_name}]: status={st_val} reason={rsn_val}")
+                rec = {"account": acc_name, "status": st_val, "reason": rsn_val, "total_qty": res.get("total_qty", 0)}
+                account_results.append(rec)
+                if st_val == "success":
+                    succeeded.append(res)
+                elif st_val == "trailed":
+                    trailed.append(res)
+                else:
+                    failed.append(rec)
+                if i == 0:
+                    primary_result = res
+            else:
+                logger.info(f"Execution result for [{acc_name}]: {res}")
+                rec = {"account": acc_name, "status": "error", "reason": str(res)}
+                account_results.append(rec)
+                failed.append(rec)
+
+        if succeeded:
+            base = dict(succeeded[0])
+            base["status"] = "partial_success" if failed else "success"
+            base["failed_accounts"] = failed
+            base["account_results"] = account_results
+            return base
+
+        if trailed:
+            base = dict(trailed[0])
+            base["status"] = "partial_success" if failed else "trailed"
+            base["failed_accounts"] = failed
+            base["account_results"] = account_results
+            return base
+
+        combined_reasons = " | ".join([f"{f['account']}: {f['reason']}" for f in failed]) if failed else (primary_result.get("reason", "Execution failed") if isinstance(primary_result, dict) else "Execution failed")
+        overall_status = "error" if any(f["status"] == "error" for f in failed) else "skipped"
+        return {
+            "status": overall_status,
+            "reason": combined_reasons,
+            "failed_accounts": failed,
+            "account_results": account_results,
+        }
+
+    async def sync_and_manage_live_orders(self, session: aiohttp.ClientSession) -> None:
+        """Monitors, heals, and trails orders across ALL accounts concurrently."""
+        tasks = [
+            acc.sync_and_manage_live_orders(session)
+            for acc in self.accounts if acc.is_configured()
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def get_wallet_balance_summary(self, session: aiohttp.ClientSession) -> str:
+        summaries = []
+        for acc in self.accounts:
+            if acc.is_configured():
+                s = await acc.get_wallet_balance_summary(session)
+                if s:
+                    summaries.append(f"<b>[{acc.name}]</b>\n{s}")
+        return "\n\n".join(summaries)
+
+
+# Global Multi-Account Singleton Instance
+executor = MultiAccountExecutor()
 
 
 async def check_and_apply_retest_trailing_sl(

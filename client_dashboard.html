@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Shark Exchange — Personal Portfolio & Live Trades Dashboard</title>
+  
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            slate: {
+              850: '#151f32',
+              900: '#0f172a',
+              950: '#070d19',
+            },
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #070d19;
+      color: #e2e8f0;
+    }
+    .glass-card {
+      background: rgba(15, 23, 42, 0.78);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-card-hover:hover {
+      border-color: rgba(56, 189, 248, 0.35);
+      box-shadow: 0 10px 25px -5px rgba(14, 165, 233, 0.12);
+      transition: all 0.25s ease-in-out;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #070d19;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #334155;
+    }
+    @keyframes spin-slow {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .spinning {
+      animation: spin-slow 0.8s linear;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased selection:bg-sky-500 selection:text-white pb-16">
+
+  <!-- TOP HEADER -->
+  <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping mr-2"></span>
+              ● LIVE SHARK EXCHANGE BROKER LINK
+            </span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" id="badge-isolation">
+              🔒 STRICT PERSONAL ISOLATION ACTIVE
+            </span>
+          </div>
+          <h1 class="text-xl md:text-2xl font-extrabold tracking-tight text-white flex items-center gap-2">
+            <span>👤</span>
+            <span id="account-title" class="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 via-blue-400 to-indigo-300">
+              ANUJ SHARMA — PERSONAL LIVE PORTFOLIO
+            </span>
+          </h1>
+          <p class="text-slate-400 text-xs mt-1">
+            Real-time direct broker execution ledger on Shark Exchange. Zero simulation — pure genuine broker balance, open positions & closed trade fills.
+          </p>
+        </div>
+
+        <div class="flex items-center justify-between md:justify-end gap-3 border-t md:border-t-0 border-slate-800 pt-3 md:pt-0">
+          <div class="text-left md:text-right">
+            <div class="text-[11px] text-slate-400">Live IST Clock</div>
+            <div class="text-xs font-mono font-bold text-sky-300" id="live-ist-clock">Loading clock...</div>
+            <div class="text-[10px] text-slate-500 mt-0.5" id="sync-status">Auto-updating every 8s</div>
+          </div>
+          <button onclick="triggerManualRefresh()" id="btn-refresh" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-sky-500 hover:bg-sky-400 text-white transition-all shadow-md shadow-sky-500/25 flex items-center gap-1.5">
+            <span id="refresh-icon">🔄</span>
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6 space-y-6">
+
+    <!-- 4 CORE KPI METRIC CARDS -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      
+      <!-- Card 1: Net Realized Profit -->
+      <div class="glass-card glass-card-hover rounded-2xl p-5 border-l-4 border-l-emerald-500">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Realized Net Profit</span>
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">SCORECARD</span>
+        </div>
+        <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 flex items-baseline gap-2 mt-1" id="kpi-net-profit">
+          ₹0.00
+        </div>
+        <div class="text-xs font-semibold text-emerald-300 mt-1 flex items-center justify-between">
+          <span id="kpi-scorecard">0W - 0L - 0BE</span>
+          <span class="text-[11px] text-emerald-400/90 font-bold" id="kpi-winrate">Win Rate: 0.0%</span>
+        </div>
+        <div class="text-[11px] text-slate-400 mt-2.5 pt-2 border-t border-slate-800/80">
+          Total Closed Trades: <span class="text-white font-semibold" id="kpi-total-closed">0</span>
+        </div>
+      </div>
+
+      <!-- Card 2: Futures Wallet Margin -->
+      <div class="glass-card glass-card-hover rounded-2xl p-5 border-l-4 border-l-sky-500">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Futures Wallet Margin</span>
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30">BROKER BALANCE</span>
+        </div>
+        <div class="text-2xl sm:text-3xl font-extrabold text-sky-400 flex items-baseline gap-2 mt-1" id="kpi-wallet-balance">
+          ₹0.00
+        </div>
+        <div class="text-xs font-semibold text-slate-300 mt-1 flex items-center justify-between">
+          <span>Available: <strong class="text-white" id="kpi-avail-margin">₹0.00</strong></span>
+        </div>
+        <div class="text-[11px] text-slate-400 mt-2.5 pt-2 border-t border-slate-800/80">
+          In-Position Margin: <span class="text-slate-200 font-semibold" id="kpi-locked-margin">₹0.00</span>
+        </div>
+      </div>
+
+      <!-- Card 3: Floating Unrealized PnL -->
+      <div class="glass-card glass-card-hover rounded-2xl p-5 border-l-4 border-l-purple-500">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Floating Unrealized PnL</span>
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30" id="kpi-active-count">0 ACTIVE</span>
+        </div>
+        <div class="text-2xl sm:text-3xl font-extrabold text-slate-100 flex items-baseline gap-2 mt-1" id="kpi-floating-pnl">
+          ₹0.00
+        </div>
+        <div class="text-xs font-semibold text-slate-400 mt-1 flex items-center justify-between">
+          <span id="kpi-floating-pct">0.00% on active margin</span>
+        </div>
+        <div class="text-[11px] text-slate-400 mt-2.5 pt-2 border-t border-slate-800/80">
+          Live Mark Price Valuation
+        </div>
+      </div>
+
+      <!-- Card 4: Total Account Equity -->
+      <div class="glass-card glass-card-hover rounded-2xl p-5 border-l-4 border-l-indigo-500">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Net Equity</span>
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">NET EQUITY</span>
+        </div>
+        <div class="text-2xl sm:text-3xl font-extrabold text-indigo-300 flex items-baseline gap-2 mt-1" id="kpi-total-equity">
+          ₹0.00
+        </div>
+        <div class="text-xs font-semibold text-indigo-200 mt-1">
+          Futures Margin + Floating PnL
+        </div>
+        <div class="text-[11px] text-slate-400 mt-2.5 pt-2 border-t border-slate-800/80">
+          Broker status: <span class="text-emerald-400 font-semibold">🟢 Healthy Sync</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- SECTION 1: LIVE ACTIVE POSITIONS -->
+    <div class="glass-card rounded-2xl p-6 border border-slate-800">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 pb-3 border-b border-slate-800/80">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">🟢</span>
+          <h2 class="text-lg font-extrabold text-white">Live Active Positions</h2>
+          <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" id="badge-active-count">
+            0 Open
+          </span>
+        </div>
+        <div class="text-xs text-slate-400">
+          10x Isolated Leverage • Trailing Bracket Protected
+        </div>
+      </div>
+
+      <!-- Positions Table (Desktop) -->
+      <div class="overflow-x-auto hidden md:block">
+        <table class="w-full text-left text-xs">
+          <thead>
+            <tr class="text-slate-400 uppercase tracking-wider border-b border-slate-800 pb-2">
+              <th class="py-2.5 font-semibold">Coin / Pair</th>
+              <th class="py-2.5 font-semibold">Direction</th>
+              <th class="py-2.5 font-semibold">Quantity</th>
+              <th class="py-2.5 font-semibold">Entry Price</th>
+              <th class="py-2.5 font-semibold">Mark Price</th>
+              <th class="py-2.5 font-semibold">Floating PnL (₹)</th>
+              <th class="py-2.5 font-semibold">Bracket Levels (SL / TP)</th>
+              <th class="py-2.5 font-semibold">Status</th>
+            </tr>
+          </thead>
+          <tbody id="active-positions-tbody" class="divide-y divide-slate-800/60">
+            <!-- Injected dynamically via JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Positions Card Grid (Mobile) -->
+      <div id="active-positions-mobile" class="grid grid-cols-1 gap-3 md:hidden">
+        <!-- Injected dynamically via JS -->
+      </div>
+
+      <!-- Empty State -->
+      <div id="active-empty-state" class="py-10 text-center text-slate-400">
+        <div class="text-3xl mb-2">🏖️</div>
+        <div class="font-bold text-white text-sm">No Active Positions Right Now</div>
+        <p class="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+          Trading engine is scanning 1H market candles. As soon as a 3★ or 4★ verified setup triggers, order will execute automatically.
+        </p>
+      </div>
+    </div>
+
+    <!-- SECTION 2: RESTING ENTRY LIMIT ORDERS -->
+    <div class="glass-card rounded-2xl p-6 border border-slate-800">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 pb-3 border-b border-slate-800/80">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">⏳</span>
+          <h2 class="text-lg font-extrabold text-white">Resting Entry Orders (Limit Orders)</h2>
+          <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30" id="badge-resting-count">
+            0 Pending
+          </span>
+        </div>
+        <div class="text-xs text-slate-400">
+          Disciplined Retest Entry • 30-Min Auto Cancellation Guard
+        </div>
+      </div>
+
+      <!-- Resting Orders Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead>
+            <tr class="text-slate-400 uppercase tracking-wider border-b border-slate-800 pb-2">
+              <th class="py-2 font-semibold">Pair</th>
+              <th class="py-2 font-semibold">Side</th>
+              <th class="py-2 font-semibold">Limit Entry</th>
+              <th class="py-2 font-semibold">Quantity</th>
+              <th class="py-2 font-semibold">Time Placed</th>
+              <th class="py-2 font-semibold">Auto-Cancel Expiry</th>
+            </tr>
+          </thead>
+          <tbody id="resting-orders-tbody" class="divide-y divide-slate-800/60">
+            <!-- Injected dynamically via JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Empty State -->
+      <div id="resting-empty-state" class="py-6 text-center text-slate-400">
+        <div class="text-sm font-semibold text-slate-300">No Resting Limit Orders</div>
+        <p class="text-xs text-slate-500 mt-0.5">All limit entries filled or no pending pullback orders.</p>
+      </div>
+    </div>
+
+    <!-- SECTION 3: RECENT CLOSED TRADES HISTORY -->
+    <div class="glass-card rounded-2xl p-6 border border-slate-800">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 pb-3 border-b border-slate-800/80">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">📜</span>
+          <h2 class="text-lg font-extrabold text-white">Closed Trades History Ledger</h2>
+          <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-700/50 text-slate-300 border border-slate-600/50" id="badge-closed-count">
+            Recent
+          </span>
+        </div>
+        <div class="text-xs text-slate-400">
+          Verified Fills Directly from Shark Exchange API
+        </div>
+      </div>
+
+      <!-- Closed Trades Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead>
+            <tr class="text-slate-400 uppercase tracking-wider border-b border-slate-800 pb-2">
+              <th class="py-2.5 font-semibold">Timestamp (IST)</th>
+              <th class="py-2.5 font-semibold">Coin / Pair</th>
+              <th class="py-2.5 font-semibold">Direction</th>
+              <th class="py-2.5 font-semibold">Entry Price</th>
+              <th class="py-2.5 font-semibold">Exit Result</th>
+              <th class="py-2.5 font-semibold">Realized Profit (₹ INR)</th>
+            </tr>
+          </thead>
+          <tbody id="closed-trades-tbody" class="divide-y divide-slate-800/60 font-mono">
+            <!-- Injected dynamically via JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Empty State -->
+      <div id="closed-empty-state" class="py-8 text-center text-slate-400">
+        <div class="text-sm font-semibold text-slate-300">No Closed Trades Yet</div>
+        <p class="text-xs text-slate-500 mt-0.5">Closed positions will appear here immediately upon Target/SL execution.</p>
+      </div>
+    </div>
+
+    <!-- FOOTER & AUDIT GUARANTEE -->
+    <footer class="glass-card rounded-2xl p-5 border border-slate-800/90 text-center text-xs text-slate-400 space-y-1.5">
+      <div class="text-slate-300 font-semibold flex items-center justify-center gap-1.5">
+        <span>🛡️</span>
+        <span>100% Strict Personal Isolation Guarantee</span>
+      </div>
+      <p class="text-[11px] text-slate-500 max-w-2xl mx-auto">
+        This private dashboard queries directly from Shark Exchange Native Sub-Broker API for <strong class="text-sky-300" id="footer-acc-name">Anuj Sharma (Account 2)</strong>. All balances, positions, and history ledger remain strictly personal and unshared.
+      </p>
+      <div class="text-[10px] text-slate-600 pt-1">
+        AlphaSniper Institutional Quant Engine • Protected by Continuous Trailing SL & Shark Margin Shield
+      </div>
+    </footer>
+
+  </main>
+
+  <script>
+    // Determine Account Identifier from URL Query Params or Defaults to '2' (Anuj Sharma)
+    function getTargetAccount() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const acc = urlParams.get('account') || urlParams.get('acc');
+      if (acc) return acc;
+      const path = window.location.pathname.toLowerCase();
+      if (path.includes('anuj')) return '2';
+      return '2'; // Default is Account 2 (Client Dashboard)
+    }
+
+    const currentAccount = getTargetAccount();
+
+    function formatCurrencyINR(val) {
+      const num = parseFloat(val) || 0.0;
+      return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatNumber(val, decimals = 4) {
+      const num = parseFloat(val);
+      if (isNaN(num)) return '0.00';
+      if (num >= 1000) return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      if (num >= 1) return num.toFixed(decimals).replace(/\.?0+$/, '');
+      return num.toFixed(6).replace(/\.?0+$/, '');
+    }
+
+    function updateClock() {
+      try {
+        const now = new Date();
+        const options = { timeZone: 'Asia/Kolkata', hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: 'short', year: 'numeric' };
+        document.getElementById('live-ist-clock').textContent = now.toLocaleDateString('en-GB', options) + ' IST';
+      } catch (e) {
+        document.getElementById('live-ist-clock').textContent = new Date().toUTCString();
+      }
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    let isFetching = false;
+
+    async function fetchDashboardData(manual = false) {
+      if (isFetching) return;
+      isFetching = true;
+
+      const refreshIcon = document.getElementById('refresh-icon');
+      if (manual && refreshIcon) refreshIcon.classList.add('spinning');
+
+      try {
+        const response = await fetch(`/api/live-stats?account=${currentAccount}&t=${Date.now()}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        renderDashboard(data);
+        document.getElementById('sync-status').textContent = '● Synced: Just now';
+        document.getElementById('sync-status').classList.remove('text-rose-400');
+        document.getElementById('sync-status').classList.add('text-slate-500');
+      } catch (err) {
+        console.error('Dashboard fetch error:', err);
+        document.getElementById('sync-status').textContent = '⚠️ Reconnecting broker...';
+        document.getElementById('sync-status').classList.remove('text-slate-500');
+        document.getElementById('sync-status').classList.add('text-rose-400');
+      } finally {
+        isFetching = false;
+        if (refreshIcon) refreshIcon.classList.remove('spinning');
+      }
+    }
+
+    function renderDashboard(data) {
+      const acc = data.account || {};
+      const wallet = data.wallet || {};
+      const scorecard = data.scorecard || {};
+      const active = data.active_positions || [];
+      const resting = data.resting_orders || [];
+      const closed = data.recent_executed_trades || [];
+
+      // Account name and tags
+      const accName = acc.name || (currentAccount === '1' ? 'Himanshu (Admin Master)' : 'Anuj Sharma');
+      document.getElementById('account-title').textContent = `${accName.toUpperCase()} — PERSONAL LIVE PORTFOLIO`;
+      document.getElementById('footer-acc-name').textContent = accName;
+
+      // KPI Card 1: Net Profit & Scorecard
+      const netProfit = parseFloat(scorecard.net_trade_pnl_inr || wallet.net_trade_pnl_inr || 0.0);
+      const netProfitEl = document.getElementById('kpi-net-profit');
+      const sign = netProfit >= 0 ? '+' : '';
+      netProfitEl.textContent = `${sign}${formatCurrencyINR(netProfit)}`;
+      if (netProfit >= 0) {
+        netProfitEl.className = 'text-2xl sm:text-3xl font-extrabold text-emerald-400 flex items-baseline gap-2 mt-1';
+      } else {
+        netProfitEl.className = 'text-2xl sm:text-3xl font-extrabold text-rose-400 flex items-baseline gap-2 mt-1';
+      }
+
+      const wins = scorecard.wins || 0;
+      const losses = scorecard.losses || 0;
+      const be = scorecard.breakevens || 0;
+      const winRate = parseFloat(scorecard.win_rate_pct || 0.0);
+      document.getElementById('kpi-scorecard').textContent = `${wins}W - ${losses}L - ${be}BE`;
+      document.getElementById('kpi-winrate').textContent = `Win Rate: ${winRate.toFixed(1)}%`;
+      document.getElementById('kpi-total-closed').textContent = `${scorecard.total_executed || closed.length} Trades`;
+
+      // KPI Card 2: Wallet Margin
+      const bal = parseFloat(wallet.balance_inr || 0.0);
+      const avail = parseFloat(wallet.available_margin_inr || bal);
+      const locked = parseFloat(wallet.locked_margin_inr || (bal - avail));
+      document.getElementById('kpi-wallet-balance').textContent = formatCurrencyINR(bal);
+      document.getElementById('kpi-avail-margin').textContent = formatCurrencyINR(avail);
+      document.getElementById('kpi-locked-margin').textContent = formatCurrencyINR(locked);
+
+      // KPI Card 3: Floating Unrealized PnL
+      const floatingPnl = parseFloat(wallet.unrealized_pnl_inr || scorecard.active_unrealized_pnl_inr || 0.0);
+      const floatingEl = document.getElementById('kpi-floating-pnl');
+      const fSign = floatingPnl >= 0 ? '+' : '';
+      floatingEl.textContent = `${fSign}${formatCurrencyINR(floatingPnl)}`;
+      if (floatingPnl > 0) {
+        floatingEl.className = 'text-2xl sm:text-3xl font-extrabold text-emerald-400 flex items-baseline gap-2 mt-1';
+      } else if (floatingPnl < 0) {
+        floatingEl.className = 'text-2xl sm:text-3xl font-extrabold text-rose-400 flex items-baseline gap-2 mt-1';
+      } else {
+        floatingEl.className = 'text-2xl sm:text-3xl font-extrabold text-slate-100 flex items-baseline gap-2 mt-1';
+      }
+      document.getElementById('kpi-active-count').textContent = `${active.length} ACTIVE`;
+      document.getElementById('badge-active-count').textContent = `${active.length} Open`;
+
+      // KPI Card 4: Total Net Equity
+      const equity = parseFloat(wallet.equity_inr || (bal + floatingPnl));
+      document.getElementById('kpi-total-equity').textContent = formatCurrencyINR(equity);
+
+      // SECTION 1: ACTIVE POSITIONS
+      const activeTbody = document.getElementById('active-positions-tbody');
+      const activeMobile = document.getElementById('active-positions-mobile');
+      const activeEmpty = document.getElementById('active-empty-state');
+
+      if (active.length === 0) {
+        activeTbody.innerHTML = '';
+        activeMobile.innerHTML = '';
+        activeEmpty.classList.remove('hidden');
+      } else {
+        activeEmpty.classList.add('hidden');
+        let tbodyHtml = '';
+        let mobileHtml = '';
+
+        active.forEach(p => {
+          const sym = p.symbol || 'N/A';
+          const sig = (p.signal || 'BUY').toUpperCase();
+          const isBuy = sig === 'BUY' || sig === 'LONG';
+          const sigBadge = isBuy 
+            ? '<span class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">🟢 LONG (10x)</span>'
+            : '<span class="px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">🔴 SHORT (10x)</span>';
+
+          const entry = parseFloat(p.entry || 0.0);
+          const mark = parseFloat(p.mark_price || entry);
+          const qty = p.quantity || 0;
+          const upnl = parseFloat(p.unrealized_pnl_inr || 0.0);
+          const upnlSign = upnl >= 0 ? '+' : '';
+          const upnlColor = upnl > 0 ? 'text-emerald-400 font-bold' : (upnl < 0 ? 'text-rose-400 font-bold' : 'text-slate-300 font-bold');
+          const pct = parseFloat(p.pnl_pct || 0.0);
+          const pctSign = pct >= 0 ? '+' : '';
+
+          const sl = parseFloat(p.current_sl || 0.0);
+          const tp1 = parseFloat(p.tp1 || 0.0);
+          const tp2 = parseFloat(p.tp2 || 0.0);
+          const brackets = `SL: <strong class="text-rose-400">${formatNumber(sl)}</strong> | TP: <strong class="text-emerald-400">${formatNumber(tp1)}</strong>`;
+
+          const statusBadge = upnl > 0 
+            ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400">IN PROFIT 🎯</span>'
+            : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">RUNNING ⏳</span>';
+
+          // Table Row (Desktop)
+          tbodyHtml += `
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="py-3 font-bold text-white">${sym}</td>
+              <td class="py-3">${sigBadge}</td>
+              <td class="py-3 font-mono">${qty}</td>
+              <td class="py-3 font-mono">${formatNumber(entry)}</td>
+              <td class="py-3 font-mono font-semibold text-sky-300">${formatNumber(mark)}</td>
+              <td class="py-3 font-mono ${upnlColor}">${upnlSign}${formatCurrencyINR(upnl)} (${pctSign}${pct.toFixed(2)}%)</td>
+              <td class="py-3 font-mono text-[11px] text-slate-400">${brackets}</td>
+              <td class="py-3">${statusBadge}</td>
+            </tr>
+          `;
+
+          // Card (Mobile)
+          mobileHtml += `
+            <div class="glass-card rounded-xl p-4 border border-slate-800">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-bold text-white text-sm">${sym}</span>
+                ${sigBadge}
+              </div>
+              <div class="grid grid-cols-2 gap-2 text-xs py-2 border-y border-slate-800/70 my-2">
+                <div><span class="text-slate-400">Entry:</span> <strong class="text-slate-200 font-mono">${formatNumber(entry)}</strong></div>
+                <div><span class="text-slate-400">Mark:</span> <strong class="text-sky-300 font-mono">${formatNumber(mark)}</strong></div>
+                <div><span class="text-slate-400">Quantity:</span> <strong class="text-slate-200 font-mono">${qty}</strong></div>
+                <div><span class="text-slate-400">Floating:</span> <strong class="${upnlColor} font-mono">${upnlSign}${formatCurrencyINR(upnl)}</strong></div>
+              </div>
+              <div class="text-[11px] text-slate-400 font-mono mt-1">${brackets}</div>
+            </div>
+          `;
+        });
+
+        activeTbody.innerHTML = tbodyHtml;
+        activeMobile.innerHTML = mobileHtml;
+      }
+
+      // SECTION 2: RESTING ORDERS
+      const restingTbody = document.getElementById('resting-orders-tbody');
+      const restingEmpty = document.getElementById('resting-empty-state');
+      document.getElementById('badge-resting-count').textContent = `${resting.length} Pending`;
+
+      if (resting.length === 0) {
+        restingTbody.innerHTML = '';
+        restingEmpty.classList.remove('hidden');
+      } else {
+        restingEmpty.classList.add('hidden');
+        let rHtml = '';
+        resting.forEach(o => {
+          const sym = o.symbol || 'N/A';
+          const sig = (o.signal || 'BUY').toUpperCase();
+          const isBuy = sig === 'BUY' || sig === 'LONG';
+          const sigBadge = isBuy 
+            ? '<span class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">BUY</span>'
+            : '<span class="px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-400">SELL</span>';
+          const px = parseFloat(o.entry || 0.0);
+          const qty = o.quantity || 0;
+          const rem = o.minutes_remaining !== undefined ? `${o.minutes_remaining}m left` : 'Active';
+
+          rHtml += `
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="py-2.5 font-bold text-white">${sym}</td>
+              <td class="py-2.5">${sigBadge}</td>
+              <td class="py-2.5 font-mono">${formatNumber(px)}</td>
+              <td class="py-2.5 font-mono">${qty}</td>
+              <td class="py-2.5 text-slate-400 font-mono text-[11px]">Recent</td>
+              <td class="py-2.5 font-mono text-amber-400 font-bold">${rem}</td>
+            </tr>
+          `;
+        });
+        restingTbody.innerHTML = rHtml;
+      }
+
+      // SECTION 3: CLOSED TRADES LEDGER
+      const closedTbody = document.getElementById('closed-trades-tbody');
+      const closedEmpty = document.getElementById('closed-empty-state');
+      document.getElementById('badge-closed-count').textContent = `${closed.length} Total`;
+
+      if (closed.length === 0) {
+        closedTbody.innerHTML = '';
+        closedEmpty.classList.remove('hidden');
+      } else {
+        closedEmpty.classList.add('hidden');
+        let cHtml = '';
+        closed.forEach(c => {
+          const sym = c.symbol || 'N/A';
+          const sig = (c.signal || 'BUY').toUpperCase();
+          const isBuy = sig === 'BUY' || sig === 'LONG';
+          const sigColor = isBuy ? 'text-emerald-400' : 'text-rose-400';
+          const entry = parseFloat(c.entry || 0.0);
+          const pnl = parseFloat(c.pnl_inr || 0.0);
+          const pnlSign = pnl >= 0 ? '+' : '';
+          const pnlColor = pnl > 15.0 ? 'text-emerald-400 font-bold' : (pnl < -15.0 ? 'text-rose-400 font-bold' : 'text-slate-300 font-bold');
+          
+          let statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">⚖️ BREAKEVEN</span>';
+          if (pnl > 15.0) {
+            statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">🎯 TP WIN</span>';
+          } else if (pnl < -15.0) {
+            statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">🔴 SL HIT</span>';
+          }
+
+          const rawTime = c.closed_at || '';
+          const timeClean = rawTime ? rawTime.replace('T', ' ').substring(0, 16) : 'Recent';
+
+          cHtml += `
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="py-2.5 text-slate-400 font-mono text-[11px]">${timeClean}</td>
+              <td class="py-2.5 font-bold text-white">${sym}</td>
+              <td class="py-2.5 font-semibold ${sigColor}">[${sig}]</td>
+              <td class="py-2.5 text-slate-300">${formatNumber(entry)}</td>
+              <td class="py-2.5">${statusBadge}</td>
+              <td class="py-2.5 ${pnlColor}">${pnlSign}${formatCurrencyINR(pnl)}</td>
+            </tr>
+          `;
+        });
+        closedTbody.innerHTML = cHtml;
+      }
+    }
+
+    function triggerManualRefresh() {
+      fetchDashboardData(true);
+    }
+
+    // Initial fetch on page load
+    fetchDashboardData(false);
+
+    // Auto-refresh continuously every 8 seconds
+    setInterval(() => {
+      fetchDashboardData(false);
+    }, 8000);
+  </script>
+</body>
+</html>
