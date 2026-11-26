@@ -526,9 +526,7 @@ class SharkExchangeExecutor:
         """
         Calculates position quantities with dynamic 2.0% available margin sizing.
         Enforces exchange minimum lot floors for BTC, ETH, SOL, XAU so orders are never rejected with Error 3010.
-        Adaptive TP:
-        - If ADX < 20 (Ranging/Chop) OR total_qty < 2 * min_lot: 100% exit at TP1
-        - If ADX >= 20 (Trending) AND total_qty >= 2 * min_lot: 70% at TP1, 30% runner at TP2
+        Unified 100% Full Exit at TP1 (zero runner retracement; tp2_qty=0.0, tp3_qty=0.0 retained for tuple compat).
         Returns (total_qty, tp1_qty, tp2_qty, tp3_qty, margin_usdt, notional_usdt).
         """
         clean_sym = clean_contract_symbol(symbol)
@@ -724,17 +722,17 @@ class SharkExchangeExecutor:
                 pos_dir_raw = str(pos_obj.get("positionType") or pos_obj.get("positionSide") or pos_obj.get("side") or pos_obj.get("type") or "").upper()
                 pos_dir = "BUY" if pos_dir_raw in ("LONG", "BUY") else "SELL"
 
-                # If new signal is in the SAME direction as existing runner
+                # If new signal is in the SAME direction as existing position
                 if pos_dir == sig_dir:
                     from state import get_latest_symbol_state
                     st_entry = get_latest_symbol_state(clean_sym)
                     tp1_hit = bool(st_entry and st_entry.get("tp1_hit"))
                     realized_pnl = float(pos_obj.get("realizedProfitInMarginAsset") or pos_obj.get("realizedProfit") or 0.0)
 
-                    # Only allow scale-in if TP1 (70%) was already booked or profit secured
+                    # Only allow scale-in if profit was already secured
                     if tp1_hit or realized_pnl > 15.0:
                         logger.info(
-                            f"🚀 TREND SCALE-IN PERMITTED: {clean_sym} [{sig_dir}] has booked TP1 (70%) / 30% runner active "
+                            f"🚀 TREND SCALE-IN PERMITTED: {clean_sym} [{sig_dir}] has secured profit "
                             f"(Realized PnL: ₹{realized_pnl:,.2f}). Allowing scale-in entry order to ride the trend!"
                         )
                         return False
@@ -994,11 +992,13 @@ class SharkExchangeExecutor:
                     st_updates["cur_sl"] = clean_new_sl
                 if tp_updated:
                     st_updates["tp1"] = clean_new_tp
+                    st_updates["tp2"] = clean_new_tp
+                    st_updates["tp3"] = clean_new_tp
                 update_latest_shark_state(clean_sym, st_updates)
 
                 from telegram_bot import send_text_alert
                 sl_info = f"🛡️ <b>SL Trailed:</b> ${current_sl} → <b>${clean_new_sl}</b> (Risk Locked)\n" if sl_updated else f"🛡️ <b>SL:</b> ${current_sl}\n"
-                tp_info = f"🎯 <b>TP Trailed:</b> ${current_tp} → <b>${clean_new_tp}</b> (Target Extended)\n" if tp_updated else f"🎯 <b>TP:</b> ${current_tp}\n"
+                tp_info = f"🎯 <b>100% TP Trailed:</b> ${current_tp} → <b>${clean_new_tp}</b> (Full Exit Extended)\n" if tp_updated else f"🎯 <b>100% TP:</b> ${current_tp}\n"
                 msg = (
                     f"🔄 <b>TREND CONTINUATION: SAME COIN TRAIL UPDATE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1006,9 +1006,9 @@ class SharkExchangeExecutor:
                     f"<b>Entry Price:</b> ${format_price(pos_entry, clean_sym)}\n"
                     f"{sl_info}"
                     f"{tp_info}"
-                    f"<b>Quantity:</b> {pos_qty} (100% Position Protected)\n"
+                    f"<b>Quantity:</b> {pos_qty} (100% Position Exit @ Trailed TP)\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<i>New continuation signal detected. SL locked in tighter & TP extended to ride the bigger trend!</i>"
+                    f"<i>New continuation signal detected. SL locked in tighter & 100% TP extended to capture full trend profit!</i>"
                 )
                 await self.send_alert(msg)
                 return True
@@ -1420,10 +1420,6 @@ class SharkExchangeExecutor:
                         tp1 = round_price(clean_sym, trailed_tp_candidate)
                     else:
                         tp1 = round_price(clean_sym, fill_price + target_r * risk)
-                    if not tp2 or tp2 <= tp1:
-                        tp2 = round_price(clean_sym, max(tp1 * 1.003, fill_price + 3.5 * risk))
-                    if not tp3 or tp3 <= tp2:
-                        tp3 = round_price(clean_sym, max(tp2 * 1.003, fill_price + 3.5 * risk))
                 else:  # SHORT
                     if actual_sl <= fill_price and not is_cont_trailed:
                         actual_sl = round_price(clean_sym, fill_price + risk)
@@ -1431,23 +1427,21 @@ class SharkExchangeExecutor:
                         tp1 = round_price(clean_sym, trailed_tp_candidate)
                     else:
                         tp1 = round_price(clean_sym, fill_price - target_r * risk)
-                    if not tp2 or tp2 >= tp1:
-                        tp2 = round_price(clean_sym, min(tp1 * 0.997, fill_price - 3.5 * risk))
-                    if not tp3 or tp3 >= tp2:
-                        tp3 = round_price(clean_sym, min(tp2 * 0.997, fill_price - 3.5 * risk))
+                tp2 = tp1
+                tp3 = tp1
 
-                # Update state so downstream monitoring uses correct direction TPs
+                # Update state so downstream monitoring uses unified 100% TP1
                 from state import update_latest_shark_state
-                st_updates = {"tp1": tp1, "tp2": tp2, "tp3": tp3}
+                st_updates = {"tp1": tp1, "tp2": tp1, "tp3": tp1}
                 if not is_cont_trailed or not (st_entry_check and st_entry_check.get("initial_sl")):
                     st_updates["initial_sl"] = actual_sl
                 update_latest_shark_state(clean_sym, st_updates)
 
                 if pos_id and actual_qty > 0:
-                    logger.info(f"place_tp_limits: Placing SL={actual_sl} + 3 TPs ({tp1}/{tp2}/{tp3}) for {clean_sym} fill@{fill_price} qty={actual_qty}")
+                    logger.info(f"place_tp_limits: Placing SL={actual_sl} + 100% TP1={tp1} ({target_r:.1f}R) for {clean_sym} fill@{fill_price} qty={actual_qty}")
                     return await self.execute_fill_protection(
                         session, clean_sym, pos_direction, pos_id, actual_qty,
-                        sl=actual_sl, tp1=tp1, tp2=tp2, tp3=tp3, adx=adx, fill_price=fill_price
+                        sl=actual_sl, tp1=tp1, tp2=tp1, tp3=tp1, adx=adx, fill_price=fill_price
                     )
             logger.info(f"place_tp_limits: No live position on Shark for {clean_sym} (paper/pending fill).")
         except Exception as e:
@@ -1469,26 +1463,17 @@ class SharkExchangeExecutor:
         fill_price: float = None
     ) -> bool:
         """
-        Attaches TP1 (70%), TP2 (30%), and 1 Stop-Loss order directly to the open position
-        using placeType: 'POSITION' (requires ₹0 additional margin!).
-        - TP1: 70% Qty @ tp1 (LIMIT reduce-only)
-        - TP2: 30% Qty @ target_tp2 (LIMIT reduce-only)
-        - SL:  100% Qty @ sl (STOP_MARKET reduce-only)
+        Attaches a single 100% TP1 (LIMIT reduce-only) and 1 Stop-Loss order (STOP_MARKET reduce-only)
+        directly to the open position using placeType: 'POSITION' (requires zero additional margin).
         """
         clean_sym = clean_contract_symbol(symbol)
         exit_side = "SELL" if direction.upper() in ("BUY", "LONG") else "BUY"
 
         clean_sl = round_price(clean_sym, sl)
         clean_tp1 = round_price(clean_sym, tp1)
-        clean_tp2 = round_price(clean_sym, tp2)
-        clean_tp3 = round_price(clean_sym, tp3) if tp3 is not None else clean_tp2
 
-        # 100% Full Profit Booking Model at TP1 (1.5R Target)
-        # Positions are 100% closed at 1.5R target with zero runner retracement!
-        target_tp2 = clean_tp2 or clean_tp3
+        # Unified 100% Full Profit Booking Model at TP1 (no runner retracement)
         tp1_qty = actual_qty
-        tp2_qty = 0.0
-        tp3_qty = 0.0
 
         # 1. Place Stop-Loss Order (Shark POSITION bracket SL)
         sl_payload = {
@@ -1516,7 +1501,7 @@ class SharkExchangeExecutor:
         else:
             logger.info(f"Fill Protection SL for {clean_sym}: Status {status_sl} - {res_sl}")
 
-        # 0. Clean up any existing TP bracket/limit orders on position to enforce fresh split
+        # 0. Clean up any existing TP bracket/limit orders on position to enforce single 100% TP1
         try:
             cur_orders = await self.get_open_orders(session, symbol=clean_sym)
             for o in cur_orders:
@@ -1526,19 +1511,15 @@ class SharkExchangeExecutor:
                 if is_tp:
                     cid_tp = o.get("clientOrderId")
                     if cid_tp:
-                        logger.info(f"Purging old TP order {cid_tp} for {clean_sym} to enforce fresh split")
+                        logger.info(f"Purging old TP order {cid_tp} for {clean_sym} to enforce clean 100% TP1")
                         await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid_tp)})
         except Exception as e_clean:
             logger.debug(f"TP bracket cleanup check error for {clean_sym}: {e_clean}")
 
-        # Track placed TP orders for 1-TP fallback
+        # 2. Place single 100% Take-Profit 1 Order as POSITION LIMIT Reduce-Only
         tp1_order_placed = False
-        tp1_cid = None
-        tp2_order_placed = False
-
-        # 2. Place Take-Profit 1 Order as POSITION LIMIT Reduce-Only
+        tp1_valid = (exit_side == "SELL" and clean_tp1 > clean_sl) or (exit_side == "BUY" and clean_tp1 < clean_sl)
         if tp1_qty > 0:
-            tp1_valid = (exit_side == "SELL" and clean_tp1 > clean_sl) or (exit_side == "BUY" and clean_tp1 < clean_sl)
             if not tp1_valid:
                 logger.warning(f"TP1 price {clean_tp1} appears invalid for {clean_sym} {exit_side} — skipping")
             else:
@@ -1555,60 +1536,12 @@ class SharkExchangeExecutor:
                 st, res = await self.shark_post(session, "/v1/order/place-order", tp1_payload)
                 if st in (200, 201):
                     tp1_order_placed = True
-                    tp1_cid = res.get("clientOrderId") if isinstance(res, dict) else None
-                    logger.info(f"TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (LIMIT)")
+                    logger.info(f"100% TP1 placed for {clean_sym} at {clean_tp1} qty={tp1_qty} (LIMIT)")
                 else:
                     logger.warning(f"TP1 failed for {clean_sym}: {res}")
 
-        # 3. Place Take-Profit 2 Order (30% Runner) as POSITION LIMIT Reduce-Only
-        if tp2_qty > 0:
-            tp2_valid = (exit_side == "SELL" and target_tp2 > clean_sl and target_tp2 > clean_tp1) or \
-                        (exit_side == "BUY" and target_tp2 < clean_sl and target_tp2 < clean_tp1)
-            if not tp2_valid:
-                logger.warning(f"TP2 price {target_tp2} appears invalid for {clean_sym} {exit_side} — skipping")
-            else:
-                tp2_payload = {
-                    "placeType": "POSITION",
-                    "positionId": pos_id,
-                    "reduceOnly": True,
-                    "type": "LIMIT",
-                    "side": exit_side,
-                    "symbol": clean_sym,
-                    "quantity": tp2_qty,
-                    "price": target_tp2
-                }
-                st2, res2 = await self.shark_post(session, "/v1/order/place-order", tp2_payload)
-                if st2 in (200, 201):
-                    tp2_order_placed = True
-                    logger.info(f"TP2 placed for {clean_sym} at {target_tp2} qty={tp2_qty} (30% Runner LIMIT)")
-                else:
-                    logger.warning(f"TP2 failed for {clean_sym}: {res2}")
-
-        # ── IRONCLAD BRACKET FALLBACK: If 2 TPs could not be fully placed, fallback to 1 TP (100%) at TP1 ──
-        if tp2_qty > 0 and not tp2_order_placed:
-            logger.warning(f"🛡️ 1-TP FALLBACK: {clean_sym} unable to support 2nd TP ({tp2_qty}). Enforcing 1 single TP (100% position: {actual_qty}) at TP1 ({clean_tp1})!")
-            if tp1_order_placed and tp1_cid:
-                # Cancel the partial TP1 order to place the full 100% order
-                await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(tp1_cid)})
-            
-            full_tp_payload = {
-                "placeType": "POSITION",
-                "positionId": pos_id,
-                "reduceOnly": True,
-                "type": "LIMIT",
-                "side": exit_side,
-                "symbol": clean_sym,
-                "quantity": actual_qty,
-                "price": clean_tp1
-            }
-            st_full, res_full = await self.shark_post(session, "/v1/order/place-order", full_tp_payload)
-            if st_full in (200, 201):
-                logger.info(f"🛡️ 1-TP FALLBACK SUCCESS: {clean_sym} protected with 1 single TP for 100% ({actual_qty}) at {clean_tp1}")
-            else:
-                logger.error(f"🚨 CRITICAL: 1-TP Fallback failed for {clean_sym}: {res_full}")
-        elif not tp1_order_placed and not tp2_order_placed:
-            # Emergency: Neither TP placed, try placing 1 single TP for full 100% quantity
-            logger.warning(f"🚨 EMERGENCY: Neither TP placed for {clean_sym}. Placing emergency 1-TP for full {actual_qty} at {clean_tp1}!")
+        if not tp1_order_placed and tp1_valid and tp1_qty > 0:
+            logger.warning(f"🚨 EMERGENCY: TP1 not placed for {clean_sym}. Placing emergency 1-TP for full {actual_qty} at {clean_tp1}!")
             emergency_tp = {
                 "placeType": "POSITION",
                 "positionId": pos_id,
@@ -1621,10 +1554,17 @@ class SharkExchangeExecutor:
             }
             await self.shark_post(session, "/v1/order/place-order", emergency_tp)
 
-        # 4. Safe Telegram Fill Alert (Fires only once per unique positionId on broker)
+        # 3. Safe Telegram Fill Alert (Fires only once per unique positionId on broker)
         if pos_id and pos_id not in self._notified_filled_positions:
             self._notified_filled_positions.add(pos_id)
             try:
+                from state import get_latest_symbol_state
+                st_fill = get_latest_symbol_state(clean_sym)
+                disp_r = _resolve_target_r(st_fill)
+                if (not st_fill or not st_fill.get("target_r")) and fill_price and clean_sl and fill_price != clean_sl:
+                    disp_r = round(abs(clean_tp1 - fill_price) / abs(fill_price - clean_sl), 1)
+                is_trailed_tp = bool(st_fill and st_fill.get("continuation_trailed"))
+                tp_r_label = f"{disp_r:.1f}R Trailed - 100% Full Exit" if is_trailed_tp else f"{disp_r:.1f}R - 100% Full Booking"
                 bal_summary = await self.get_wallet_balance_summary(session)
                 bal_block = f"\n\n{bal_summary}" if bal_summary else ""
                 px_disp = f"{fill_price:,.4f}" if fill_price else "Limit Entry"
@@ -1636,7 +1576,7 @@ class SharkExchangeExecutor:
                     f"🎯 <b>Fill Price:</b> {px_disp}\n"
                     f"📦 <b>Active Quantity:</b> {actual_qty} contracts\n"
                     f"🛡️ <b>Stop-Loss Armed:</b> {clean_sl}\n"
-                    f"🎯 <b>Take-Profit Target:</b> {clean_tp1} (1.5R - 100% Full Booking)"
+                    f"🎯 <b>100% Take-Profit Target:</b> {clean_tp1} ({tp_r_label})"
                     f"{bal_block}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>Status: Active position live on Shark Exchange. Real capital in play!</i>"
@@ -1955,14 +1895,14 @@ class SharkExchangeExecutor:
                         f"<b>Quantity:</b> {pos_qty_real}\n"
                         f"<b>Total Position PnL:</b> <b>{sign}₹{pnl_inr:,.2f} INR</b> ({sign}${pnl_usdt_close:.2f} USDT) 💰\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<i>100% Position Closed at 1.5R Target on Shark Exchange! Full Cash Profit Locked in Wallet.</i>"
+                        f"<i>100% Position Closed ({reason}) on Shark Exchange! Full Cash Profit Locked in Wallet.</i>"
                     )
                 elif "12-HR" in reason.upper() or "STALE" in reason.upper():
                     msg = (
-                        f"⏳ <b>SHARK RUNNER CLOSED (12-HR STALE TRADE RULE)</b>\n"
+                        f"⏳ <b>SHARK POSITION CLOSED (12-HR STALE TRADE RULE)</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"<b>Asset:</b> {clean_sym}\n"
-                        f"<b>Reason:</b> 12 hours elapsed after TP1 hit without hitting TP2 or Breakeven SL.\n"
+                        f"<b>Reason:</b> 12 hours elapsed without hitting Target or Breakeven SL.\n"
                         f"🎯 <b>Exit Price:</b> {format_price(exit_p, clean_sym)}\n"
                         f"💰 <b>Estimated PnL:</b> {pnl_str}\n"
                         f"💡 <i>Freed broker margin for fresh high-momentum setups!</i>\n"
@@ -2130,7 +2070,7 @@ class SharkExchangeExecutor:
                 if s_local not in live_syms and s_local not in entry_syms and (now_ts - ts_val >= 120.0):
                     self._session_active_symbols.pop(s_local, None)
 
-            if not positions and not all_orders:
+            if not positions and not all_orders and not self._known_live_positions:
                 return
 
             orders_by_sym = {}
@@ -2161,6 +2101,8 @@ class SharkExchangeExecutor:
                             tp1_was_hit = bool(st_sym and st_sym.get("tp1_hit"))
                             tp2_was_hit = bool(st_sym and st_sym.get("tp2_hit"))
                             be_shield_hit = bool(st_sym and (st_sym.get("be_hit_time_shield") or st_sym.get("be_hit")))
+                            is_trailed_tp = bool(st_sym and st_sym.get("continuation_trailed"))
+                            trail_suffix = " (TRAILED TARGET)" if is_trailed_tp else ""
 
                             pnl_note = ""
                             is_sl_outcome = False
@@ -2169,14 +2111,10 @@ class SharkExchangeExecutor:
                                 is_sl_outcome = True
                             elif abs(pnl_inr) <= 15.0:
                                 status_txt = "🛡️ <b>REAL LIVE TRADE: BREAKEVEN EXIT (CTC) 🤝</b>"
-                            elif tp2_was_hit or pnl_inr > 15.0:
-                                if tp1_was_hit:
-                                    status_txt = "🛡️ <b>REAL LIVE TRADE: RUNNER CLOSED (TP1 PROFIT SECURED) 🤝</b>"
-                                    pnl_note = f"\n💡 <i>Breakdown: 70% profit was credited at TP1 earlier. The remaining runner closed at entry CTC. Total net profit: +₹{pnl_inr:,.2f} INR.</i>"
-                                elif tp2_was_hit:
-                                    status_txt = "🎯 <b>REAL LIVE TRADE: FULL TAKE PROFIT (TP2) HIT 🏆</b>"
-                                else:
-                                    status_txt = "🎯 <b>REAL LIVE TRADE: TAKE PROFIT HIT ✅</b>"
+                            elif tp1_was_hit or tp2_was_hit or pnl_inr > 15.0:
+                                status_txt = f"🎯 <b>REAL LIVE TRADE: 100% TAKE PROFIT HIT{trail_suffix} ✅</b>"
+                                if is_trailed_tp:
+                                    pnl_note = f"\n🚀 <i>100% full position closed at trailed Target! Net Profit: +₹{pnl_inr:,.2f} INR.</i>"
                             else:
                                 status_txt = "🛑 <b>REAL LIVE TRADE: STOP-LOSS HIT ❌</b>"
                                 is_sl_outcome = True
@@ -2421,44 +2359,43 @@ class SharkExchangeExecutor:
                     except Exception as e_sbe:
                         logger.debug(f"Anti-shock BE check error for {sym}: {e_sbe}")
 
-                if not tp1 or not tp2 or not tp3:
+                # Active Trade TP1 Target Resolution (2.2R for Squeeze/Runaway/RangeBreak, 1.5R standard — 100% Unified Exit)
+                target_r = _resolve_target_r(state_entry)
+                if not tp1:
                     if direction == "BUY":
-                        tp1 = tp1 or round_price(sym, entry_price + 1.5 * risk_step)
-                        tp2 = tp2 or round_price(sym, entry_price + 5.0 * risk_step)
-                        tp3 = tp2
+                        tp1 = round_price(sym, entry_price + target_r * risk_step)
                     else:
-                        tp1 = tp1 or round_price(sym, entry_price - 1.5 * risk_step)
-                        tp2 = tp2 or round_price(sym, entry_price - 5.0 * risk_step)
-                        tp3 = tp2
+                        tp1 = round_price(sym, entry_price - target_r * risk_step)
+                tp2 = tp1
+                tp3 = tp1
 
-                # Active Trade TP1 Re-Alignment: Ensure TP1 has minimum target floor (2.2R for Breakdown continuation, 1.5R standard)
-                target_r = 1.5
-                if state_entry:
-                    target_r = float(state_entry.get("target_r") or (2.2 if "1H_RangeBreak" in str(state_entry.get("unique_key", "")) or "Squeeze" in str(state_entry.get("unique_key", "")) else 1.5))
-
-                if not (state_entry and state_entry.get("tp1_hit")):
+                if not (state_entry and (state_entry.get("tp1_hit") or state_entry.get("continuation_trailed"))):
                     if direction == "BUY":
                         if not tp1 or tp1 < (entry_price + (target_r - 0.02) * risk_step):
                             new_tp1 = round_price(sym, entry_price + target_r * risk_step)
                             logger.info(f"🎯 MINIMUM {target_r}R ENFORCED [BUY]: {sym} TP1 {tp1} brought to minimum {target_r}R: {new_tp1}")
-                            tp1 = new_tp1
+                            tp1 = tp2 = tp3 = new_tp1
                             from state import _load, _save
                             st_map = _load()
                             for k_st in list(st_map.keys()):
                                 if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                     st_map[k_st]["tp1"] = tp1
+                                    st_map[k_st]["tp2"] = tp1
+                                    st_map[k_st]["tp3"] = tp1
                                     _save(st_map)
                                     break
                     else:
                         if not tp1 or tp1 > (entry_price - (target_r - 0.02) * risk_step):
                             new_tp1 = round_price(sym, entry_price - target_r * risk_step)
                             logger.info(f"🎯 MINIMUM {target_r}R ENFORCED [SELL]: {sym} TP1 {tp1} brought to minimum {target_r}R: {new_tp1}")
-                            tp1 = new_tp1
+                            tp1 = tp2 = tp3 = new_tp1
                             from state import _load, _save
                             st_map = _load()
                             for k_st in list(st_map.keys()):
                                 if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                     st_map[k_st]["tp1"] = tp1
+                                    st_map[k_st]["tp2"] = tp1
+                                    st_map[k_st]["tp3"] = tp1
                                     _save(st_map)
                                     break
 
@@ -2494,17 +2431,21 @@ class SharkExchangeExecutor:
                             logger.info(
                                 f"🎯 TP GUARD FALLBACK: Executing 100% MARKET profit booking for {sym} [{direction}] (qty={pos_qty_abs})."
                             )
-                            closed_ok = await self.close_position_market(session, sym, reason="TP1 HIT (1.5R TARGET)")
+                            is_trailed_m = bool(state_entry and state_entry.get("continuation_trailed"))
+                            mkt_reason = f"TP1 HIT ({target_r:.1f}R {'TRAILED ' if is_trailed_m else ''}100% TARGET)"
+                            closed_ok = await self.close_position_market(session, sym, reason=mkt_reason)
                             if closed_ok:
                                 self._tp_touch_timer.pop(sym, None)
                                 if state_entry:
                                     state_entry["tp1_hit"] = True
+                                    state_entry["tp2_hit"] = True
                                     state_entry["outcome"] = "TP1_HIT_100_PERCENT"
                                     from state import _load, _save
                                     st_map = _load()
                                     for k_st in list(st_map.keys()):
                                         if to_shark_symbol(k_st.split("|")[0]) == sym and st_map[k_st].get("shark_order_placed"):
                                             st_map[k_st]["tp1_hit"] = True
+                                            st_map[k_st]["tp2_hit"] = True
                                             st_map[k_st]["outcome"] = "TP1_HIT_100_PERCENT"
                                             _save(st_map)
                                             break
@@ -2547,21 +2488,19 @@ class SharkExchangeExecutor:
                                 _save(st_map)
                                 break
 
-                # Fire step-trailing SL on genuine TP hit transitions (supports both 70/30 2-TP and legacy 3-TP)
+                # Fire unified 100% TP1 exit handler when TP order fills on exchange
                 if tps_hit > 0:
                     logger.info(f"🎯 TP MONITOR: {sym} [{direction}] TPs {prev_tp_count}→{current_tp_count}")
 
-                    # STRICT TRIPLE-VERIFICATION FOR TP1:
-                    # 1. Price MUST have reached TP1
-                    # 2. Position quantity on exchange MUST have reduced (pos_qty_abs <= orig_qty * 0.60) OR broker confirmed realized profit > 0
+                    # STRICT TRIPLE-VERIFICATION FOR PARTIAL FILL (only if open position remains with extra TP order):
                     is_genuine_tp1_fill = (price_at_tp1 and (pos_qty_abs <= orig_qty * 0.60 or realized_pnl_inr > 0))
 
-                    # 1. TP1 Hit: 70% Booked (transition 2→1 in 70/30 model, or 3→2 in legacy)
+                    # 1. Partial TP reduction (legacy multi-TP safety)
                     if (not state_entry or not state_entry.get("tp1_hit")) and current_tp_count >= 1:
                         if is_genuine_tp1_fill:
-                            logger.info(f"  → TP1 HIT CONFIRMED (70% Booked on Exchange, Qty {orig_qty}→{pos_qty_abs}): trailing SL to CTC")
+                            logger.info(f"  → PARTIAL TP1 FILL CONFIRMED (Qty {orig_qty}→{pos_qty_abs}): trailing SL to CTC")
                             await self.update_trailing_sl_on_tp_hit(
-                                session, sym, "TP1", entry_price, tp1, tp2, tp3)
+                                session, sym, "TP1", entry_price, tp1, tp1, tp1)
                         else:
                             logger.info(
                                 f"  → TP order count shifted for {sym} ({prev_tp_count}→{current_tp_count}) "
@@ -2569,20 +2508,20 @@ class SharkExchangeExecutor:
                                 f"Ignoring false trigger (orders refreshing/re-healing)."
                             )
 
-                    # 2. Final Exit: 0 TPs remaining
+                    # 2. Final 100% Exit: 0 TPs remaining
                     elif current_tp_count == 0:
                         if pos_qty_abs == 0:
-                            logger.info(f"  → FULL WIN: position closed on exchange, full trade complete")
+                            logger.info(f"  → 100% FULL WIN: position closed on exchange at target TP1={tp1}")
                             await self.update_trailing_sl_on_tp_hit(
-                                session, sym, "TP2", entry_price, tp1, tp2, tp2)
+                                session, sym, "TP1", entry_price, tp1, tp1, tp1)
                         else:
-                            logger.warning(f"⚠️ {sym}: 0 TPs while position is STILL OPEN (qty={pos_qty_abs}) — auto-healing TP limit order now!")
+                            logger.warning(f"⚠️ {sym}: 0 TPs while position is STILL OPEN (qty={pos_qty_abs}) — auto-healing 100% TP1 limit order now!")
                             st_heal = get_latest_symbol_state(sym)
                             sl_val = float(st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price)
                             await self.place_tp_limits(
-                                session, sym, direction, entry_price, tp1, tp2, tp3, initial_sl=sl_val)
+                                session, sym, direction, entry_price, tp1, tp1, tp1, initial_sl=sl_val)
 
-                # ── USER DIRECTIVE: Fixed 1.5R TP based on SL. Trailing ONLY occurs if a NEW continuation signal arrives for the same coin (handled in trail_position_on_new_signal).
+                # ── USER DIRECTIVE: Fixed 100% TP1 (1.5R / 2.2R) based on SL. Trailing ONLY occurs if a NEW continuation signal arrives for the same coin (handled in trail_position_on_new_signal).
                 # No artificial automated price-ladder pushing TP away, ensuring clean 100% profit booking at target!
 
                 # SL GUARD: Ensure SL exists and enforces safe liquidation floor & distance for live positions
@@ -2691,7 +2630,7 @@ class SharkExchangeExecutor:
                         sl_from_order = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
                         sl_val = sl_from_order or float((st_heal.get("cur_sl") or st_heal.get("initial_sl") or entry_price) if st_heal else entry_price)
                         await self.place_tp_limits(
-                            session, sym, direction, entry_price, calc_tp1, tp2, tp3, initial_sl=sl_val)
+                            session, sym, direction, entry_price, calc_tp1, calc_tp1, calc_tp1, initial_sl=sl_val)
                         self._tp_sl_heal_lock[sym + "_tp"] = time.time()
                         if has_distant_tp1:
                             self._tp_sl_heal_lock[realigned_key] = True
@@ -2715,14 +2654,15 @@ class SharkExchangeExecutor:
         tp3: float = None
     ) -> None:
         """
-        Elite 70/30 Profit Booking Engine:
-        - TP1 Hit: 70% Profit Booked. Moves SL to +0.4R Guaranteed Profit Floor for remaining 30% runner.
-        - TP3 Hit: Remaining 30% Runner Booked (Full Win). Cancels remaining SL.
-        Uses REAL Shark Exchange position data for accurate PnL reporting.
+        Unified 100% Profit Booking Engine:
+        - TP1 Hit (initial or continuation-trailed): 100% Profit Booked. Cancels remaining SL.
+        - Uses REAL Shark Exchange position/state data for accurate PnL reporting.
         """
         clean_sym = clean_contract_symbol(symbol)
 
         # --- Fetch REAL position data from Shark Exchange ---
+        pos             = None
+        direction       = None
         real_qty        = 0.0
         real_entry      = entry
         real_unreal_pnl = 0.0
@@ -2741,19 +2681,28 @@ class SharkExchangeExecutor:
                 elif pos_dir_raw in ("SHORT", "SELL"):
                     direction = "SELL"
                 else:
-                    # Fallback: quantity sign or tp1/entry comparison
                     raw_qty_signed = float(pos.get("quantity") or pos.get("positionAmount") or 0)
-                    direction = "BUY" if raw_qty_signed > 0 else ("SELL" if raw_qty_signed < 0 else ("BUY" if tp1 > entry else "SELL"))
+                    direction = "BUY" if raw_qty_signed > 0 else ("SELL" if raw_qty_signed < 0 else None)
         except Exception as e:
             logger.warning(f"Could not fetch live position for {clean_sym}: {e}")
-            direction = "BUY" if tp1 > entry else "SELL"
 
         from state import get_latest_symbol_state, _load, _save
         state_entry = get_latest_symbol_state(clean_sym)
+        if not direction:
+            st_sig = str(state_entry.get("signal") or "").upper() if state_entry else ""
+            if st_sig in ("LONG", "BUY"):
+                direction = "BUY"
+            elif st_sig in ("SHORT", "SELL"):
+                direction = "SELL"
+            else:
+                direction = "BUY" if tp1 > entry else "SELL"
         initial_sl = float(state_entry.get("initial_sl") or 0) if state_entry else 0
 
         initial_qty, tp1_qty, _, tp3_qty, _, _ = self.calculate_position_size(clean_sym, real_entry, sl_price=initial_sl)
-        if initial_qty <= 0:
+        state_qty = float((state_entry.get("total_qty") if state_entry else 0) or 0)
+        if state_qty > 0 and real_qty <= 0:
+            initial_qty = state_qty
+        elif initial_qty <= 0:
             initial_qty = real_qty if real_qty > 0 else 1.0
 
         # USER DIRECTIVE: 100% Full Profit Booking at TP1 (No 70/30, No Runner Retracement)
@@ -2767,41 +2716,45 @@ class SharkExchangeExecutor:
             else:
                 return qty * (entry_px - exit_px)
 
-        target_tp3 = tp3 if tp3 and tp3 > 0 else (tp2 if tp2 and tp2 > 0 else tp1)
+        effective_tp = tp1 if tp1 and tp1 > 0 else (tp2 if tp2 and tp2 > 0 else tp3)
+        target_r = _resolve_target_r(state_entry)
+        is_trailed_tp = bool(state_entry and state_entry.get("continuation_trailed"))
+        actual_r = (
+            round(abs(effective_tp - real_entry) / abs(real_entry - initial_sl), 1)
+            if (initial_sl and initial_sl != real_entry and effective_tp)
+            else target_r
+        )
+        target_r_str = f"TRAILED {actual_r:.1f}R" if is_trailed_tp else f"{target_r:.1f}R"
 
         if tp_stage == "TP1":
-            # 1. 70% Profit Booked at TP1
+            # 100% Full Profit Booked at TP1 (or Trailed Continuation TP1)
             realized_inr = float(pos.get("realizedProfitInMarginAsset") or 0.0) if pos else 0.0
             realized_usd = float(pos.get("realizedProfit") or 0.0) if pos else 0.0
             if realized_inr > 0:
                 pnl_inr = realized_inr
                 pnl_usdt = realized_usd if realized_usd > 0 else (realized_inr / self.usd_inr_rate)
             else:
-                pnl_usdt = calc_pnl(tp1_qty, tp1, real_entry, direction)
+                pnl_usdt = calc_pnl(tp1_qty, effective_tp, real_entry, direction)
                 pnl_inr  = pnl_usdt * self.usd_inr_rate
-            runner_qty = real_qty if (real_qty > 0 and real_qty < initial_qty * 0.85) else tp3_qty
+            runner_qty = real_qty if (real_qty > 0 and real_qty < initial_qty * 0.85) else 0.0
 
-            # 2. Shift SL to Cost-to-Cost (+0.4% / +0.4R Guaranteed Profit Floor)
+            # Compute safe profit-floor SL only if partial quantity somehow remains open
             risk = abs(real_entry - initial_sl) if (initial_sl and initial_sl != real_entry) else (real_entry * 0.012)
             profit_lock_dist = max(real_entry * 0.0040, 0.40 * risk)
             if direction == "BUY":
-                # Entry + 0.40% / +0.4R Guaranteed Profit Floor (covers exchange taker fees and locks profit)
                 target_sl = real_entry + profit_lock_dist
-                trailed_sl = round_price(clean_sym, min(target_sl, tp1 * 0.998))
+                trailed_sl = round_price(clean_sym, min(target_sl, effective_tp * 0.998))
             else:
-                # Entry - 0.40% / +0.4R Guaranteed Profit Floor (covers exchange taker fees and locks profit)
                 target_sl = real_entry - profit_lock_dist
-                trailed_sl = round_price(clean_sym, max(target_sl, tp1 * 1.002))
+                trailed_sl = round_price(clean_sym, max(target_sl, effective_tp * 1.002))
 
-            # Clamp with Liquidation Shield
             safe_trailed_sl = enforce_sl_above_liquidation(clean_sym, real_entry, trailed_sl, direction, self.leverage, live_liq, is_trailed=True)
 
-            # 3. Modify Stop-Loss order on Shark Exchange
             if runner_qty > 0:
-                logger.info(f"🎯 TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Runner qty={runner_qty})")
+                logger.info(f"🎯 PARTIAL TP1 HIT: Modifying SL for {clean_sym} to CTC (+0.4% Profit Floor) {safe_trailed_sl} (Remaining qty={runner_qty})")
                 await self.modify_stop_loss(session, clean_sym, direction, safe_trailed_sl, runner_qty, is_trailed=True)
             else:
-                logger.info(f"🎯 100% TP HIT: Position fully closed for {clean_sym}. Cleaning up resting SL orders.")
+                logger.info(f"🎯 100% TP HIT ({target_r_str}): Position fully closed for {clean_sym} at {effective_tp}. Cleaning up resting SL orders.")
                 try:
                     open_orders = await self.get_open_orders(session, symbol=clean_sym)
                     for o in open_orders:
@@ -2811,14 +2764,19 @@ class SharkExchangeExecutor:
                 except Exception as e_c:
                     logger.warning(f"Error cleaning SL after 100% TP hit for {clean_sym}: {e_c}")
 
-            # 4. Update persistent state
+            # Update persistent state
+            now_iso = datetime.now(timezone.utc).isoformat()
             st_map = _load()
             for k_st in list(st_map.keys()):
                 if to_shark_symbol(k_st.split("|")[0]) == clean_sym and st_map[k_st].get("shark_order_placed"):
                     st_map[k_st]["tp1_hit"] = True
                     st_map[k_st]["cur_sl"] = safe_trailed_sl
                     st_map[k_st]["trail_stage"] = 0
-                    st_map[k_st]["tp1_hit_at"] = datetime.now(timezone.utc).isoformat()
+                    st_map[k_st]["tp1_hit_at"] = now_iso
+                    if runner_qty <= 0:
+                        st_map[k_st]["tp2_hit"] = True
+                        st_map[k_st]["tp2_hit_at"] = now_iso
+                        st_map[k_st]["outcome"] = "TP1_HIT_100_PERCENT"
                     _save(st_map)
                     break
 
@@ -2826,47 +2784,41 @@ class SharkExchangeExecutor:
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             conf_tag = " [Exchange Verified]" if realized_inr > 0 else ""
 
-            target_r = 1.5
-            if state_entry:
-                target_r = float(state_entry.get("target_r") or (2.2 if "1H_RangeBreak" in str(state_entry.get("unique_key", "")) or "Squeeze" in str(state_entry.get("unique_key", "")) else 1.5))
-            target_r_str = f"{target_r:.1f}R" if abs(target_r - 1.5) > 0.1 else "1.5R"
-
             if runner_qty <= 0:
                 msg = (
-                    f"🎯 <b>REAL LIVE TRADE: TARGET ({target_r_str}) HIT ✅ (100% PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 <b>REAL LIVE TRADE: 100% TARGET ({target_r_str}) HIT ✅ (FULL PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<b>Asset:</b> {clean_sym} [{direction}]\n"
-                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(tp1)}\n"
-                    f"<b>Realized Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
+                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(effective_tp)}\n"
+                    f"<b>Realized 100% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
                     f"<b>Status:</b> 100% position closed. Lingering SL cancelled.{bal_block}"
                 )
             else:
                 msg = (
-                    f"🎯 <b>REAL LIVE TRADE: TP1 HIT ✅ (70% PROFIT SECURED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 <b>REAL LIVE TRADE: PARTIAL TP1 HIT ✅ (PROFIT FLOOR ARMED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<b>Asset:</b> {clean_sym} [{direction}]\n"
-                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>TP1:</b> {format_price(tp1)}\n"
-                    f"<b>Realized 70% Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
+                    f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(effective_tp)}\n"
+                    f"<b>Booked Profit:</b> +${pnl_usdt:.2f} USDT (+₹{pnl_inr:,.0f} INR){conf_tag} 💰\n"
                     f"🛡️ <b>SL Trailed to Cost-to-Cost (+0.4% Profit Floor):</b> {format_price(safe_trailed_sl)}\n"
-                    f"🚀 <b>Remaining 30% Runner ({runner_qty} qty):</b> Aiming for TP2 {format_price(target_tp3)}!\n"
-                    f"<i>Trade is now 100% Zero-Risk. Runner trailing for full trend capture!</i>{bal_block}"
+                    f"📦 <b>Remaining Qty ({runner_qty}):</b> Aiming for 100% close at {format_price(effective_tp)}.\n"
+                    f"<i>Remaining position protected in guaranteed profit!</i>{bal_block}"
                 )
             await self.send_alert(msg)
 
         elif tp_stage in ("TP2", "TP3", "FULL_WIN"):
-            pnl_tp3_usdt = calc_pnl(tp3_qty, target_tp3, real_entry, direction)
-            pnl_tp1_usdt = calc_pnl(tp1_qty, tp1, real_entry, direction)
-            total_pnl_usdt = pnl_tp1_usdt + pnl_tp3_usdt
+            # Backward-compatibility alias: unified 100% full exit at effective_tp
+            total_pnl_usdt = calc_pnl(initial_qty, effective_tp, real_entry, direction)
             total_pnl_inr = total_pnl_usdt * self.usd_inr_rate
 
             bal_summary = await self.get_wallet_balance_summary(session)
             bal_block = f"\n\n{bal_summary}" if bal_summary else ""
             msg = (
-                f"🏆 <b>REAL LIVE TRADE: TP2 RUNNER HIT — FULL WIN! 🚀</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>REAL LIVE TRADE: 100% TARGET ({target_r_str}) HIT ✅ (FULL PROFIT BOOKED)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Asset:</b> {clean_sym} [{direction}]\n"
-                f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(target_tp3)}\n"
-                f"<b>Total Trade Realized Profit:</b> +${total_pnl_usdt:.2f} USDT (+₹{total_pnl_inr:,.0f} INR) 💰🚀\n"
+                f"<b>Entry:</b> {format_price(real_entry)}  →  <b>Target:</b> {format_price(effective_tp)}\n"
+                f"<b>Realized 100% Profit:</b> +${total_pnl_usdt:.2f} USDT (+₹{total_pnl_inr:,.0f} INR) 💰\n"
                 f"<b>Status:</b> 100% position closed. Lingering SL cancelled.{bal_block}"
             )
-            logger.info(f"FULL WIN {clean_sym}: TP2 runner hit. Total PnL +${total_pnl_usdt:.2f}")
+            logger.info(f"100% FULL WIN {clean_sym} ({target_r_str}) @ {effective_tp}. Total PnL +${total_pnl_usdt:.2f}")
 
             # Cancel remaining open orders (SL) — Shark DELETE only accepts clientOrderId, never orderId
             try:

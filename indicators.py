@@ -160,10 +160,11 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         if risk == 0: risk = entry * 0.01
         from executor import round_price
         if signal == "BUY":
-            tp1, tp2 = round_price(symbol, entry + (target_r * risk)), round_price(symbol, entry + (3.2 * risk))
+            tp1 = round_price(symbol, entry + (target_r * risk))
         else:
-            tp1, tp2 = round_price(symbol, entry - (target_r * risk)), round_price(symbol, entry - (3.2 * risk))
-        return sl, (tp1, tp2), (target_r, 3.2), (f"{target_r}R Target (100% Book)", "3.2R Extended")
+            tp1 = round_price(symbol, entry - (target_r * risk))
+        tp2 = tp1
+        return sl, (tp1, tp2), (target_r, target_r), (f"{target_r}R Target (100% Book)", f"{target_r}R Target (100% Book)")
 
     sub = df.iloc[-100:-1] if len(df) >= 100 else df.iloc[:-1]
     highs = sub['high'].values
@@ -288,13 +289,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         # USER DIRECTIVE: Exact target_r Take Profit as per SL (1.5R for EMA Retest/Crossover, 2.2R for Breakout/Breakdown)
         from executor import round_price
         clean_tp1 = round_price(symbol, entry + (target_r * risk))
-        clean_tp2 = round_price(symbol, entry + (3.2 * risk))
+        clean_tp2 = clean_tp1
         
         lbl1 = f"{target_r} R:R Target (100% Book)"
-        lbl2 = "3.2 R:R Extended Target"
+        lbl2 = lbl1
 
         rr1 = round(abs(clean_tp1 - entry) / risk, 2)
-        rr2 = round(abs(clean_tp2 - entry) / risk, 2)
+        rr2 = rr1
 
         return sl, (clean_tp1, clean_tp2), (rr1, rr2), (lbl1, lbl2)
 
@@ -359,13 +360,13 @@ def find_liquidity_pool_targets(df: pd.DataFrame, signal: str, entry: float, def
         # USER DIRECTIVE: Exact target_r Take Profit as per SL (1.5R for EMA Retest/Crossover, 2.2R for Breakout/Breakdown)
         from executor import round_price
         clean_tp1 = round_price(symbol, entry - (target_r * risk))
-        clean_tp2 = round_price(symbol, entry - (3.2 * risk))
+        clean_tp2 = clean_tp1
         
         lbl1 = f"{target_r} R:R Target (100% Book)"
-        lbl2 = "3.2 R:R Extended Target"
+        lbl2 = lbl1
 
         rr1 = round(abs(entry - clean_tp1) / risk, 2)
-        rr2 = round(abs(entry - clean_tp2) / risk, 2)
+        rr2 = rr1
 
         return sl, (clean_tp1, clean_tp2), (rr1, rr2), (lbl1, lbl2)
 

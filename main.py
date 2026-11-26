@@ -182,12 +182,12 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             raw_tp2 = float(data.get("tp2") or data.get("tp3")) if (data.get("tp2") is not None or data.get("tp3") is not None) else None
 
             if direction == "BUY":
-                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 > entry) else (entry + 2.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 > tp1) else max(tp1 * 1.003, entry + 6.0 * risk)
+                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 > entry) else (entry + 1.5 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 >= tp1) else tp1
                 tp3 = tp2
             else:
-                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 < entry) else (entry - 2.0 * risk)
-                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 < tp1) else min(tp1 * 0.997, entry - 6.0 * risk)
+                tp1 = raw_tp1 if (raw_tp1 and raw_tp1 < entry) else (entry - 1.5 * risk)
+                tp2 = raw_tp2 if (raw_tp2 and raw_tp2 <= tp1) else tp1
                 tp3 = tp2
 
             tp1_hit = data.get("tp1_hit", False)
@@ -298,22 +298,15 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         final_price = cur_sl
                         break
 
-                    # 2. Check TP1 Hit (70% profit booked -> move SL to +0.4R profit lock)
+                    # 2. Check TP1 Hit (Unified 100% Full Exit at TP1)
                     if not tp1_hit and row['high'] >= tp1:
                         tp1_hit = True
+                        tp2_hit = True
                         tp1_hit_at_dt = candle_dt
                         tp1_hit_at_str = tp1_hit_at_dt.isoformat()
-                        update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
-                        cur_sl = profit_lock_sl
-
-                    # 3. Check TP2 Hit (30% Remaining Runner -> FULL WIN)
-                    if tp1_hit and not tp2_hit and row['high'] >= tp2:
-                        tp2_hit = True
-                        tp2_hit_at_dt = candle_dt
-                        tp2_hit_at_str = tp2_hit_at_dt.isoformat()
-                        update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
+                        update_trade_progress(key, tp1_hit=True, tp2_hit=True, new_sl=tp1, tp1_hit_at=tp1_hit_at_str, tp2_hit_at=tp1_hit_at_str)
                         outcome = "WIN"
-                        final_price = tp2
+                        final_price = tp1
                         break
 
                 elif direction == "SELL":
@@ -323,22 +316,15 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
                         final_price = cur_sl
                         break
 
-                    # 2. Check TP1 Hit (70% profit booked -> move SL to +0.4R profit lock)
+                    # 2. Check TP1 Hit (Unified 100% Full Exit at TP1)
                     if not tp1_hit and row['low'] <= tp1:
                         tp1_hit = True
+                        tp2_hit = True
                         tp1_hit_at_dt = candle_dt
                         tp1_hit_at_str = tp1_hit_at_dt.isoformat()
-                        update_trade_progress(key, tp1_hit=True, be_hit=True, new_sl=profit_lock_sl, tp1_hit_at=tp1_hit_at_str)
-                        cur_sl = profit_lock_sl
-
-                    # 3. Check TP2 Hit (30% Remaining Runner -> FULL WIN)
-                    if tp1_hit and not tp2_hit and row['low'] <= tp2:
-                        tp2_hit = True
-                        tp2_hit_at_dt = candle_dt
-                        tp2_hit_at_str = tp2_hit_at_dt.isoformat()
-                        update_trade_progress(key, tp2_hit=True, new_sl=tp1, tp2_hit_at=tp2_hit_at_str)
+                        update_trade_progress(key, tp1_hit=True, tp2_hit=True, new_sl=tp1, tp1_hit_at=tp1_hit_at_str, tp2_hit_at=tp1_hit_at_str)
                         outcome = "WIN"
-                        final_price = tp2
+                        final_price = tp1
                         break
 
             if not limit_filled and now_utc > limit_cutoff:
@@ -616,7 +602,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                             logger.info(f"FILTERED REVERSAL: {symbol} Bear trap risk {risk/candle_close:.1%} > 2.5% (Wick too long).")
                                             sq_signal = None
                                         tp1 = round_price(symbol, entry + (target_r * risk))
-                                        tp2 = round_price(symbol, entry + (2.2 * risk))
+                                        tp2 = tp1
                                         cross_type = "🚀 1H Bear Trap Reversal (Short Squeeze Bounce + SFP ✅)"
                                     else:
                                         entry = round_price(symbol, candle_close)
@@ -626,7 +612,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                             logger.info(f"FILTERED REVERSAL: {symbol} Bull trap risk {risk/candle_close:.1%} > 2.5% (Wick too long).")
                                             sq_signal = None
                                         tp1 = round_price(symbol, entry - (target_r * risk))
-                                        tp2 = round_price(symbol, entry - (2.2 * risk))
+                                        tp2 = tp1
                                         cross_type = "🩸 1H Bull Trap Reversal (Long Squeeze Flush + SFP ✅)"
                                 else:
                                     # RETEST-ONLY LIMIT DISCIPLINE (V2): Never market-chase late 1H squeeze spikes;
@@ -651,7 +637,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                         sl = round_price(symbol, sl)
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry + (target_r * risk))
-                                        tp2 = round_price(symbol, entry + (3.2 * risk))
+                                        tp2 = tp1
                                         cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Limit + CVD ✅)"
                                     else:
                                         retest_target = box_lo_ref * 0.9985
@@ -668,15 +654,15 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                         sl = round_price(symbol, sl)
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry - (target_r * risk))
-                                        tp2 = round_price(symbol, entry - (3.2 * risk))
+                                        tp2 = tp1
                                         cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Limit + CVD ✅)"
 
                                 if sq_signal:
                                     dyn_sl = sl
                                     rr1 = target_r
-                                    rr2 = 2.2 if is_trap_reversal else 3.2
-                                    lbl1 = f"{target_r}R Target"
-                                    lbl2 = f"{rr2}R Extended"
+                                    rr2 = target_r
+                                    lbl1 = f"{target_r}R Target (100% Exit)"
+                                    lbl2 = lbl1
 
                                     from telegram_bot import queue_alert
                                     sq_queued = await queue_alert(
@@ -799,7 +785,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                             sl = round_price(symbol, (entry - sl_dist) if rc_signal == "BUY" else (entry + sl_dist))
                             risk = abs(entry - sl) if (entry and sl and entry != sl) else (c15_close * 0.015)
                             tp1 = round_price(symbol, (entry + target_r * risk) if rc_signal == "BUY" else (entry - target_r * risk))
-                            tp2 = round_price(symbol, (entry + 3.2 * risk) if rc_signal == "BUY" else (entry - 3.2 * risk))
+                            tp2 = tp1
                             cross_type_rc = "⚡ 15M Runaway Chase (8H Breakout + Wide 1H ATR SL ✅)"
 
                             from telegram_bot import queue_alert
@@ -815,8 +801,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                 candle_time=candle_15_ts,
                                 macro_struct=macro_struct,
                                 tp1=tp1, tp2=tp2,
-                                rr1=target_r, rr2=3.2,
-                                lbl1="2.2R Target", lbl2="3.2R Extended",
+                                rr1=target_r, rr2=target_r,
+                                lbl1="2.2R Target (100% Exit)", lbl2="2.2R Target (100% Exit)",
                                 tf_data=tf_data,
                                 is_special_list=(symbol in SPECIAL_LIST),
                                 rsi=rsi_15_rc,
