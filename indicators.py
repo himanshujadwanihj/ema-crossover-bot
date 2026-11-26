@@ -453,10 +453,9 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             min_spread = 0.00080  # 0.080% for 1H, 4H, 1D (strictly blocks flat horizontal chop like LINK)
         anti_chop_valid = (abs(ema_9 - ema_26) / row['close']) >= min_spread
 
-    # Strategy Setup Validation:
-    # All coins (Majors & Altcoins) require clear EMA separation (anti-chop) and proximity to prevent vertical chase.
-    # Confluence filtering (3★ and 4★ HTF alignment) serves as the primary master filter in queue_alert/flush_alerts.
-    valid_setup = anti_chop_valid and proximity_valid
+    # Enforce ADX > 15 and candle body >= 25% alongside anti-chop & proximity to reject flat-chop/doji signals.
+    # Volume & 200 SMA remain weighted downstream by signal_analyser so early crosses & CFD commodities aren't starved.
+    valid_setup = anti_chop_valid and proximity_valid and adx_valid and expansion_valid
 
     # Helper function to append signal with dynamic Liquidity TPs and EMA 9 Pullback Limit Entry
     def add_signal(cross_name, sig_type):
@@ -472,6 +471,12 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
         c_low = float(row.get('low', 0))
         c_range = max(c_high - c_low, 1e-8)
         body_ratio = abs(c_close - c_open) / c_range
+        prev_vol_sma_val = prev.get('vol_sma_20')
+        vol_sma_out = (
+            float(prev_vol_sma_val)
+            if (prev_vol_sma_val is not None and not pd.isna(prev_vol_sma_val))
+            else (float(row.get('vol_sma_20', 0)) if not pd.isna(row.get('vol_sma_20', 0)) else 0.0)
+        )
 
         signals.append({
             "type": cross_name,
@@ -487,7 +492,7 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             "rsi": float(rsi_val) if not pd.isna(rsi_val) else None,
             "adx": float(adx_val) if not pd.isna(adx_val) else 25.0,
             "volume": float(row.get('volume', 0)),
-            "volume_sma": float(row.get('vol_sma_20', 0)),
+            "volume_sma": vol_sma_out,
             "macd_line": float(row.get('macd_line', 0)),
             "macd_signal": float(row.get('macd_signal', 0)),
             "body_ratio": body_ratio,
@@ -497,18 +502,14 @@ def analyze_crossovers(df: pd.DataFrame, symbol: str = "ALT/USDT", tf_data: dict
             "tp_label": lbl1
         })
 
-    # 1. Base Strategy: 9/26 EMA Cross (Enforcing Volume, ADX, Expansion, Proximity, Anti-Chop, and Strict RSI Filters)
+    # 1. Base Strategy: 9/26 EMA Cross
+    # Emit whenever structural quality holds; RSI [42..62] / [38..58] & AI Score > 77 bypass
+    # are enforced downstream in telegram_bot.queue_alert and main._check_auto_trade_eligibility.
     if valid_setup:
         if prev['ema_9'] <= prev['ema_26'] and row['ema_9'] > row['ema_26']:
-            if rsi_bullish:
-                add_signal("9/26 EMA Cross", "BUY")
-            else:
-                logger.debug(f"BUY 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [42.0, 62.0]")
+            add_signal("9/26 EMA Cross", "BUY")
         elif prev['ema_9'] >= prev['ema_26'] and row['ema_9'] < row['ema_26']:
-            if rsi_bearish:
-                add_signal("9/26 EMA Cross", "SELL")
-            else:
-                logger.debug(f"SELL 9/26 cross for {symbol} skipped: RSI {rsi_val:.1f} outside [38.0, 58.0]")
+            add_signal("9/26 EMA Cross", "SELL")
         
     return signals
 

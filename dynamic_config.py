@@ -5,7 +5,7 @@ CONFIG_FILE = "/data/dynamic_config.json" if os.path.isdir("/data") else "dynami
 
 def get_dyn_config():
     default_cfg = {
-        "ADX_THRESHOLD": 20.0, 
+        "ADX_THRESHOLD": 15.0,
         "VOLUME_MULTIPLIER": 1.2,
         "BODY_RATIO": 0.25,
         "RSI_MIN": 45.0,
