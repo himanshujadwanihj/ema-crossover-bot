@@ -447,12 +447,12 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
 
     session_info = micro.get("session_info") if micro else get_market_session_info()
     
-    # Strictly decouple Squeeze from Retest & Crossovers!
-    # EMA Retests and EMA Crossovers are NEVER Squeeze setups even if BB is pinched.
+    # Strictly decouple Squeeze & Runaway Chase from Retest & Crossovers!
     is_retest_sig = "Retest" in cross_type
     is_cross_sig = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest_sig
     is_dedicated_sq = (
-        ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type or kwargs.get("is_dedicated_squeeze", False))
+        (not is_runaway_chase)
+        and ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type or kwargs.get("is_dedicated_squeeze", False))
         and not is_retest_sig
         and not is_cross_sig
     )
@@ -483,7 +483,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
             logger.info(f"⚡ INSTANT RETEST ALERT DISPATCHED: {symbol} {tf_label} {signal} -> {EMA_SCANNER_CHANNEL}")
         except Exception as e_ret:
             logger.error(f"Error dispatching instant retest alert: {e_ret}")
-    elif is_dedicated_sq:
+    elif is_dedicated_sq or is_runaway_chase:
         BATCH_BREAKOUTS.append(alert_data)
     else:
         BATCH_CROSSOVERS.append(alert_data)
@@ -913,13 +913,21 @@ async def flush_alerts():
     except Exception as e_filter:
         logger.error(f"Error dispatching to filter bot subscribers: {e_filter}")
 
-    # 4. Squeeze Breakouts (Dedicated Independent Alert Flow — Never mixed with Crossovers):
+    # 4. Squeeze Breakouts & 15M Runaway Chasers (Dedicated Independent Alert Flow — Never mixed with Crossovers):
     if BATCH_BREAKOUTS:
         BATCH_BREAKOUTS.sort(key=_get_sort_key)
         for item in BATCH_BREAKOUTS:
             try:
                 sig = item.get("signal", "BUY")
-                if sig == "BUY":
+                ctype_b = str(item.get("cross_type", ""))
+                is_rc_b = bool(item.get("is_runaway_chase") or ("Runaway" in ctype_b))
+                if is_rc_b:
+                    header = "⚡ <b>15M RUNAWAY CHASER TRIGGERED (BULLISH SURGE)</b>\n" if sig == "BUY" else "⚡ <b>15M RUNAWAY CHASER TRIGGERED (BEARISH DUMP)</b>\n"
+                elif "Bear Trap" in ctype_b:
+                    header = "🪤 <b>1H BEAR TRAP REVERSAL TRIGGERED</b>\n"
+                elif "Bull Trap" in ctype_b:
+                    header = "🪤 <b>1H BULL TRAP REVERSAL TRIGGERED</b>\n"
+                elif sig == "BUY":
                     header = "🚀 <b>SHORT-SQUEEZE BREAKOUT TRIGGERED (BULLISH PUMP)</b>\n"
                 else:
                     header = "🩸 <b>LONG-SQUEEZE BREAKDOWN TRIGGERED (BEARISH DUMP)</b>\n"

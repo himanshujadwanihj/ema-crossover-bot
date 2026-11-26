@@ -673,45 +673,96 @@ def build_consensus_timeline(tf_data: dict, signal: str = "BUY") -> str:
     return "\n".join(lines)
 
 _btc_shock_until = None
+_btc_shock_state = {
+    "until": None,
+    "direction": None,
+    "is_clean_cascade": False,
+    "body_ratio": 0.0,
+    "range_pct": 0.0,
+    "body_pct": 0.0,
+}
+
+
+def get_btc_shock_context() -> dict:
+    """Return active BTC 15M Volatility Shock metadata (direction & cascade quality)."""
+    global _btc_shock_until
+    now_utc = datetime.now(timezone.utc)
+    until = _btc_shock_state.get("until") or _btc_shock_until
+    if until is not None and now_utc < until:
+        rem = (until - now_utc).total_seconds() / 60.0
+        return {
+            "active": True,
+            "remaining_min": rem,
+            "direction": _btc_shock_state.get("direction"),
+            "is_clean_cascade": bool(_btc_shock_state.get("is_clean_cascade", False)),
+            "body_ratio": float(_btc_shock_state.get("body_ratio", 0.0)),
+            "range_pct": float(_btc_shock_state.get("range_pct", 0.0)),
+            "body_pct": float(_btc_shock_state.get("body_pct", 0.0)),
+        }
+    _btc_shock_until = None
+    _btc_shock_state["until"] = None
+    _btc_shock_state["direction"] = None
+    _btc_shock_state["is_clean_cascade"] = False
+    return {
+        "active": False,
+        "remaining_min": 0.0,
+        "direction": None,
+        "is_clean_cascade": False,
+        "body_ratio": 0.0,
+        "range_pct": 0.0,
+        "body_pct": 0.0,
+    }
+
 
 async def check_btc_volatility_shock(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore) -> tuple[bool, float]:
     """
     Checks BTC/USDT 15M candles for sharp upside/downside price moves (whipsaws/liquidation wicks).
     If candle range % >= 1.5% or abs(open - close) % >= 1.2%:
-        Activates 30-minute auto-trading pause lock for new candidate signals.
+        Activates 30-minute Volatility Shock mode:
+        - Clean Cascade (body_ratio >= 0.45): pauses standard altcoin trades; allows shock-aligned 15M Runaway Chaser only.
+        - Two-Sided Whipsaw (body_ratio < 0.45): pauses all crypto entries completely.
     Returns (is_shock_active, remaining_minutes)
     """
     global _btc_shock_until
     now_utc = datetime.now(timezone.utc)
-    
-    if _btc_shock_until is not None:
-        if now_utc < _btc_shock_until:
-            rem = (_btc_shock_until - now_utc).total_seconds() / 60.0
-            return True, rem
-        else:
-            _btc_shock_until = None
-            
+
+    ctx = get_btc_shock_context()
+    if ctx["active"]:
+        return True, ctx["remaining_min"]
+
     try:
         from fetcher import fetch_ohlcv_async
         df_btc = await fetch_ohlcv_async(session, "BTC/USDT", "15m", 10, semaphore)
         if df_btc is None or len(df_btc) < 2:
             return False, 0.0
-            
+
         row = df_btc.iloc[-2]  # Check ONLY the latest completed 15M candle to prevent continuous pause loops
         o = float(row['open'])
         h = float(row['high'])
         l = float(row['low'])
         c = float(row['close'])
-        
+
         if o > 0 and l > 0:
             candle_range_pct = ((h - l) / o) * 100.0
             body_move_pct = (abs(c - o) / o) * 100.0
-            
+            body_ratio = abs(c - o) / max(h - l, 1e-8)
+
             if body_move_pct >= 1.2 or candle_range_pct >= 1.5:
                 new_until = now_utc + timedelta(minutes=30)
+                shock_dir = "BUY" if c > o else "SELL"
+                is_clean_cascade = bool(body_ratio >= 0.45)
+
                 if _btc_shock_until is None or new_until > _btc_shock_until:
                     _btc_shock_until = new_until
-                    
+                    _btc_shock_state.update({
+                        "until": new_until,
+                        "direction": shock_dir,
+                        "is_clean_cascade": is_clean_cascade,
+                        "body_ratio": body_ratio,
+                        "range_pct": candle_range_pct,
+                        "body_pct": body_move_pct,
+                    })
+
                     try:
                         from telegram_bot import send_text_to_chat
                         from config import TELEGRAM_CHAT_ID
@@ -722,47 +773,51 @@ async def check_btc_volatility_shock(session: aiohttp.ClientSession, semaphore: 
                             import dateutil.tz
                             ist_tz = dateutil.tz.gettz("Asia/Kolkata")
                         until_ist = new_until.astimezone(ist_tz).strftime("%H:%M:%S IST")
-                        
+
+                        if is_clean_cascade:
+                            action_txt = (
+                                f"Standard Altcoins PAUSED 30m; Clean {shock_dir} Cascade ({body_ratio:.0%} body) — "
+                                f"aligned 15M Runaway Chaser ONLY (max 1/cycle, max 2 risk)."
+                            )
+                        else:
+                            action_txt = (
+                                f"Two-sided Liquidation Whipsaw ({body_ratio:.0%} body) — "
+                                f"ALL new crypto entries PAUSED for 30 minutes."
+                            )
+
                         alert_msg = (
                             f"⚡ <b>BTC VOLATILITY SHOCK SHIELD ACTIVATED</b> 🛡️\n\n"
-                            f"• <b>BTC 15M Move:</b> {candle_range_pct:.2f}% Range (Body: {body_move_pct:.2f}%)\n"
-                            f"• <b>Reason:</b> Extreme market volatility detected. Pausing new entries to prevent buying spike peaks/falling knives.\n"
-                            f"• <b>Action:</b> New signal scanning PAUSED for 30 minutes.\n"
+                            f"• <b>BTC 15M Move:</b> {candle_range_pct:.2f}% Range (Body: {body_move_pct:.2f}% | {shock_dir})\n"
+                            f"• <b>Reason:</b> Extreme volatility detected. Protecting altcoins from simultaneous SLs.\n"
+                            f"• <b>Action:</b> {action_txt}\n"
                             f"• <b>Resumes:</b> {until_ist}\n\n"
-                            f"<i>ℹ️ Active position TP/SL guards, step-trailing SL, and auto-healing remain 100% FULLY ARMED.</i>"
+                            f"<i>ℹ️ Active position TP/SL guards & Anti-Shock BE Shield remain FULLY ARMED.</i>"
                         )
                         if TELEGRAM_CHAT_ID:
                             asyncio.create_task(send_text_to_chat(str(TELEGRAM_CHAT_ID), alert_msg))
                     except Exception as tel_err:
                         logger.error(f"Failed to send BTC shock Telegram alert: {tel_err}")
-                        
-                    logger.warning(f"⚡ BTC Volatility Shock Shield triggered! Range: {candle_range_pct:.2f}%, Move: {body_move_pct:.2f}%. Scanner paused for 30m until {new_until.isoformat()}")
-                
+
+                    logger.warning(
+                        f"⚡ BTC Volatility Shock triggered! Range={candle_range_pct:.2f}%, Move={body_move_pct:.2f}%, "
+                        f"Dir={shock_dir}, Cascade={is_clean_cascade} ({body_ratio:.0%}). Until {new_until.isoformat()}"
+                    )
+
                 rem = (_btc_shock_until - now_utc).total_seconds() / 60.0
                 return True, rem
     except Exception as e:
         logger.error(f"Error in check_btc_volatility_shock: {e}")
-        
-    if _btc_shock_until is not None and now_utc < _btc_shock_until:
-        rem = (_btc_shock_until - now_utc).total_seconds() / 60.0
-        return True, rem
-        
+
+    ctx_after = get_btc_shock_context()
+    if ctx_after["active"]:
+        return True, ctx_after["remaining_min"]
+
     return False, 0.0
 
 def is_btc_shock_paused() -> tuple[bool, float]:
-    """
-    Synchronous helper to check if BTC shock pause is currently active.
-    """
-    global _btc_shock_until
-    if _btc_shock_until is None:
-        return False, 0.0
-    now_utc = datetime.now(timezone.utc)
-    if now_utc < _btc_shock_until:
-        rem = (_btc_shock_until - now_utc).total_seconds() / 60.0
-        return True, rem
-    else:
-        _btc_shock_until = None
-        return False, 0.0
+    """Synchronous helper to check if BTC shock pause is currently active."""
+    ctx = get_btc_shock_context()
+    return ctx["active"], ctx["remaining_min"]
 
 
 

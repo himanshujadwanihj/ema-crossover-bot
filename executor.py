@@ -2376,6 +2376,51 @@ class SharkExchangeExecutor:
                 initial_sl_val = live_sl_order_p or (float(state_entry.get("initial_sl") or 0) if state_entry else 0)
                 risk_step = abs(entry_price - initial_sl_val) if (initial_sl_val > 0 and initial_sl_val != entry_price) else (entry_price * 0.015)
 
+                # Anti-Shock Breakeven Shield: protect opposing open altcoin winners >= +0.7R when BTC shocks
+                if pos_qty_abs > 0 and sl_orders and mark_p > 0:
+                    try:
+                        from indicators import get_btc_shock_context
+                        from market_cache import is_commodity_symbol, is_stock_symbol
+                        shock_ctx = get_btc_shock_context()
+                        if (
+                            shock_ctx.get("active")
+                            and shock_ctx.get("direction")
+                            and shock_ctx.get("direction") != direction
+                            and not is_commodity_symbol(sym)
+                            and not is_stock_symbol(sym)
+                        ):
+                            already_trailed = bool(
+                                (state_entry and (state_entry.get("tp1_hit") or (state_entry.get("trail_stage") or 0) > 0 or state_entry.get("be_hit_time_shield")))
+                                or (direction == "BUY" and live_sl_order_p >= entry_price * 0.9995)
+                                or (direction == "SELL" and live_sl_order_p > 0 and live_sl_order_p <= entry_price * 1.0005)
+                            )
+                            reached_shock_be = (
+                                (direction == "BUY" and mark_p >= entry_price + 0.70 * risk_step)
+                                or (direction == "SELL" and mark_p <= entry_price - 0.70 * risk_step)
+                            )
+                            if not already_trailed and reached_shock_be and (time.time() - self._tp_sl_heal_lock.get(sym + "_shock_be", 0) > 120):
+                                be_sl = round_price(sym, entry_price * (1.0005 if direction == "BUY" else 0.9995))
+                                logger.warning(f"🛡️ ANTI-SHOCK BE SHIELD: BTC shocked {shock_ctx.get('direction')} while {sym} [{direction}] >= +0.7R -> moving SL to BE {be_sl}")
+                                ok_be = await self.modify_stop_loss(session, sym, direction, be_sl, pos_qty_abs, is_trailed=True)
+                                if ok_be:
+                                    self._tp_sl_heal_lock[sym + "_shock_be"] = time.time()
+                                    from state import update_latest_shark_state
+                                    update_latest_shark_state(sym, {"be_hit_time_shield": True, "cur_sl": be_sl})
+                                    if state_entry is not None:
+                                        state_entry["be_hit_time_shield"] = True
+                                        state_entry["cur_sl"] = be_sl
+                                    live_sl_order_p = be_sl
+                                    sl_orders = [
+                                        o for o in (await self.get_open_orders(session, symbol=sym))
+                                        if (
+                                            o.get("type", "").upper() in ("STOP_MARKET", "STOP_LIMIT", "STOP")
+                                            or o.get("subType") == "STOP_LOSS"
+                                            or (o.get("placeType") == "POSITION" and o.get("stopLossPrice"))
+                                        ) and not (str(o.get("placeType") or "").upper() == "ORDER_FORM" and str(o.get("type") or "").upper() == "LIMIT")
+                                    ]
+                    except Exception as e_sbe:
+                        logger.debug(f"Anti-shock BE check error for {sym}: {e_sbe}")
+
                 if not tp1 or not tp2 or not tp3:
                     if direction == "BUY":
                         tp1 = tp1 or round_price(sym, entry_price + 1.5 * risk_step)

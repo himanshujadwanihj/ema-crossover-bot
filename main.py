@@ -366,10 +366,15 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
         except Exception as e:
             logger.error(f"Error resolving {key}: {e}")
 
-async def process_symbol_async(session, symbol, semaphore, tf_data=None):
+async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_ctx=None):
     try:
         from state import is_already_sent, mark_sent
         from pullback_tracker import SPECIAL_LIST
+        from market_cache import is_commodity_symbol, is_stock_symbol
+        in_crypto_shock = bool(
+            shock_ctx and shock_ctx.get("active")
+            and not is_commodity_symbol(symbol) and not is_stock_symbol(symbol)
+        )
         
         if tf_data is None:
             tf_data = await fetch_all_timeframes_async(session, symbol, semaphore)
@@ -399,9 +404,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
         from config import ALLOWED_15M_COINS
             
         # -- 0. DEDICATED SQUEEZE BREAKOUT ENGINE (Completely decoupled from EMA Crossovers) --
-        # Evaluates on 1H (Institutional 1H TF and above per User Directive): checks verified coiling radar breakout + CVD confirmation
+        # Paused for crypto during active BTC Volatility Shock to avoid multi-coin whipsaw SLs.
         df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
-        if df_1h is not None and len(df_1h) >= 25:
+        if (not in_crypto_shock) and df_1h is not None and len(df_1h) >= 25:
             try:
                 # 1. STRICT CANDLE FRESHNESS GATE: Must be freshly completed 1H candle (within 1 hour)
                 candle_dt = df_1h.index[-2]
@@ -769,6 +774,14 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         elif c15_close < (d15_lo * 0.999) and h1_tr_rc == "bearish" and h4_tr_rc == "bearish" and rsi_15_rc >= 28.0:
                             rc_signal = "SELL"
 
+                    if rc_signal and in_crypto_shock:
+                        if not shock_ctx.get("is_clean_cascade"):
+                            logger.debug(f"FILTERED 15M RUNAWAY {symbol} {rc_signal} — BTC shock is two-sided whipsaw.")
+                            rc_signal = None
+                        elif shock_ctx.get("direction") and rc_signal != shock_ctx.get("direction"):
+                            logger.debug(f"FILTERED 15M RUNAWAY {symbol} {rc_signal} — opposes BTC shock cascade ({shock_ctx.get('direction')}).")
+                            rc_signal = None
+
                     if rc_signal:
                         from market_cache import is_btc_safe_for_altcoins
                         is_btc_ok, btc_rc_reason = is_btc_safe_for_altcoins(rc_signal, symbol, tf_data)
@@ -776,8 +789,13 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         unique_rc_key = f"15M_RunawayChase_{rc_signal}_{candle_15_ts}"
                         if is_btc_ok and not is_already_sent(symbol, unique_rc_key, rc_signal, candle_15_ts):
                             target_r = 2.2
-                            entry = round_price(symbol, c15_close)
-                            sl_dist = min(max(1.2 * atr_1h_rc, c15_close * 0.015), c15_close * 0.025)
+                            live_15m_close = float(df_15m_rc['close'].iloc[-1])
+                            if rc_signal == "BUY":
+                                raw_entry = min(max(c15_close, live_15m_close), c15_close * 1.0015) if live_15m_close > c15_close else c15_close
+                            else:
+                                raw_entry = max(min(c15_close, live_15m_close), c15_close * 0.9985) if live_15m_close < c15_close else c15_close
+                            entry = round_price(symbol, raw_entry)
+                            sl_dist = min(max(1.2 * atr_1h_rc, entry * 0.015), entry * 0.025)
                             sl = round_price(symbol, (entry - sl_dist) if rc_signal == "BUY" else (entry + sl_dist))
                             risk = abs(entry - sl) if (entry and sl and entry != sl) else (c15_close * 0.015)
                             tp1 = round_price(symbol, (entry + target_r * risk) if rc_signal == "BUY" else (entry - target_r * risk))
@@ -846,7 +864,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
         if rc_candidate:
             all_crossover_candidates.append(rc_candidate)
 
-        for label in ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]:
+        crossover_labels = [] if in_crypto_shock else ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]
+        for label in crossover_labels:
             is_gold = symbol in ["XAU/USD", "XAUT/USDT", "XAUTUSDT"] or "XAU" in symbol.upper()
 
             # 5M timeframe: Strictly Gold Scalps only!
@@ -1052,7 +1071,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
         logger.error(f"Error processing {symbol}: {e}")
         return None
 
-async def scan_single_symbol_async(session, symbol, semaphore):
+async def scan_single_symbol_async(session, symbol, semaphore, shock_ctx=None):
     try:
         tf_data = await fetch_all_timeframes_async(session, symbol, semaphore)
         if not tf_data:
@@ -1060,26 +1079,32 @@ async def scan_single_symbol_async(session, symbol, semaphore):
 
         from indicators import get_trend_state
         from telegram_bot import TF_ORDER
+        from market_cache import is_commodity_symbol, is_stock_symbol
+        in_crypto_shock = bool(
+            shock_ctx and shock_ctx.get("active")
+            and not is_commodity_symbol(symbol) and not is_stock_symbol(symbol)
+        )
         tf_states = {l: get_trend_state(tf_data.get(l)) for l in TF_ORDER}
         clean_sym = symbol.upper()
         is_super = any(m in clean_sym for m in ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "XAU", "GOLD"])
 
         # ── STAGE 1: WATCHLIST COILING CANDIDATE EVALUATION (1H TF & Above per User Directive) ──
         radar_cand = None
-        try:
-            from config import is_weekend_trading_blocked
-            if not is_weekend_trading_blocked(symbol):
-                df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
-                if df_1h is not None and len(df_1h) >= 25:
-                    from fetcher import fetch_futures_microstructure_async
-                    micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
-                    from indicators import evaluate_watchlist_coiling_candidate
-                    eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H", tf_data=tf_data)
-                    if eval_res.get("eligible"):
-                        radar_cand = eval_res
-                        logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
-        except Exception as e_rad:
-            logger.debug(f"Watchlist coiling evaluation error for {symbol}: {e_rad}")
+        if not in_crypto_shock:
+            try:
+                from config import is_weekend_trading_blocked
+                if not is_weekend_trading_blocked(symbol):
+                    df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
+                    if df_1h is not None and len(df_1h) >= 25:
+                        from fetcher import fetch_futures_microstructure_async
+                        micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
+                        from indicators import evaluate_watchlist_coiling_candidate
+                        eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H", tf_data=tf_data)
+                        if eval_res.get("eligible"):
+                            radar_cand = eval_res
+                            logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
+            except Exception as e_rad:
+                logger.debug(f"Watchlist coiling evaluation error for {symbol}: {e_rad}")
 
         # Update in-memory market cache for instant Telegram filtering
         try:
@@ -1101,7 +1126,7 @@ async def scan_single_symbol_async(session, symbol, semaphore):
         from pullback_tracker import WATCHLIST, TOP_COINS, TOP_25_ALTS, ADDITIONAL_ALTS
         retest_allowed_coins = set(TOP_COINS + TOP_25_ALTS + ADDITIONAL_ALTS + WATCHLIST)
         from config import is_weekend_trading_blocked
-        is_retest_eligible = ((symbol in retest_allowed_coins) if is_weekend else True) and not is_weekend_trading_blocked(symbol)
+        is_retest_eligible = (not in_crypto_shock) and ((symbol in retest_allowed_coins) if is_weekend else True) and not is_weekend_trading_blocked(symbol)
 
         if is_retest_eligible:
             # Run EMA Support/Resistance Retest Check
@@ -1110,7 +1135,7 @@ async def scan_single_symbol_async(session, symbol, semaphore):
 
         # 2. Run Multi-Crossover & Breakout Check (Fresh Crossovers)
         # BUG #1 FIX: process_symbol_async now returns a LIST of candidates (all TF crossovers)
-        crossover_cands = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data)
+        crossover_cands = await process_symbol_async(session, symbol, semaphore, tf_data=tf_data, shock_ctx=shock_ctx)
 
         # Build unified trades list: crossovers (all TFs) + retest candidates
         trade_cands = []
@@ -1454,10 +1479,15 @@ async def main_loop():
                                     json.dump({'morning': _morning_notified_date, 'night': _night_notified_date}, f)
                             except: pass
                             
-                        # BTC Volatility Shock Shield Check (Protects crypto from whipsaws; commodities exempt per user directive)
+                        # BTC Volatility Shock Shield Check (Protects crypto from whipsaws; allows clean-cascade 15M Chaser)
                         is_shock_active, shock_rem = await check_btc_volatility_shock(session, semaphore)
+                        from indicators import get_btc_shock_context
+                        shock_ctx = get_btc_shock_context()
                         if is_shock_active:
-                            logger.warning(f"⚡ BTC Volatility Shock ACTIVE ({shock_rem:.1f}m remaining). Altcoins paused; commodities/stocks scanning normally...")
+                            if shock_ctx.get("is_clean_cascade"):
+                                logger.warning(f"⚡ BTC CLEAN CASCADE SHOCK ({shock_ctx.get('direction')}, {shock_rem:.1f}m rem). Regular alts paused; cascade-aligned 15M Runaway Chaser enabled (capped).")
+                            else:
+                                logger.warning(f"🛑 BTC WHIPSAW SHOCK ({shock_rem:.1f}m rem). Altcoins paused; commodities/stocks scanning normally...")
 
                         # DAILY RISK CIRCUIT BREAKER: 5 consecutive SLs -> 60-min pause
                         from state import is_trading_paused
@@ -1534,14 +1564,14 @@ async def main_loop():
                                 if major not in active_pairs:
                                     active_pairs.insert(0, major)
                         
-                        if is_shock_active:
+                        if is_shock_active and not shock_ctx.get("is_clean_cascade"):
                             from market_cache import is_commodity_symbol, is_stock_symbol
                             active_pairs = [sym for sym in active_pairs if is_commodity_symbol(sym) or is_stock_symbol(sym)]
                             if not active_pairs:
                                 await asyncio.sleep(15)
                                 continue
 
-                        tasks = [scan_single_symbol_async(session, sym, semaphore) for sym in active_pairs]
+                        tasks = [scan_single_symbol_async(session, sym, semaphore, shock_ctx=shock_ctx) for sym in active_pairs]
                         results = await asyncio.gather(*tasks)
 
                         # ═════════════════════════════════════════════════════════════════════════════
@@ -1804,10 +1834,13 @@ async def main_loop():
                                 top_candidates = eligible_candidates
                                 logger.info(f"🏆 ALL {len(top_candidates)} ELIGIBLE SETUP(S) SELECTED FOR SHARK EXECUTION (No portfolio cap).")
                                 batch_submitted_by_dir = {"BUY": [], "SELL": []}
+                                shock_crypto_executed = 0
                                 for cand in top_candidates:
                                     sym = cand["symbol"]
                                     sig = cand["signal"]
                                     stars = cand.get("aligned_count", 0)
+                                    from market_cache import is_commodity_symbol, is_stock_symbol
+                                    is_cand_exempt_shock = is_commodity_symbol(sym) or is_stock_symbol(sym)
 
                                     # USER DIRECTIVE: Same coin continuation trailing guard
                                     # If an active open position already exists in the SAME direction, pass to executor to trail SL & TP forward!
@@ -1823,19 +1856,28 @@ async def main_loop():
                                             if pos_dir == sig_dir:
                                                 is_same_dir_continuation = True
 
-                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction At-Risk Trades Shield (Max 5 LONG, Max 5 SHORT)
+                                    # BTC Shock Basket Cap: max 1 new crypto chase per cycle & max 2 concurrent at-risk positions during shock
+                                    if is_shock_active and not is_cand_exempt_shock and not is_same_dir_continuation:
+                                        if shock_crypto_executed >= 1:
+                                            cap_reason = "BTC Volatility Shock Cap: max 1 crypto chase per cycle to prevent simultaneous SLs."
+                                            logger.info(f"Skipping {sym} — {cap_reason}")
+                                            await notify_signal_rejection(sym, sig, cap_reason, cand=cand)
+                                            continue
+
+                                    # USER DIRECTIVE: Max 5 Concurrent Same-Direction At-Risk Trades Shield (tightened to 2 during BTC Shock)
                                     # Trades whose live SL is moved to Breakeven (entry price) or Profit-Lock are Zero-Risk & EXEMPT!
                                     cand_dir = "BUY" if str(sig).upper() in ("BUY", "LONG") else "SELL"
+                                    slot_cap = 2 if (is_shock_active and not is_cand_exempt_shock) else 5
                                     if not is_same_dir_continuation:
                                         slot_info = await executor.get_directional_risk_slots(
                                             session,
                                             signal=sig,
-                                            max_at_risk=5,
+                                            max_at_risk=slot_cap,
                                             batch_submitted_syms=batch_submitted_by_dir[cand_dir],
                                         )
                                         if slot_info["breakeven_syms"]:
                                             logger.info(
-                                                f"🛡️ Directional Risk Slots [{cand_dir}]: {slot_info['at_risk_count']}/5 at-risk "
+                                                f"🛡️ Directional Risk Slots [{cand_dir}]: {slot_info['at_risk_count']}/{slot_cap} at-risk "
                                                 f"({', '.join(slot_info['at_risk_syms']) or 'None'}) | Breakeven-exempt: "
                                                 f"{', '.join(slot_info['breakeven_syms'])}"
                                             )
@@ -1867,6 +1909,8 @@ async def main_loop():
                                         continue
 
                                     if shark_res and shark_res.get("status") in ("success", "partial_success"):
+                                        if is_shock_active and not is_cand_exempt_shock:
+                                            shock_crypto_executed += 1
                                         from executor import to_shark_symbol
                                         sh_sym = to_shark_symbol(sym)
                                         if sh_sym not in batch_submitted_by_dir[cand_dir]:
