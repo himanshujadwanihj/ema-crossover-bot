@@ -325,8 +325,13 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         return False
 
     # STRICT SQUEEZE TIMEFRAME RULE (User Directive: '1 hr squeze pr hi raho fir'):
-    # Squeeze Breakouts are strictly restricted to 1H timeframe only. All lower timeframe squeezes (15M) are banned.
-    is_sq_check = ("Squeeze" in cross_type) or kwargs.get("is_dedicated_squeeze", False) or ("Breakout" in cross_type and "Retest" not in cross_type)
+    # Legacy 15M Squeezes remain blocked; 15M 8H-Breakout Runaway Chase is explicitly allowed cleanly.
+    is_runaway_chase = kwargs.get("is_runaway_chase", False) or ("Runaway" in cross_type)
+    is_sq_check = (not is_runaway_chase) and (
+        ("Squeeze" in cross_type)
+        or kwargs.get("is_dedicated_squeeze", False)
+        or ("Breakout" in cross_type and "Retest" not in cross_type)
+    )
     if is_sq_check and str(tf_label).upper() not in ["1H", "1HR", "60M"]:
         logger.info(f"🚫 BLOCKED Squeeze alert for {symbol} ({tf_label}) — Squeeze breakouts strictly restricted to 1H timeframe.")
         return False
@@ -347,7 +352,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         logger.info(f"BLOCKED 5M signal for {symbol} — 5M strictly Gold only.")
         return False
 
-    if is_15m and (symbol not in ALLOWED_15M_COINS) and (not is_squeeze_type):
+    if is_15m and (symbol not in ALLOWED_15M_COINS) and (not is_squeeze_type) and (not is_runaway_chase):
         logger.info(f"BLOCKED 15M signal for {symbol} — not in ALLOWED_15M_COINS.")
         return False
 
@@ -363,7 +368,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
             return False
     else:
         if is_15m or is_5m:
-            if (symbol not in ALLOWED_15M_COINS and "XAU" not in symbol.upper()) and (not is_squeeze_type):
+            if (symbol not in ALLOWED_15M_COINS and "XAU" not in symbol.upper()) and (not is_squeeze_type) and (not is_runaway_chase):
                 logger.info(f"BLOCKED {tf_label} crossover for {symbol} — not in ALLOWED_15M_COINS.")
                 return False
         else:
@@ -381,6 +386,11 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
                     rsi_blocked_reason = f"RSI {f_rsi:.1f} not oversold enough (> 45.0)."
                 elif signal == "SELL" and f_rsi < 55.0:
                     rsi_blocked_reason = f"RSI {f_rsi:.1f} not overbought enough (< 55.0)."
+            elif is_runaway_chase:
+                if signal == "BUY" and f_rsi > 72.0:
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} > 72.0 (Runaway chase exhausted)."
+                elif signal == "SELL" and f_rsi < 28.0:
+                    rsi_blocked_reason = f"RSI {f_rsi:.1f} < 28.0 (Runaway chase exhausted)."
             elif is_squeeze_type or kwargs.get("is_dedicated_squeeze", False):
                 if signal == "BUY" and not (42.0 <= f_rsi <= 78.0):
                     rsi_blocked_reason = f"RSI {f_rsi:.1f} outside squeeze breakout bounds [42, 78]."
@@ -456,7 +466,8 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         "rsi": rsi, "adx": adx,
         "microstructure": micro, "session_info": session_info, 
         "is_squeeze": is_dedicated_sq,
-        "is_dedicated_squeeze": is_dedicated_sq
+        "is_dedicated_squeeze": is_dedicated_sq,
+        "is_runaway_chase": is_runaway_chase,
     }
     
     if is_retest_sig:
@@ -596,9 +607,10 @@ def _build_single_coin_block(data, index=None):
     close_time_str = calculate_candle_close_time(data.get("candle_time"), tf_label)
     retest_time_str = _format_time(data.get("candle_time"))
 
-    # Squeeze Badge header & Market Dynamic explanation (Strict separation: Dedicated Squeeze takes priority)
+    # Squeeze Badge header & Market Dynamic explanation (Strict separation: Dedicated Squeeze / Runaway takes priority)
     is_dedicated_sq = bool(data.get("is_dedicated_squeeze", False))
-    if is_dedicated_sq:
+    is_runaway_sq = bool(data.get("is_runaway_chase", False) or ("Runaway" in cross_type))
+    if is_dedicated_sq or is_runaway_sq:
         is_squeeze = True
         is_retest = False
         is_cross = False
@@ -607,7 +619,17 @@ def _build_single_coin_block(data, index=None):
         is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
         is_squeeze = ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type) and not is_retest and not is_cross
     if is_squeeze:
-        if "Bear Trap" in cross_type:
+        if is_runaway_sq:
+            sq_icon = "⚡"
+            if signal == "BUY":
+                squeeze_title = "🚀 15M RUNAWAY BULLISH BREAKOUT"
+                action_desc = "🟢 BUY (LONG) — 8H Box Trend Expansion"
+                market_dynamic = "⚡ <b>Runaway Surge:</b> 15M broke 8H High on >=1.8x Vol aligned with 1H+4H+BTC (ADX>=22 & Wide 1H ATR SL)."
+            else:
+                squeeze_title = "🩸 15M RUNAWAY BEARISH BREAKDOWN"
+                action_desc = "🔴 SELL (SHORT) — 8H Box Trend Cascade"
+                market_dynamic = "⚡ <b>Runaway Dump:</b> 15M broke 8H Low on >=1.8x Vol aligned with 1H+4H+BTC (ADX>=22 & Wide 1H ATR SL)."
+        elif "Bear Trap" in cross_type:
             sq_icon = "🚀"
             squeeze_title = "🚀 1H BEAR TRAP REVERSAL"
             action_desc = "🟢 BUY (LONG) — Support Reclaim SFP"
@@ -2577,12 +2599,15 @@ async def send_radar_status_update(radar_data: dict, status: str, reason: str, c
     Broadcasts a real-time status update when an active Pre-Squeeze Radar setup:
     1. FAILS (Fakeout wick rejection / lack of volume / CVD selling into breakout)
     2. INVALIDATES (Price breaches the invalidation SL structure level)
-    3. EXPIRES (4-hour coiling window elapsed without breakout)
+    3. EXPIRES (Coiling window elapsed without breakout)
 
-    Ensures complete transparency per user directive:
-    Either the order executes on breakout, OR a clear diagnostic message is dispatched!
+    Suppresses Telegram status blasts for silent background-only radars (is_broadcast=False)
+    that were never alerted to users.
     """
     symbol = radar_data.get("symbol", "")
+    if not radar_data.get("is_broadcast"):
+        logger.debug(f"Suppressing radar {status} alert for background-only symbol {symbol} (never broadcast)")
+        return
     direction = str(radar_data.get("direction", "BUY")).upper()
     trigger_entry = float(radar_data.get("trigger_entry", 0.0))
     invalidation_sl = float(radar_data.get("invalidation_sl", 0.0))

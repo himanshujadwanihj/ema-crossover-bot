@@ -579,7 +579,7 @@ def get_market_session_info() -> dict:
         return {"session_name": "Global Session", "tag": "🌐 Global Session", "is_prime": False}
 
 
-def calculate_cvd_metrics(df: pd.DataFrame, signal: str = "BUY") -> dict:
+def calculate_cvd_metrics(df: pd.DataFrame, signal: str = "BUY", closed_only: bool = False) -> dict:
     """
     Point 4: Calculates Cumulative Volume Delta (CVD) & Orderbook Absorption.
     Detects aggressive buying/selling vs absorption/divergence traps.
@@ -595,18 +595,26 @@ def calculate_cvd_metrics(df: pd.DataFrame, signal: str = "BUY") -> dict:
             "absorption_tag": ""
         }
     try:
-        vol = df["volume"]
-        if "taker_buy_vol" in df.columns:
-            buy_vol = df["taker_buy_vol"]
-        else:
-            buy_vol = vol * 0.5
+        df_eval = df.iloc[:-1] if (closed_only and len(df) >= 6) else df
+        has_taker_col = "taker_buy_vol" in df_eval.columns
+        if not has_taker_col:
+            return {
+                "cvd_display": "Neutral Delta Flow (Spot/Equity)",
+                "cvd_chg": 0.0,
+                "delta_pct": 0.0,
+                "is_aligned": True,
+                "absorption_flag": False,
+                "absorption_tag": ""
+            }
+        vol = df_eval["volume"]
+        buy_vol = df_eval["taker_buy_vol"]
         sell_vol = vol - buy_vol
         delta = buy_vol - sell_vol
         cvd = delta.cumsum()
 
-        n = min(5, len(df))
+        n = min(5, len(df_eval))
         cvd_chg = float(cvd.iloc[-1] - cvd.iloc[-n])
-        px_chg = float(df["close"].iloc[-1] - df["close"].iloc[-n])
+        px_chg = float(df_eval["close"].iloc[-1] - df_eval["close"].iloc[-n])
         latest_delta = float(delta.iloc[-1])
         latest_vol = float(vol.iloc[-1])
         delta_pct = (latest_delta / latest_vol * 100.0) if latest_vol > 0 else 0.0
@@ -659,14 +667,14 @@ def calculate_cvd_metrics(df: pd.DataFrame, signal: str = "BUY") -> dict:
             "absorption_tag": ""
         }
 
-async def fetch_futures_microstructure_async(session: aiohttp.ClientSession, symbol: str, signal: str = "BUY", df: pd.DataFrame = None) -> dict:
+async def fetch_futures_microstructure_async(session: aiohttp.ClientSession, symbol: str, signal: str = "BUY", df: pd.DataFrame = None, closed_only: bool = False) -> dict:
     """
     Fetches live Funding Rate & Open Interest (OI) from Binance Futures (or Bybit fallback),
     evaluates squeeze conditions (Long-Squeeze vs Short-Squeeze), and returns whale insight.
     """
     global _microstructure_cache
     now = time.time()
-    cache_key = f"{symbol}_{signal}"
+    cache_key = f"{symbol}_{signal}_{'closed' if closed_only else 'live'}"
     if cache_key in _microstructure_cache:
         cached_data, ts = _microstructure_cache[cache_key]
         if now - ts < 60.0:
@@ -761,7 +769,7 @@ async def fetch_futures_microstructure_async(session: aiohttp.ClientSession, sym
             market_condition = "⚖️ BALANCED LONG EXPANSION"
             whale_insight = "Healthy funding and steady open interest supporting technical EMA trend."
 
-    cvd_metrics = calculate_cvd_metrics(df, signal=signal) if df is not None else {
+    cvd_metrics = calculate_cvd_metrics(df, signal=signal, closed_only=closed_only) if df is not None else {
         "cvd_display": "Active Delta Flow 🟢" if is_buy else "Active Delta Flow 🔴",
         "cvd_chg": 0.0,
         "delta_pct": 0.0,

@@ -540,37 +540,68 @@ def is_radar_on_cooldown(symbol: str, cooldown_hours: float = 4.0) -> bool:
 
 def record_pre_squeeze_radar(symbol: str, radar_data: dict, is_broadcast: bool = False) -> None:
     """
-    Records a new active Pre-Squeeze Radar alert into state.
-    Only sets Telegram alert cooldown when is_broadcast=True (broadcast winner).
-    Silent candidates maintain active status for Stage 2 breakout without cooldown lock.
+    Records or refreshes a Pre-Squeeze Radar entry in state:
+    - Enforces a 4h cooldown after terminal states (INVALIDATED/FAILED/EXPIRED/TRIGGERED) so symbols don't immediately resurrect.
+    - Freezes trigger_entry, invalidation_sl, range_high/low, and first_detected_at while status == WATCHING.
+    - Resets first_detected_at cleanly when starting a genuinely fresh WATCHING cycle.
     """
     state = _load()
     sym = symbol.upper()
-    now_str = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now_str = now_dt.isoformat()
+    if "ACTIVE_RADARS" not in state or not isinstance(state["ACTIVE_RADARS"], dict):
+        state["ACTIVE_RADARS"] = {}
+
+    existing = state["ACTIVE_RADARS"].get(sym, {})
+    prev_status = str(existing.get("status") or "").upper()
+
+    if prev_status in ("INVALIDATED", "FAILED", "EXPIRED", "TRIGGERED"):
+        end_str = (
+            existing.get("invalidated_at")
+            or existing.get("failed_at")
+            or existing.get("expired_at")
+            or existing.get("triggered_at")
+            or existing.get("created_at")
+        )
+        if end_str:
+            try:
+                end_dt = datetime.fromisoformat(end_str)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                if (now_dt - end_dt).total_seconds() < 14400:
+                    return
+            except Exception:
+                pass
+
     if is_broadcast:
         state[f"RADAR_COOLDOWN|{sym}"] = now_str
         state["GLOBAL_RADAR_LAST_SENT"] = now_str
-    if "ACTIVE_RADARS" not in state or not isinstance(state["ACTIVE_RADARS"], dict):
-        state["ACTIVE_RADARS"] = {}
-    
-    existing = state["ACTIVE_RADARS"].get(sym, {})
-    first_detected = existing.get("first_detected_at") or existing.get("created_at") or now_str
-    was_broadcast = is_broadcast or existing.get("is_broadcast", False)
-    
-    state["ACTIVE_RADARS"][sym] = {
-        "symbol": sym,
-        "direction": radar_data.get("direction", "BUY"),
-        "squeeze_type": radar_data.get("squeeze_type", "SHORT SQUEEZE"),
-        "trigger_entry": radar_data.get("trigger_entry", 0.0),
-        "invalidation_sl": radar_data.get("invalidation_sl", 0.0),
-        "compression_pct": radar_data.get("compression_pct", 0.0),
-        "created_at": now_str,
-        "first_detected_at": first_detected,
-        "status": "WATCHING",
-        "is_broadcast": was_broadcast,
-        "tf_label": radar_data.get("tf_label", "1H"),
-        "coiling_score": radar_data.get("coiling_score", 0.0)
-    }
+
+    if prev_status == "WATCHING":
+        # Freeze box boundaries and first_detected_at while active!
+        existing["created_at"] = now_str
+        existing["compression_pct"] = radar_data.get("compression_pct", existing.get("compression_pct", 0.0))
+        existing["coiling_score"] = radar_data.get("coiling_score", existing.get("coiling_score", 0.0))
+        if is_broadcast:
+            existing["is_broadcast"] = True
+        state["ACTIVE_RADARS"][sym] = existing
+    else:
+        state["ACTIVE_RADARS"][sym] = {
+            "symbol": sym,
+            "direction": radar_data.get("direction", "BUY"),
+            "squeeze_type": radar_data.get("squeeze_type", "SHORT SQUEEZE"),
+            "trigger_entry": radar_data.get("trigger_entry", 0.0),
+            "invalidation_sl": radar_data.get("invalidation_sl", 0.0),
+            "range_high": radar_data.get("range_high", 0.0),
+            "range_low": radar_data.get("range_low", 0.0),
+            "compression_pct": radar_data.get("compression_pct", 0.0),
+            "created_at": now_str,
+            "first_detected_at": now_str,
+            "status": "WATCHING",
+            "is_broadcast": bool(is_broadcast),
+            "tf_label": radar_data.get("tf_label", "1H"),
+            "coiling_score": radar_data.get("coiling_score", 0.0),
+        }
     _save(state)
 
 def get_active_radar(symbol: str) -> dict:

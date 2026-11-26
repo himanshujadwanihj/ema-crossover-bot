@@ -327,6 +327,14 @@ def round_coin_qty(symbol: str, qty: float, price: float = 0.0) -> float:
 import asyncio
 _global_execution_lock = None
 
+def _resolve_target_r(state_entry: dict) -> float:
+    """Resolve target R-multiple (2.2R for Squeeze/Runaway/RangeBreak, 1.5R default)."""
+    if not state_entry:
+        return 1.5
+    uk = str(state_entry.get("unique_key", ""))
+    default_r = 2.2 if ("1H_RangeBreak" in uk or "Squeeze" in uk or "RunawayChase" in uk) else 1.5
+    return float(state_entry.get("target_r") or default_r)
+
 def _get_execution_lock():
     global _global_execution_lock
     if _global_execution_lock is None:
@@ -1398,7 +1406,7 @@ class SharkExchangeExecutor:
                 st_entry_check = get_latest_symbol_state(clean_sym)
                 target_r = 1.5
                 if st_entry_check:
-                    target_r = float(st_entry_check.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_entry_check.get("unique_key", "")) or "Squeeze" in str(st_entry_check.get("unique_key", "")) else 1.5))
+                    target_r = _resolve_target_r(st_entry_check)
 
                 is_cont_trailed = bool(st_entry_check and st_entry_check.get("continuation_trailed"))
                 trailed_tp_candidate = float((st_entry_check.get("tp1") if st_entry_check else 0) or tp1 or 0)
@@ -2608,7 +2616,7 @@ class SharkExchangeExecutor:
                 )
                 target_r = 1.5
                 if st_heal:
-                    target_r = float(st_heal.get("target_r") or (2.2 if "1H_RangeBreak" in str(st_heal.get("unique_key", "")) or "Squeeze" in str(st_heal.get("unique_key", "")) else 1.5))
+                    target_r = _resolve_target_r(st_heal)
 
                 if not tp1_already_hit and pos_qty_abs > 0 and tp_orders and not is_continuation_trailed and not self._tp_sl_heal_lock.get(realigned_key):
                     valid_tp_prices = [float(o.get("price") or 0) for o in tp_orders if float(o.get("price") or 0) > 0]

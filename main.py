@@ -24,7 +24,7 @@ from telegram_bot import (
     send_startup_message, send_text_alert, format_price, queue_alert, flush_alerts, 
     start_telegram_bot_service, stop_telegram_bot_service, send_text_to_chat
 )
-from executor import executor
+from executor import executor, round_price
 from pullback_tracker import check_symbol_pullbacks, WATCHLIST, SPECIAL_LIST
 from market_cache import update_symbol_cache
 
@@ -487,7 +487,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 logger.info(f"🎯 DETECTED 1H BULL TRAP: {symbol} swept {sweep_depth_pct:.2f}% above resistance, rejected with {upper_wick_ratio:.1%} upper wick (RSI {sq_rsi:.1f}). SELL Reversal Activated!")
 
                     # ─────────────────────────────────────────────────────────────
-                    # DUAL ENGINE: BRANCH B — CONTINUATION BREAKDOWN / BREAKOUT CHASER
+                    # DUAL ENGINE: BRANCH B — PRE-SQUEEZE RADAR (V2: Candle-Close Inv, 6h Window, 1H+4H Align, Retest-Only 2.2R)
                     # ─────────────────────────────────────────────────────────────
                     if not sq_signal:
                         # MODE A: Dedicated Pre-Squeeze Radar (Continuous Lifecycle Tracking)
@@ -496,15 +496,15 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             radar_invalidation = float(radar_entry.get('invalidation_sl', 0.0))
                             radar_dir = str(radar_entry.get('direction', '')).upper()
 
-                            # 1. Structure Invalidation Check:
+                            # 1. Confirmed 1H Candle-Close Invalidation Check (liquidity sweep wicks do NOT kill active coil):
                             is_invalidated = False
                             invalidation_reason = ""
-                            if radar_dir == 'BUY' and radar_invalidation > 0 and (c_low <= radar_invalidation or candle_close <= radar_invalidation):
+                            if radar_dir == 'BUY' and radar_invalidation > 0 and candle_close <= radar_invalidation:
                                 is_invalidated = True
-                                invalidation_reason = f"Price breached below support invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
-                            elif radar_dir == 'SELL' and radar_invalidation > 0 and (c_high >= radar_invalidation or candle_close >= radar_invalidation):
+                                invalidation_reason = f"1H candle closed below support invalidation SL ({format_price(radar_invalidation, symbol)})."
+                            elif radar_dir == 'SELL' and radar_invalidation > 0 and candle_close >= radar_invalidation:
                                 is_invalidated = True
-                                invalidation_reason = f"Price breached above resistance invalidation SL ({format_price(radar_invalidation, symbol)}). Coiling structure collapsed."
+                                invalidation_reason = f"1H candle closed above resistance invalidation SL ({format_price(radar_invalidation, symbol)})."
 
                             if is_invalidated:
                                 from state import mark_radar_invalidated
@@ -514,7 +514,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                 logger.info(f"🛑 RADAR INVALIDATED for {symbol}: {invalidation_reason}")
                                 has_radar = False
 
-                            # 2. 4-Hour Expiration Check (use immutable first_detected_at so re-coiling doesn't reset the timer):
+                            # 2. 6-Hour Expiration Check (use immutable first_detected_at so re-coiling doesn't reset the timer):
                             if has_radar:
                                 created_str = radar_entry.get("first_detected_at") or radar_entry.get("created_at")
                                 if created_str:
@@ -522,56 +522,44 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         created_dt = datetime.fromisoformat(created_str)
                                         if created_dt.tzinfo is None:
                                             created_dt = created_dt.replace(tzinfo=timezone.utc)
-                                        if (datetime.now(timezone.utc) - created_dt).total_seconds() > 14400:
+                                        if (datetime.now(timezone.utc) - created_dt).total_seconds() > 21600:
                                             from state import mark_radar_expired
                                             from telegram_bot import send_radar_status_update
-                                            exp_reason = "4 hours elapsed without breakout trigger. Consolidation lost momentum."
+                                            exp_reason = "6 hours elapsed without breakout close. Consolidation lost momentum."
                                             mark_radar_expired(symbol)
                                             await send_radar_status_update(radar_entry, status="EXPIRED", reason=exp_reason, candle_close=candle_close)
-                                            logger.info(f"⏱️ RADAR EXPIRED for {symbol} after 4h coiling window.")
+                                            logger.info(f"⏱️ RADAR EXPIRED for {symbol} after 6h coiling window.")
                                             has_radar = False
                                     except Exception:
                                         pass
 
-                            # 3. Breakout vs Fakeout Rejection Check:
+                            # 3. Confirmed Close Breakout Check (pre-close wicks keep WATCHING alive within 6h window):
                             if has_radar:
-                                attempted_breakout = False
-                                if radar_dir == 'BUY' and (c_high >= radar_trigger or candle_close >= radar_trigger):
-                                    attempted_breakout = True
-                                elif radar_dir == 'SELL' and (c_low <= radar_trigger or candle_close <= radar_trigger):
-                                    attempted_breakout = True
-
-                                if attempted_breakout:
-                                    if radar_dir == 'BUY' and candle_close >= (radar_trigger or (range_high * 1.002)):
+                                if radar_dir == 'BUY':
+                                    if candle_close >= (radar_trigger or (range_high * 1.001)):
                                         sq_signal = 'BUY'
-                                    elif radar_dir == 'SELL' and candle_close <= (radar_trigger or (range_low * 0.998)):
+                                    elif c_high >= radar_trigger:
+                                        logger.info(f"🕯️ PRE-CLOSE WICK PROBE for {symbol} BUY ({format_price(c_high, symbol)} -> close {format_price(candle_close, symbol)}) — keeping radar WATCHING.")
+                                elif radar_dir == 'SELL':
+                                    if candle_close <= (radar_trigger or (range_low * 0.999)):
                                         sq_signal = 'SELL'
-                                    else:
-                                        # Wicked past trigger, but closed back inside!
-                                        wick_p = c_high if radar_dir == 'BUY' else c_low
-                                        fail_reason = (
-                                            f"Price wicked to {format_price(wick_p, symbol)} beyond trigger "
-                                            f"({format_price(radar_trigger, symbol)}), but closed back inside range at "
-                                            f"{format_price(candle_close, symbol)}. Fakeout wick rejection!"
-                                        )
-                                        from state import mark_radar_failed
-                                        from telegram_bot import send_radar_status_update
-                                        mark_radar_failed(symbol, fail_reason)
-                                        await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
-                                        logger.info(f"⚠️ RADAR FAILED (Fakeout): {symbol} — {fail_reason}")
-                                        has_radar = False
+                                    elif c_low <= radar_trigger:
+                                        logger.info(f"🕯️ PRE-CLOSE WICK PROBE for {symbol} SELL ({format_price(c_low, symbol)} -> close {format_price(candle_close, symbol)}) — keeping radar WATCHING.")
 
-                        # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout
-                        # User Directive: Short Squeezes & Long Squeezes are genuine breakout moves;
-                        # they must NOT be blocked by counter HTF trend!
+                        # MODE B: Direct Multi-Hour Consolidation Breakdown / Breakout (Requires 1H+4H Alignment & Tight BB Pinch)
                         elif is_valid_consolidation:
-                            if candle_close <= (range_low * 0.998):
-                                sq_signal = 'SELL'
-                            elif candle_close >= (range_high * 1.002):
-                                sq_signal = 'BUY'
+                            bb_mid_1h = float(df_1h['close'].iloc[-21:-1].mean()) if len(df_1h) >= 21 else 0.0
+                            bb_std_1h = float(df_1h['close'].iloc[-21:-1].std()) if len(df_1h) >= 21 else 0.0
+                            bb_w_1h = ((4.0 * bb_std_1h) / bb_mid_1h * 100.0) if bb_mid_1h > 0 else 99.0
+                            h1_tr_b = str(tf_states.get("1H", "")).lower()
+                            h4_tr_b = str(tf_states.get("4H", "")).lower()
+                            if bb_w_1h <= 4.5:
+                                if candle_close <= (range_low * 0.998) and h1_tr_b == "bearish" and h4_tr_b == "bearish":
+                                    sq_signal = 'SELL'
+                                elif candle_close >= (range_high * 1.002) and h1_tr_b == "bullish" and h4_tr_b == "bullish":
+                                    sq_signal = 'BUY'
 
                         if sq_signal:
-                            # Chaser Validation Rules (Responsive triggers for pre-vetted Radar setups):
                             req_body = 0.35 if has_radar else 0.45
                             fail_reason = None
                             if body_ratio < req_body:
@@ -590,12 +578,6 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                             if fail_reason:
                                 logger.info(f"FILTERED 1H CHASER: {symbol} rejected — {fail_reason}")
                                 sq_signal = None
-                                if has_radar:
-                                    from state import mark_radar_failed
-                                    from telegram_bot import send_radar_status_update
-                                    mark_radar_failed(symbol, fail_reason)
-                                    await send_radar_status_update(radar_entry, status="FAILED", reason=fail_reason, candle_close=candle_close)
-                                    has_radar = False
 
                     if sq_signal:
                         from market_cache import is_btc_safe_for_altcoins
@@ -603,13 +585,6 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                         if not is_safe:
                             logger.info(f"FILTERED 1H SIGNAL: {symbol} {sq_signal} rejected by BTC Micro-Gate ({btc_reason}).")
                             sq_signal = None
-                            if has_radar:
-                                from state import mark_radar_failed
-                                from telegram_bot import send_radar_status_update
-                                btc_fail = f"BTC Micro-Gate safety block: {btc_reason} (Market crash risk)."
-                                mark_radar_failed(symbol, btc_fail)
-                                await send_radar_status_update(radar_entry, status="FAILED", reason=btc_fail, candle_close=candle_close)
-                                has_radar = False
 
                         # Breakout Freshness Guard: Reject historical signals older than 65 minutes
                         if sq_signal and candle_ts:
@@ -620,7 +595,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
 
                         unique_sq_key = f"1H_TrapReversal_{trap_direction}_{candle_ts}" if is_trap_reversal else (f"1H_RangeBreak_{sq_signal}_{candle_ts}" if not has_radar else f"1H_SqueezeBreakout_{sq_signal}_{candle_ts}")
                         if sq_signal and not is_already_sent(symbol, unique_sq_key, sq_signal, candle_ts):
-                            micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h)
+                            micro_1h = await fetch_futures_microstructure_async(session, symbol, sq_signal, df=df_1h, closed_only=True)
                             cvd_metrics = micro_1h.get("cvd_metrics", {})
                             cvd_aligned = cvd_metrics.get("is_aligned", True)
                             
@@ -649,61 +624,47 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                         tp2 = round_price(symbol, entry - (2.2 * risk))
                                         cross_type = "🩸 1H Bull Trap Reversal (Long Squeeze Flush + SFP ✅)"
                                 else:
-                                    # DUAL-MODE HYBRID CONTINUATION ENGINE:
-                                    # 1. WATERFALL MOMENTUM CHASE: If extreme volume (>= 2.0x SMA), solid body (>= 58%),
-                                    #    and strong CVD delta alignment exist, CHASE IMMEDIATELY at candle close so the big dump is NEVER missed!
-                                    # 2. DISCIPLINED RETEST LIMIT: In normal/moderate volume, place a resting LIMIT order at range boundary
-                                    #    to avoid buying top / selling bottom and completely eliminate fakeout wick losses.
+                                    # RETEST-ONLY LIMIT DISCIPLINE (V2): Never market-chase late 1H squeeze spikes;
+                                    # always place disciplined retest limit at frozen box boundary + max(1%, 1*ATR) SL floor!
                                     target_r = 2.2
-                                    is_waterfall_rush = (
-                                        vol_20_sma > 0 and 
-                                        breakout_vol >= (2.0 * vol_20_sma) and 
-                                        body_ratio >= 0.58 and
-                                        cvd_aligned
-                                    )
+                                    box_hi_ref = float(radar_entry.get("range_high") or range_high) if has_radar else range_high
+                                    box_lo_ref = float(radar_entry.get("range_low") or range_low) if has_radar else range_low
+                                    sl_floor = max(candle_close * 0.010, atr_1h)
 
                                     if sq_signal == 'BUY':
-                                        retest_target = range_high * 1.0015
-                                        if is_waterfall_rush:
-                                            # Immediate market chase — explosive rally in progress
-                                            entry = candle_close
-                                            logger.info(f"⚡ WATERFALL BREAKOUT RUSH: {symbol} Vol {breakout_vol/vol_20_sma:.1f}x SMA, Body {body_ratio:.1%} -> Immediate chase @ {entry}")
-                                        else:
-                                            # Disciplined pullback tap limit entry
-                                            entry = retest_target if candle_close > retest_target * 1.002 else min(candle_close, retest_target)
-                                            logger.info(f"🎯 RETEST LIMIT DISCIPLINE: {symbol} Normal volume -> Limit entry waiting at retest {entry}")
+                                        retest_target = box_hi_ref * 1.0015
+                                        entry = round_price(symbol, retest_target if candle_close > retest_target * 1.002 else min(candle_close, retest_target))
+                                        logger.info(f"🎯 1H SQUEEZE RETEST LIMIT (V2): {symbol} BUY limit @ {entry} (box high {box_hi_ref})")
 
-                                        sl = float(df_1h['low'].iloc[-4:].min()) * 0.998
+                                        sl = float(df_1h['low'].iloc[-5:-1].min()) * 0.998
                                         if ema_26_1h:
                                             sl = min(sl, ema_26_1h - (0.25 * atr_1h))
-                                        # Max Risk Clamp: Prevent SL from exceeding 2.5% on 10x leverage
+                                        if (entry - sl) < sl_floor:
+                                            sl = entry - sl_floor
                                         if entry and sl and (entry - sl) > (candle_close * 0.025):
-                                            sl = round_price(symbol, entry - (candle_close * 0.025))
+                                            sl = entry - (candle_close * 0.025)
+                                        sl = round_price(symbol, sl)
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry + (target_r * risk))
                                         tp2 = round_price(symbol, entry + (3.2 * risk))
-                                        cross_type = "🚀 1H Waterfall Breakout (Momentum Rush + CVD ✅)" if is_waterfall_rush else ("🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Bounce + CVD ✅)")
+                                        cross_type = "🚀 1H Range Breakout (Volume Expansion + CVD ✅)" if not has_radar else "🚀 1H Short-Squeeze Breakout (Retest Limit + CVD ✅)"
                                     else:
-                                        retest_target = range_low * 0.9985
-                                        if is_waterfall_rush:
-                                            # Immediate market chase — panic waterfall dump in progress
-                                            entry = candle_close
-                                            logger.info(f"⚡ WATERFALL BREAKDOWN RUSH: {symbol} Vol {breakout_vol/vol_20_sma:.1f}x SMA, Body {body_ratio:.1%} -> Immediate chase @ {entry}")
-                                        else:
-                                            # Disciplined pullback tap limit entry
-                                            entry = retest_target if candle_close < retest_target * 0.998 else max(candle_close, retest_target)
-                                            logger.info(f"🎯 RETEST LIMIT DISCIPLINE: {symbol} Normal volume -> Limit entry waiting at retest {entry}")
+                                        retest_target = box_lo_ref * 0.9985
+                                        entry = round_price(symbol, retest_target if candle_close < retest_target * 0.998 else max(candle_close, retest_target))
+                                        logger.info(f"🎯 1H SQUEEZE RETEST LIMIT (V2): {symbol} SELL limit @ {entry} (box low {box_lo_ref})")
 
-                                        sl = float(df_1h['high'].iloc[-4:].max()) * 1.002
+                                        sl = float(df_1h['high'].iloc[-5:-1].max()) * 1.002
                                         if ema_26_1h:
                                             sl = max(sl, ema_26_1h + (0.25 * atr_1h))
-                                        # Max Risk Clamp: Prevent SL from exceeding 2.5% on 10x leverage
+                                        if (sl - entry) < sl_floor:
+                                            sl = entry + sl_floor
                                         if entry and sl and (sl - entry) > (candle_close * 0.025):
-                                            sl = round_price(symbol, entry + (candle_close * 0.025))
+                                            sl = entry + (candle_close * 0.025)
+                                        sl = round_price(symbol, sl)
                                         risk = abs(entry - sl) if (entry and sl and entry != sl) else (candle_close * 0.015)
                                         tp1 = round_price(symbol, entry - (target_r * risk))
                                         tp2 = round_price(symbol, entry - (3.2 * risk))
-                                        cross_type = "🩸 1H Waterfall Breakdown (Momentum Rush + CVD ✅)" if is_waterfall_rush else ("🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Bounce + CVD ✅)")
+                                        cross_type = "🩸 1H Range Breakdown (Volume Expansion + CVD ✅)" if not has_radar else "🩸 1H Long-Squeeze Breakdown (Retest Limit + CVD ✅)"
 
                                 if sq_signal:
                                     dyn_sl = sl
@@ -762,15 +723,119 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
                                             "rsi": sq_rsi,
                                         }
                             elif has_radar:
-                                cvd_fail = "Whale CVD Divergence: Aggressive delta selling detected during breakout candle."
-                                logger.info(f"FILTERED 1H SQUEEZE: {symbol} — {cvd_fail}")
-                                from state import mark_radar_failed
-                                from telegram_bot import send_radar_status_update
-                                mark_radar_failed(symbol, cvd_fail)
-                                await send_radar_status_update(radar_entry, status="FAILED", reason=cvd_fail, candle_close=candle_close)
-                                has_radar = False
+                                logger.info(f"FILTERED 1H SQUEEZE CVD: {symbol} — waiting on closed candle CVD alignment (radar stays WATCHING).")
             except Exception as e_sq_eng:
-                logger.debug(f"Squeeze engine error for {symbol}: {e_sq_eng}")
+                logger.warning(f"Squeeze engine error for {symbol}: {e_sq_eng}", exc_info=True)
+
+        # -- 0B. 15M 8H-BREAKOUT RUNAWAY CHASE ENGINE (Wide 1H ATR SL, 2.2R) --
+        # Catches fast 1-way runaway pumps/dumps on 15M aligned with 1H+4H+BTC (1H ADX>=22, >=1.8x Vol, >=50% Body).
+        rc_candidate = None
+        df_15m_rc = tf_data.get("15M") if tf_data.get("15M") is not None else tf_data.get("15m")
+        if df_15m_rc is not None and len(df_15m_rc) >= 36 and df_1h is not None and len(df_1h) >= 26:
+            try:
+                from state import is_coin_on_cooldown, set_coin_cooldown
+                c15_dt = df_15m_rc.index[-2]
+                if hasattr(c15_dt, "tzinfo") and c15_dt.tzinfo is None:
+                    c15_dt = c15_dt.replace(tzinfo=timezone.utc)
+                elif not hasattr(c15_dt, "tzinfo"):
+                    c15_dt = pd.to_datetime(c15_dt, utc=True)
+
+                secs_15 = (datetime.now(timezone.utc) - c15_dt).total_seconds()
+                if 0 <= secs_15 <= 1020 and not is_coin_on_cooldown(symbol, "15M_RUNAWAY", max_hours=2.0):
+                    from indicators import _compute_indicators
+                    df_15m_ind = _compute_indicators(df_15m_rc)
+                    df_1h_ind_rc = _compute_indicators(df_1h)
+
+                    d15_hi = float(df_15m_rc['high'].iloc[-34:-2].max())
+                    d15_lo = float(df_15m_rc['low'].iloc[-34:-2].min())
+                    c15_open = float(df_15m_rc['open'].iloc[-2])
+                    c15_high = float(df_15m_rc['high'].iloc[-2])
+                    c15_low = float(df_15m_rc['low'].iloc[-2])
+                    c15_close = float(df_15m_rc['close'].iloc[-2])
+                    c15_vol = float(df_15m_rc['volume'].iloc[-2])
+                    vol_sma_15 = float(df_15m_rc['volume'].iloc[-22:-2].mean()) if len(df_15m_rc) >= 22 else c15_vol
+                    body_15 = abs(c15_close - c15_open) / max(c15_high - c15_low, 1e-8)
+                    rsi_15_rc = float(df_15m_ind['rsi'].iloc[-2]) if 'rsi' in df_15m_ind and not pd.isna(df_15m_ind['rsi'].iloc[-2]) else 50.0
+                    adx_1h_rc = float(df_1h_ind_rc['adx'].iloc[-2]) if 'adx' in df_1h_ind_rc and not pd.isna(df_1h_ind_rc['adx'].iloc[-2]) else 0.0
+                    atr_1h_rc = float(df_1h_ind_rc['atr'].iloc[-2]) if 'atr' in df_1h_ind_rc and not pd.isna(df_1h_ind_rc['atr'].iloc[-2]) else (c15_close * 0.01)
+
+                    h1_tr_rc = str(tf_states.get("1H", "")).lower()
+                    h4_tr_rc = str(tf_states.get("4H", "")).lower()
+                    rc_signal = None
+
+                    if adx_1h_rc >= 22.0 and vol_sma_15 > 0 and c15_vol >= (1.8 * vol_sma_15) and body_15 >= 0.50:
+                        if c15_close > (d15_hi * 1.001) and h1_tr_rc == "bullish" and h4_tr_rc == "bullish" and rsi_15_rc <= 72.0:
+                            rc_signal = "BUY"
+                        elif c15_close < (d15_lo * 0.999) and h1_tr_rc == "bearish" and h4_tr_rc == "bearish" and rsi_15_rc >= 28.0:
+                            rc_signal = "SELL"
+
+                    if rc_signal:
+                        from market_cache import is_btc_safe_for_altcoins
+                        is_btc_ok, btc_rc_reason = is_btc_safe_for_altcoins(rc_signal, symbol, tf_data)
+                        candle_15_ts = str(df_15m_rc.index[-2])
+                        unique_rc_key = f"15M_RunawayChase_{rc_signal}_{candle_15_ts}"
+                        if is_btc_ok and not is_already_sent(symbol, unique_rc_key, rc_signal, candle_15_ts):
+                            target_r = 2.2
+                            entry = round_price(symbol, c15_close)
+                            sl_dist = min(max(1.2 * atr_1h_rc, c15_close * 0.015), c15_close * 0.025)
+                            sl = round_price(symbol, (entry - sl_dist) if rc_signal == "BUY" else (entry + sl_dist))
+                            risk = abs(entry - sl) if (entry and sl and entry != sl) else (c15_close * 0.015)
+                            tp1 = round_price(symbol, (entry + target_r * risk) if rc_signal == "BUY" else (entry - target_r * risk))
+                            tp2 = round_price(symbol, (entry + 3.2 * risk) if rc_signal == "BUY" else (entry - 3.2 * risk))
+                            cross_type_rc = "⚡ 15M Runaway Chase (8H Breakout + Wide 1H ATR SL ✅)"
+
+                            from telegram_bot import queue_alert
+                            rc_queued = await queue_alert(
+                                symbol=symbol,
+                                tf_label="15M",
+                                signal=rc_signal,
+                                entry=entry,
+                                sl=sl,
+                                tp=tp1,
+                                tf_states=tf_states,
+                                cross_type=cross_type_rc,
+                                candle_time=candle_15_ts,
+                                macro_struct=macro_struct,
+                                tp1=tp1, tp2=tp2,
+                                rr1=target_r, rr2=3.2,
+                                lbl1="2.2R Target", lbl2="3.2R Extended",
+                                tf_data=tf_data,
+                                is_special_list=(symbol in SPECIAL_LIST),
+                                rsi=rsi_15_rc,
+                                adx=adx_1h_rc,
+                                is_runaway_chase=True,
+                            )
+                            if rc_queued:
+                                mark_sent(symbol, unique_rc_key, rc_signal, candle_15_ts, entry=entry, sl=sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
+                                set_coin_cooldown(symbol, "15M_RUNAWAY")
+                                aligned_rc = sum(1 for t in ["1H", "4H", "1D", "1W"] if tf_states.get(t, "neutral").lower() == ("bullish" if rc_signal == "BUY" else "bearish"))
+                                rc_candidate = {
+                                    "symbol": symbol,
+                                    "signal": rc_signal,
+                                    "entry": entry,
+                                    "sl": sl,
+                                    "tp1": tp1,
+                                    "tp2": tp2,
+                                    "tp": tp1,
+                                    "target_r": target_r,
+                                    "aligned_count": max(aligned_rc, 2),
+                                    "is_3_htf_aligned": aligned_rc >= 3,
+                                    "is_30m_early": False,
+                                    "is_special": (symbol in SPECIAL_LIST),
+                                    "is_runaway_chase": True,
+                                    "unique_key": unique_rc_key,
+                                    "candle_ts": candle_15_ts,
+                                    "rr2": target_r,
+                                    "rsi": rsi_15_rc,
+                                    "adx": adx_1h_rc,
+                                    "tf_label": "15M",
+                                    "cross_type": cross_type_rc,
+                                }
+                                logger.info(f"⚡ 15M 8H-BREAKOUT RUNAWAY CHASE TRIGGERED: {symbol} [{rc_signal}] @ {entry} SL={sl} TP={tp1} (ADX={adx_1h_rc:.1f}, Vol={c15_vol/vol_sma_15:.1f}x)")
+                        elif not is_btc_ok:
+                            logger.debug(f"FILTERED 15M RUNAWAY {symbol} {rc_signal} — {btc_rc_reason}")
+            except Exception as e_rc:
+                logger.warning(f"15M runaway chase engine error for {symbol}: {e_rc}", exc_info=True)
 
         # -- 1. EMA CROSSOVER ENGINE --
         # BUG #1 FIX: Collect ALL crossover candidates from ALL timeframes (not just the first one).
@@ -778,6 +843,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None):
         all_crossover_candidates = []
         if sq_candidate:
             all_crossover_candidates.append(sq_candidate)
+        if rc_candidate:
+            all_crossover_candidates.append(rc_candidate)
 
         for label in ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]:
             is_gold = symbol in ["XAU/USD", "XAUT/USDT", "XAUTUSDT"] or "XAU" in symbol.upper()
@@ -1007,7 +1074,7 @@ async def scan_single_symbol_async(session, symbol, semaphore):
                     from fetcher import fetch_futures_microstructure_async
                     micro_radar = await fetch_futures_microstructure_async(session, symbol, signal=None, df=df_1h)
                     from indicators import evaluate_watchlist_coiling_candidate
-                    eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H")
+                    eval_res = evaluate_watchlist_coiling_candidate(symbol, df_1h, micro_radar, tf_states, tf_label="1H", tf_data=tf_data)
                     if eval_res.get("eligible"):
                         radar_cand = eval_res
                         logger.info(f"🎯 Verified 1H Watchlist Coiling Candidate: {symbol} ({radar_cand['direction']}) | Score: {radar_cand.get('coiling_score')} | Comp: {radar_cand.get('compression_pct')}%")
@@ -1551,7 +1618,7 @@ async def main_loop():
                                     return True, "Eligible (1H SFP / Trap Reversal with Reclaim + Sweep Guard)"
 
                                 # USER DIRECTIVE: Squeeze Breakout Trades Included in Auto-Trading!
-                                # Dedicated 1H Squeeze Breakout: already passed institutional 6-point verification (TTM squeeze coiling + volume surge >= 1.5x + CVD aligned + body ratio >= 50% + wick cap <= 35% + BTC micro-gate)
+                                # Dedicated 1H Squeeze Breakout: already passed institutional 6-point verification + V2 Retest-Only
                                 if c.get("is_dedicated_squeeze"):
                                     if rsi is not None:
                                         try:
@@ -1564,6 +1631,19 @@ async def main_loop():
                                         except (ValueError, TypeError):
                                             pass
                                     return True, "Eligible (1H Squeeze Breakout with Verified Coiling + CVD)"
+
+                                # USER DIRECTIVE: 15M 8H-Breakout Runaway Chase (Wide 1H ATR SL, 2.2R)
+                                if c.get("is_runaway_chase"):
+                                    if rsi is not None:
+                                        try:
+                                            f_rsi = float(rsi)
+                                            if sig == "BUY" and f_rsi > 72.0:
+                                                return False, f"Runaway BUY RSI {f_rsi:.1f} > 72.0 (Exhausted)."
+                                            elif sig == "SELL" and f_rsi < 28.0:
+                                                return False, f"Runaway SELL RSI {f_rsi:.1f} < 28.0 (Exhausted)."
+                                        except (ValueError, TypeError):
+                                            pass
+                                    return True, "Eligible (15M 8H-Breakout Runaway Chase + 1H/4H/BTC + Wide ATR SL)"
 
                                 # STRICT USER DIRECTIVE: Execute 3-Star (3/4) & 4-Star (4/4) setups!
                                 if stars < 3:
@@ -1713,7 +1793,7 @@ async def main_loop():
 
                                     stars = c.get("aligned_count", 0)
                                     early = 0.5 if c.get("is_30m_early") else 0.0
-                                    sq_boost = 1.0 if c.get("is_dedicated_squeeze") else 0.0
+                                    sq_boost = 1.0 if (c.get("is_dedicated_squeeze") or c.get("is_runaway_chase")) else 0.0
                                     signal_score = stars + early + sq_boost
                                     rr_score = c.get("rr3") or c.get("rr2") or 1.5
                                     return (tier, signal_score, rr_score)

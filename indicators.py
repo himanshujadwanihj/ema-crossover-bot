@@ -824,18 +824,13 @@ def detect_pre_squeeze_coiling(df: pd.DataFrame, symbol: str = "") -> dict:
         return {"is_coiled": False}
 
 
-def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None, tf_states: dict = None, tf_label: str = "1H") -> dict:
+def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None, tf_states: dict = None, tf_label: str = "1H", tf_data: dict = None) -> dict:
     """
     Performs institutional 6-point verification for Stage 1: Watchlist Coiling / Pre-Squeeze Radar (1H TF & Above).
-    All criteria MUST pass (proper ticks):
-    1. Active Market & Liquidity (US Stock hours check, 24h Vol >= $10M)
-    2. Range Compression (coiling bounds tailored for timeframe)
-    3. Volatility Pinch (TTM Squeeze ON or BB width pinch)
-    4. Smart Money OI Accumulation (1H OI change >= +0.50%)
-    5. Leverage / Directional Bias (Dislocation funding or aligned trend)
-    6. Action Levels Defined (Trigger entry + Invalidation SL)
+    Uses completed closed candles, 1H+4H trend / meaningful funding alignment, BTC Micro-Gate pre-check,
+    and ATR-buffered invalidation SL so normal wicks do not falsely kill valid squeezes.
     """
-    if df_tf is None or len(df_tf) < 25:
+    if df_tf is None or len(df_tf) < 26:
         return {"eligible": False, "reason": "Insufficient candles"}
 
     try:
@@ -843,6 +838,9 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         from datetime import datetime, timezone
         from config import US_STOCK_TOKENS
         import pandas as pd
+
+        # Always evaluate on COMPLETED closed candles (exclude live forming bar iloc[-1])
+        df_eval = df_tf.iloc[:-1] if len(df_tf) >= 26 else df_tf
 
         # ── TICK 1: ACTIVE MARKET & LIQUIDITY CHECK ──
         sym_clean = symbol.upper().strip()
@@ -853,24 +851,21 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         if sym_base in stock_tokens:
             tz_ist = zoneinfo.ZoneInfo("Asia/Kolkata")
             now_ist = datetime.now(timezone.utc).astimezone(tz_ist)
-            # US stocks / tokens active on all weekdays (Mon-Fri)
             if now_ist.weekday() >= 5:
                 return {"eligible": False, "reason": "US stock closed on weekend"}
 
-        # Calculate 24h USD volume: 24 bars for 1H, 96 bars for 15M
         n_bars = 24 if tf_label.upper() == "1H" else 96
-        vol_slice = df_tf['volume'].iloc[-n_bars:] if len(df_tf) >= n_bars else df_tf['volume']
-        price_slice = df_tf['close'].iloc[-n_bars:] if len(df_tf) >= n_bars else df_tf['close']
+        vol_slice = df_eval['volume'].iloc[-n_bars:] if len(df_eval) >= n_bars else df_eval['volume']
+        price_slice = df_eval['close'].iloc[-n_bars:] if len(df_eval) >= n_bars else df_eval['close']
         vol_24h_usd = float((vol_slice * price_slice).sum())
 
-        # For commodities like Gold (XAU/USD) and US Stock tokens, bypass crypto dollar volume threshold
         is_gold = "XAU" in sym_clean or "GOLD" in sym_clean
         is_gold_or_stock = is_gold or (sym_base in stock_tokens)
         if not is_gold_or_stock and vol_24h_usd < 2_500_000.0:
             return {"eligible": False, "reason": f"24h volume ${vol_24h_usd/1e6:.1f}M below $2.5M threshold"}
 
-        # ── TICK 2: VOLATILITY SQUEEZE PINCH (TTM Squeeze or BB Width Pinch) ──
-        close = df_tf['close']
+        # ── TICK 2: VOLATILITY SQUEEZE PINCH (TTM Squeeze or BB Width Pinch <= 4.5%) ──
+        close = df_eval['close']
         bb_mid = close.rolling(20).mean()
         bb_std = close.rolling(20).std()
         bb_upper = bb_mid + (2.0 * bb_std)
@@ -878,32 +873,33 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         bb_width_pct = float((bb_upper.iloc[-1] - bb_lower.iloc[-1]) / bb_mid.iloc[-1]) * 100.0
 
         kc_mid = close.ewm(span=20, adjust=False).mean()
-        high_low = df_tf['high'] - df_tf['low']
-        high_close = (df_tf['high'] - close.shift(1)).abs()
-        low_close = (df_tf['low'] - close.shift(1)).abs()
+        high_low = df_eval['high'] - df_eval['low']
+        high_close = (df_eval['high'] - close.shift(1)).abs()
+        low_close = (df_eval['low'] - close.shift(1)).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr_20 = tr.rolling(20).mean()
+        atr_14_ser = tr.rolling(14).mean()
         kc_upper = kc_mid + (1.5 * atr_20)
         kc_lower = kc_mid - (1.5 * atr_20)
 
         ttm_squeeze = bool((bb_lower.iloc[-1] >= kc_lower.iloc[-1]) and (bb_upper.iloc[-1] <= kc_upper.iloc[-1]))
-        max_bb_width = 5.00 if tf_label.upper() == "1H" else 2.50
+        max_bb_width = 4.50 if tf_label.upper() == "1H" else 2.50
         is_bb_pinched = bb_width_pct <= max_bb_width
 
         if not (ttm_squeeze or is_bb_pinched):
             return {"eligible": False, "reason": f"No squeeze pinch (TTM: {ttm_squeeze}, BB width: {bb_width_pct:.2f}%)"}
 
-        # ── TICK 3: GENUINE RANGE COMPRESSION (Tailored for 1H TF: 0.40% <= comp <= 5.80% / 6.80%) ──
-        recent_12 = df_tf.iloc[-12:]
+        # ── TICK 3: GENUINE RANGE COMPRESSION (12 closed 1H bars) ──
+        recent_12 = df_eval.iloc[-12:]
         range_high = float(recent_12['high'].max())
         range_low = float(recent_12['low'].min())
-        curr_price = float(df_tf['close'].iloc[-1])
+        curr_price = float(df_eval['close'].iloc[-1])
         if curr_price <= 0:
             return {"eligible": False, "reason": "Invalid price"}
 
         compression_pct = ((range_high - range_low) / curr_price) * 100.0
         min_comp = 0.40 if tf_label.upper() == "1H" else 0.30
-        max_comp = (6.80 if ttm_squeeze else 5.80) if tf_label.upper() == "1H" else 2.50
+        max_comp = (6.00 if ttm_squeeze else 5.00) if tf_label.upper() == "1H" else 2.50
 
         if compression_pct < min_comp:
             return {"eligible": False, "reason": f"Dead flatline (compression {compression_pct:.2f}% < {min_comp}%)"}
@@ -916,46 +912,45 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         if not is_gold_or_stock and oi_change_1h < -1.50:
             return {"eligible": False, "reason": f"Heavy OI outflow {oi_change_1h:+.2f}% < -1.50%"}
 
-        # ── TICK 5: DIRECTIONAL & LEVERAGE BIAS (RSI EXHAUSTION + FUNDING + TREND) ──
+        # ── TICK 5: TREND & LEVERAGE ALIGNMENT (1H+4H aligned, or extreme >= 0.025% funding dislocation) ──
         funding_pct = float(micro.get("funding_pct", 0.0))
         tf_states = tf_states or {}
         h1_trend = str(tf_states.get("1H", "neutral")).lower()
         h4_trend = str(tf_states.get("4H", "neutral")).lower()
 
-        if 'rsi' not in df_tf or df_tf['rsi'].isna().all():
-            df_tf = _compute_indicators(df_tf)
-        c_rsi = float(df_tf['rsi'].iloc[-1]) if ('rsi' in df_tf and not pd.isna(df_tf['rsi'].iloc[-1])) else 50.0
-
-        is_oversold_reversal = c_rsi < 38.0
-        is_overbought_reversal = c_rsi > 62.0
-
-        if funding_pct <= -0.0050 or is_oversold_reversal:
+        if h1_trend == "bullish" and h4_trend == "bullish":
             direction = "BUY"
-            squeeze_type = "🚀 SHORT SQUEEZE (Oversold Sellers Trap)" if is_oversold_reversal else "🚀 SHORT SQUEEZE (Trapped Shorts)"
-        elif funding_pct >= 0.0200 or is_overbought_reversal:
+            squeeze_type = "🚀 SHORT SQUEEZE (Bullish Trend Base)"
+        elif h1_trend == "bearish" and h4_trend == "bearish":
             direction = "SELL"
-            squeeze_type = "🩸 LONG SQUEEZE (Overbought Buyers Trap)" if is_overbought_reversal else "🩸 LONG SQUEEZE (Trapped Longs)"
-        elif h1_trend == "bullish" or h4_trend == "bullish":
+            squeeze_type = "🩸 LONG SQUEEZE (Bearish Trend Breakdown)"
+        elif funding_pct <= -0.0250:
             direction = "BUY"
-            squeeze_type = "🚀 SHORT SQUEEZE (Bullish Base)"
-        elif h1_trend == "bearish" or h4_trend == "bearish":
+            squeeze_type = "🚀 SHORT SQUEEZE (Heavy Trapped Shorts)"
+        elif funding_pct >= 0.0250:
             direction = "SELL"
-            squeeze_type = "🩸 LONG SQUEEZE (Bearish Breakdown)"
+            squeeze_type = "🩸 LONG SQUEEZE (Heavy Trapped Longs)"
         else:
-            mid_price = (range_high + range_low) / 2.0
-            direction = "BUY" if curr_price >= mid_price else "SELL"
-            squeeze_type = "🚀 SHORT SQUEEZE (Bullish Base)" if direction == "BUY" else "🩸 LONG SQUEEZE (Bearish Base)"
+            return {"eligible": False, "reason": f"No 1H+4H alignment (1H={h1_trend}, 4H={h4_trend}) or extreme funding"}
 
-        # ── TICK 6: ACTION LEVELS DEFINED ──
-        if is_oversold_reversal:
-            trigger_entry = range_low * 1.0015  # Support reclaim trigger
-            invalidation_sl = range_low * 0.995   # Invalidation below support sweep
-        elif is_overbought_reversal:
-            trigger_entry = range_high * 0.9985 # Resistance rejection trigger
-            invalidation_sl = range_high * 1.005  # Invalidation above resistance sweep
+        # Pre-check Stage 1 with BTC Micro-Gate so Stage 1 only tracks setups Stage 2 can actually take
+        try:
+            from market_cache import is_btc_safe_for_altcoins
+            btc_ok, btc_reason = is_btc_safe_for_altcoins(direction, symbol, tf_data)
+            if not btc_ok:
+                return {"eligible": False, "reason": f"BTC Micro-Gate mismatch: {btc_reason}"}
+        except Exception:
+            pass
+
+        # ── TICK 6: OUTER BREAKOUT TRIGGER & ATR/STRUCTURE-SAFE INVALIDATION ──
+        atr_val = float(atr_14_ser.iloc[-1]) if not pd.isna(atr_14_ser.iloc[-1]) else (curr_price * 0.01)
+        inv_buffer = max(curr_price * 0.008, 0.60 * atr_val)
+        if direction == "BUY":
+            trigger_entry = range_high * 1.001
+            invalidation_sl = range_low - inv_buffer
         else:
-            trigger_entry = range_high * 1.001 if direction == "BUY" else range_low * 0.999
-            invalidation_sl = range_low * 0.998 if direction == "BUY" else range_high * 1.002
+            trigger_entry = range_low * 0.999
+            invalidation_sl = range_high + inv_buffer
 
         # Coiling Quality Score (Positive OI gets bonus, flat OI remains eligible)
         coiling_score = (max_comp - compression_pct) * 2.0 + min(max(oi_change_1h, 0.0), 5.0) * 1.5 + (2.0 if ttm_squeeze else 0.0)
