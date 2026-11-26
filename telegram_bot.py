@@ -2736,3 +2736,180 @@ async def send_circuit_breaker_resumed_alert() -> None:
         await send_text_alert(msg)
     except Exception as e:
         logger.error(f"Failed to send circuit breaker resumed alert: {e}")
+
+
+def build_market_inactivity_message(diag: dict = None) -> str:
+    """
+    Builds a clear, data-backed Telegram update explaining why no trade executed
+    over an extended quiet market period (2.5h+) and confirming nonstop scanning.
+    """
+    import html as _html
+    from market_cache import summarize_market_regime_snapshot
+    from indicators import get_btc_shock_context
+    from state import get_all_active_radars, is_trading_paused, get_circuit_breaker_status
+
+    diag = diag or {}
+    idle_secs = max(0.0, float(diag.get("idle_secs") or 9000.0))
+    idle_hrs = int(idle_secs // 3600)
+    idle_mins = int((idle_secs % 3600) // 60)
+    idle_disp = f"{idle_hrs}h {idle_mins}m" if idle_hrs > 0 else f"{idle_mins}m"
+
+    scans_completed = int(diag.get("scans_completed") or 0)
+    pairs_scanned = int(diag.get("pairs_scanned") or 0)
+    open_pos_cnt = int(diag.get("active_open_positions") or 0)
+    rej_counts = diag.get("rejection_counts") or {}
+    samples = diag.get("recent_samples") or []
+
+    regime = summarize_market_regime_snapshot()
+    shock_ctx = get_btc_shock_context()
+    is_cb_paused, cb_rem_secs, _ = is_trading_paused()
+    cb_state = get_circuit_breaker_status()
+    active_radars = get_all_active_radars() or {}
+
+    reasons = []
+    if is_cb_paused:
+        reasons.append(
+            f"<b>Risk Circuit Breaker Pause:</b> {int(cb_state.get('consecutive_sl_count', 5))} consecutive SLs hit — "
+            f"capital shield active ({cb_rem_secs / 60:.0f}m cooldown left)."
+        )
+
+    if shock_ctx.get("active"):
+        shock_dir = _html.escape(str(shock_ctx.get("direction") or "HIGH VOL"), quote=False)
+        if shock_ctx.get("is_clean_cascade"):
+            reasons.append(
+                f"<b>BTC Volatility Shock ({shock_dir} Cascade):</b> Altcoins capped under strict exposure shield to prevent multi-SL whipsaws."
+            )
+        else:
+            reasons.append(
+                f"<b>BTC Choppy Volatility Shock ({shock_ctx.get('remaining_min', 0):.0f}m left):</b> Altcoin execution paused to avoid whipsaw stop-losses."
+            )
+
+    btc_tfs = regime.get("btc_trends") or {}
+    total_cached = int(regime.get("total_coins") or 0)
+    split_cnt = int(regime.get("htf_split_count") or 0)
+    aligned_cnt = int(regime.get("aligned_3star_count") or 0)
+    ob_cnt = int(regime.get("overbought_count") or 0)
+    os_cnt = int(regime.get("oversold_count") or 0)
+    chop_cnt = int(regime.get("choppy_adx_count") or 0)
+
+    if total_cached > 0:
+        btc_1h = _html.escape(str(btc_tfs.get("1H", "?")), quote=False)
+        btc_4h = _html.escape(str(btc_tfs.get("4H", "?")), quote=False)
+        btc_1d = _html.escape(str(btc_tfs.get("1D", "?")), quote=False)
+        if btc_1h != "?" or btc_4h != "?":
+            reasons.append(
+                f"<b>BTC Structure Split:</b> 1H <code>{btc_1h}</code> vs 4H <code>{btc_4h}</code> / 1D <code>{btc_1d}</code> "
+                f"— opposing higher timeframes."
+            )
+        if split_cnt > 0:
+            reasons.append(
+                f"<b>HTF Counter-Trend Market:</b> <code>{split_cnt}/{total_cached}</code> scanned pairs show conflicting timeframes "
+                f"(only <code>{aligned_cnt}</code> coin(s) cleanly 3★ aligned)."
+            )
+        ext_parts = []
+        if ob_cnt > 0:
+            ext_parts.append(f"<code>{ob_cnt}</code> overbought (RSI&gt;62)")
+        if os_cnt > 0:
+            ext_parts.append(f"<code>{os_cnt}</code> oversold (RSI&lt;38)")
+        if chop_cnt > 0:
+            ext_parts.append(f"<code>{chop_cnt}</code> low-trend chop (ADX&lt;20)")
+        if ext_parts:
+            reasons.append(f"<b>Overextended / Choppy Zone:</b> {', '.join(ext_parts)}.")
+
+    rej_labels = []
+    if rej_counts.get("low_stars"):
+        rej_labels.append(f"{rej_counts['low_stars']} setup(s) &lt; 3★ alignment")
+    if rej_counts.get("rsi_or_score"):
+        rej_labels.append(f"{rej_counts['rsi_or_score']} blocked by extended RSI / AI Score &lt;= 77")
+    if rej_counts.get("btc_gate"):
+        rej_labels.append(f"{rej_counts['btc_gate']} blocked by BTC Micro-Gate")
+    if rej_counts.get("funding_shield"):
+        rej_labels.append(f"{rej_counts['funding_shield']} blocked by crowded Funding Rate")
+    if rej_counts.get("risk_cap"):
+        rej_labels.append(f"{rej_counts['risk_cap']} capped by risk shield")
+
+    if rej_labels:
+        sample_txt = ""
+        if samples:
+            safe_samples = ", ".join(_html.escape(str(s), quote=False) for s in samples[:3])
+            sample_txt = f" <i>(e.g. {safe_samples})</i>"
+        reasons.append(f"<b>Quality Filters Active:</b> {', '.join(rej_labels)}{sample_txt}.")
+    elif not is_cb_paused and not shock_ctx.get("active"):
+        reasons.append(
+            "<b>No Clean Crossovers / Breakouts:</b> Market is consolidating with zero fresh high-conviction EMA crosses, "
+            "1H Squeeze breakouts, or 15M Runaway momentum."
+        )
+
+    if len(active_radars) > 0:
+        reasons.append(
+            f"<b>Coiling Watchlist Active:</b> Tracking <code>{len(active_radars)}</code> 1H Pre-Squeeze setup(s) waiting for volume breakout."
+        )
+
+    reason_bullets = "\n".join(f"• {r}" for r in reasons[:6])
+    pairs_disp = pairs_scanned or total_cached or "all Top 25+ Crypto &amp; Commodities"
+    scan_line = (
+        f"Actively scanning <b>{pairs_disp} pairs</b> every second "
+        f"(<code>{scans_completed}</code> full scans completed cleanly)."
+        if scans_completed > 0
+        else f"Actively scanning <b>{pairs_disp} pairs</b> continuously every few seconds."
+    )
+    pos_line = f"\n📌 <b>Live Open Positions:</b> <code>{open_pos_cnt}</code> active position(s) managed by TP/SL monitor." if open_pos_cnt > 0 else ""
+
+    return (
+        f"📡 <b>LIVE MARKET SCANNER UPDATE: NO NEW TRADES ({idle_disp})</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ <b>Quiet Window:</b> No trade triggered in the last <b>{idle_disp}</b>\n"
+        f"🔍 <b>Engine Status:</b> {scan_line}{pos_line}\n\n"
+        f"📉 <b>Why Market Is Currently Unfavorable:</b>\n"
+        f"{reason_bullets}\n\n"
+        f"🛡️ <b>Strict Quality Protection:</b>\n"
+        f"We only execute clean <b>3★–4★ aligned</b> setups, verified <b>1H Squeeze Breakouts</b>, or <b>15M Runaway Momentum</b> — "
+        f"protecting capital from low-probability counter-trend traps.\n\n"
+        f"✅ <i>Scanner is running nonstop every second. As soon as favorable market alignment confirms, live trades &amp; alerts will resume automatically!</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+async def send_market_inactivity_notice(diag: dict = None) -> list:
+    """
+    Broadcasts the market inactivity/unfavorable-conditions notice to all users:
+    - EMA Cross & EMA Scanner Telegram channels
+    - Master Admin & all configured Shark account users
+    - Filter Bot subscribers (@Alpha_Crypto_SignalBot)
+    """
+    from config import TELEGRAM_CHAT_ID, TELEGRAM_SIGNAL_CHANNEL_ID, TELEGRAM_SCANNER_CHANNEL_ID
+    from executor import executor
+
+    msg = build_market_inactivity_message(diag)
+
+    targets = [
+        TELEGRAM_SIGNAL_CHANNEL_ID or "-1004463573705",
+        TELEGRAM_SCANNER_CHANNEL_ID or "-1004332146822",
+        str(TELEGRAM_CHAT_ID or "771305593").strip(),
+    ]
+    for acc in executor.get_all_configured_accounts():
+        acc_chat = str(getattr(acc, "telegram_chat_id", "") or "").strip()
+        if acc_chat:
+            targets.append(acc_chat)
+
+    dedup_targets = list(dict.fromkeys([t for t in targets if t]))
+    delivered = []
+    for chat_id in dedup_targets:
+        try:
+            sent = await send_text_to_chat(chat_id, msg)
+            if sent is not None:
+                delivered.append(chat_id)
+        except Exception as e_tx:
+            logger.warning(f"Failed sending market inactivity notice to {chat_id}: {e_tx}")
+
+    try:
+        from filter_bot import broadcast_market_status
+        admin_id = str(TELEGRAM_CHAT_ID or "771305593").strip()
+        sub_count = await broadcast_market_status(msg, exclude_chat_ids={admin_id})
+        if sub_count > 0:
+            delivered.append(f"filter_subs:{sub_count}")
+    except Exception as e_fb:
+        logger.warning(f"Failed broadcasting market inactivity notice to filter subscribers: {e_fb}")
+
+    logger.info(f"📢 Dispatched market inactivity update to: {delivered}")
+    return delivered

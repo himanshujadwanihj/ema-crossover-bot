@@ -18,11 +18,14 @@ from indicators import analyze_crossovers, get_trend_state, _compute_indicators,
 from state import (
     is_already_sent, mark_sent, get_all_signals, get_pending_trades, update_trade_outcome, 
     update_trade_progress, update_trade_sl, _parse_iso_dt, clear_all_cooldowns, clear_all_pending_backlogs,
-    is_coin_on_cooldown, set_coin_cooldown, _make_key
+    is_coin_on_cooldown, set_coin_cooldown, _make_key,
+    get_last_trade_activity_ts, record_trade_activity_ts,
+    get_last_inactivity_notice_ts, set_last_inactivity_notice_ts,
 )
 from telegram_bot import (
     send_startup_message, send_text_alert, format_price, queue_alert, flush_alerts, 
-    start_telegram_bot_service, stop_telegram_bot_service, send_text_to_chat
+    start_telegram_bot_service, stop_telegram_bot_service, send_text_to_chat,
+    send_market_inactivity_notice,
 )
 from executor import executor, round_price
 from pullback_tracker import check_symbol_pullbacks, WATCHLIST, SPECIAL_LIST
@@ -98,6 +101,25 @@ async def run_startup_reconciliation(session: aiohttp.ClientSession, semaphore: 
             from executor import executor
             shark_bal = await executor.get_wallet_balance_summary(session) if executor.is_configured() else ""
             pos_list = await executor.get_open_positions(session) if executor.is_configured() else []
+            # Seed last real trade timestamp from live/closed Shark history so restarts preserve quiet-market timer
+            try:
+                latest_exch_ts = get_last_trade_activity_ts()
+                for op in (pos_list or []):
+                    for f_ts in ("updatedAt", "createdAt"):
+                        dt_op = _parse_iso_dt(op.get(f_ts))
+                        if dt_op and dt_op.timestamp() > latest_exch_ts:
+                            latest_exch_ts = dt_op.timestamp()
+                if executor.is_configured():
+                    st_cl, closed_raw = await executor.primary.shark_get(session, "/v1/positions/CLOSED")
+                    if st_cl == 200 and isinstance(closed_raw, list):
+                        for cp in closed_raw[:15]:
+                            for f_ts in ("createdAt", "updatedAt"):
+                                dt_cp = _parse_iso_dt(cp.get(f_ts))
+                                if dt_cp and dt_cp.timestamp() > latest_exch_ts:
+                                    latest_exch_ts = dt_cp.timestamp()
+                record_trade_activity_ts(latest_exch_ts if latest_exch_ts > 0 else BOT_START_TIME)
+            except Exception as e_seed:
+                logger.debug(f"Could not seed last trade activity timestamp: {e_seed}")
             recon_msg = (
                 "🔄 <b>BOT RE-ACTIVATED & RECONCILED</b>\n\n"
                 f"• Time: <b>{time_str_recon}</b>\n"
@@ -994,6 +1016,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                 is_safe, btc_reason = is_btc_safe_for_altcoins(signal, symbol, tf_data)
                 if not is_safe:
                     logger.info(f"FILTERED CROSSOVER: {symbol} {signal} rejected by BTC Micro-Gate ({btc_reason}).")
+                    record_quiet_scan_event(f"BTC Micro-Gate: {btc_reason}", f"{symbol} {label} {signal}")
                     continue
 
                 logger.info(f"NEW SIGNAL: {signal} {symbol} {label} ({cross_type}) | entry={entry} sl={sl} tp1={tp1} tp2={tp2}")
@@ -1006,6 +1029,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                 from telegram_bot import queue_alert
                 is_queued = await queue_alert(symbol, label, signal, entry, sl, tp, tf_states, cross_type, last_1h_cross_time, candle_time=open_time_iso, macro_struct=macro_struct, rr=rr, tp_label=tp_label, tf_data=tf_data, tp1=tp1, tp2=tp2, rr1=rr1, rr2=rr2, lbl1=lbl1, lbl2=lbl2, is_special_list=is_special, rsi=rsi, adx=cross.get("adx"))
                 if not is_queued:
+                    record_quiet_scan_event("RSI / Quality Filter (ADX / Body / RSI)", f"{symbol} {label} {signal}")
                     # Mark candle sent so it doesn't endlessly re-process the exact same completed candle every 5 seconds
                     mark_sent(symbol, unique_key, signal, candle_ts, entry=entry, sl=sl, tp=tp, tp1=tp1, tp2=tp2)
                     continue
@@ -1161,6 +1185,115 @@ async def shark_native_tp_sl_monitor(session):
     await executor.sync_and_manage_live_orders(session)
 
 _rejection_notified_cache = {}
+INACTIVITY_NOTICE_INTERVAL_SECS = 9000  # 2.5 hours (2-3h quiet-market threshold)
+
+_QUIET_SCAN_STATS = {
+    "scans_completed": 0,
+    "pairs_scanned": 0,
+    "rejection_counts": {},
+    "recent_samples": [],
+}
+
+
+def reset_quiet_scan_stats() -> None:
+    _QUIET_SCAN_STATS["scans_completed"] = 0
+    _QUIET_SCAN_STATS["rejection_counts"] = {}
+    _QUIET_SCAN_STATS["recent_samples"] = []
+
+
+def _categorize_rejection_reason(reason: str) -> str:
+    rl = str(reason or "").lower()
+    if "star" in rl or "confluence" in rl:
+        return "low_stars"
+    if "rsi" in rl or "score" in rl or "ai quality" in rl:
+        return "rsi_or_score"
+    if "micro-gate" in rl:
+        return "btc_gate"
+    if "shock" in rl:
+        return "btc_shock"
+    if "funding" in rl or "crowded" in rl:
+        return "funding_shield"
+    if "circuit breaker" in rl:
+        return "circuit_breaker"
+    if "directional limit" in rl or "already exists" in rl or "cap" in rl:
+        return "risk_cap"
+    return "other"
+
+
+def record_quiet_scan_event(reason: str, sample: str = None) -> None:
+    cat = _categorize_rejection_reason(reason)
+    counts = _QUIET_SCAN_STATS["rejection_counts"]
+    counts[cat] = int(counts.get(cat, 0)) + 1
+    if sample:
+        clean_s = str(sample).strip()
+        samples = _QUIET_SCAN_STATS["recent_samples"]
+        if clean_s and clean_s not in samples:
+            samples.append(clean_s)
+            if len(samples) > 4:
+                del samples[0]
+
+
+async def maybe_dispatch_inactivity_notice(
+    session: aiohttp.ClientSession = None,
+    now_ts: float = None,
+    boot_ts: float = None,
+    threshold_secs: float = INACTIVITY_NOTICE_INTERVAL_SECS,
+) -> bool:
+    """
+    Shares a clear live market-condition update with users if no new trade has executed
+    for > 2.5 hours (2-3h quiet threshold), repeating at most once every 2.5 hours.
+    Skipped during Night Maintenance Window and first 120s boot warm-up.
+    """
+    from config import AUTO_TRADING_ENABLED, PAPER_TRADING_ENABLED, is_night_maintenance_window
+
+    if not AUTO_TRADING_ENABLED or PAPER_TRADING_ENABLED:
+        return False
+
+    cur_ts = float(now_ts if now_ts is not None else time.time())
+    cur_dt = datetime.fromtimestamp(cur_ts, tz=timezone.utc)
+    if is_night_maintenance_window(cur_dt):
+        return False
+
+    start_ts = float(boot_ts if boot_ts is not None else BOT_START_TIME)
+    if (cur_ts - start_ts) < 120.0:
+        return False
+
+    last_trade_ts = get_last_trade_activity_ts()
+    ref_trade_ts = last_trade_ts if last_trade_ts > 0.0 else start_ts
+    idle_secs = cur_ts - ref_trade_ts
+    if idle_secs < threshold_secs:
+        return False
+
+    last_notice_ts = get_last_inactivity_notice_ts()
+    if (cur_ts - last_notice_ts) < threshold_secs:
+        return False
+
+    open_pos_cnt = 0
+    if session is not None and executor.is_configured():
+        try:
+            open_pos = await executor.get_open_positions(session)
+            open_pos_cnt = len(open_pos) if isinstance(open_pos, list) else 0
+        except Exception:
+            open_pos_cnt = 0
+
+    diag = {
+        "idle_secs": idle_secs,
+        "scans_completed": _QUIET_SCAN_STATS.get("scans_completed", 0),
+        "pairs_scanned": _QUIET_SCAN_STATS.get("pairs_scanned", 0),
+        "active_open_positions": open_pos_cnt,
+        "rejection_counts": dict(_QUIET_SCAN_STATS.get("rejection_counts") or {}),
+        "recent_samples": list(_QUIET_SCAN_STATS.get("recent_samples") or []),
+    }
+    try:
+        delivered = await send_market_inactivity_notice(diag)
+        if delivered:
+            set_last_inactivity_notice_ts(cur_ts)
+            reset_quiet_scan_stats()
+            return True
+    except Exception as e_inact:
+        logger.warning(f"Failed sending market inactivity notice: {e_inact}")
+    return False
+
 
 async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: dict = None):
     """Notifies the user reliably via Telegram when a signal is rejected/filtered from Shark execution."""
@@ -1175,6 +1308,7 @@ async def notify_signal_rejection(symbol: str, signal: str, reason: str, cand: d
     setup_lbl = str(cand.get("cross_type") or "")
 
     reason_str = str(reason or "Unspecified rejection reason")
+    record_quiet_scan_event(reason_str, f"{symbol} {tf_lbl} {signal}".strip())
     dedup_key = f"{symbol}_{signal}_{uniq_k}_{c_ts}_{reason_str[:35]}"
     now_ts = time.time()
 
@@ -1480,6 +1614,8 @@ async def main_loop():
                         is_cb_paused, cb_rem_secs, cb_reason = is_trading_paused()
                         if is_cb_paused:
                             logger.warning(f"⏸️ CIRCUIT BREAKER ACTIVE: 5 consecutive SLs hit ({cb_rem_secs/60:.1f}m remaining). Skipping scan cycle...")
+                            record_quiet_scan_event("Circuit Breaker Pause")
+                            await maybe_dispatch_inactivity_notice(session)
                             await asyncio.sleep(20)
                             continue
                         
@@ -1554,6 +1690,8 @@ async def main_loop():
                             from market_cache import is_commodity_symbol, is_stock_symbol
                             active_pairs = [sym for sym in active_pairs if is_commodity_symbol(sym) or is_stock_symbol(sym)]
                             if not active_pairs:
+                                record_quiet_scan_event("BTC Volatility Shock")
+                                await maybe_dispatch_inactivity_notice(session)
                                 await asyncio.sleep(15)
                                 continue
 
@@ -1905,6 +2043,8 @@ async def main_loop():
                                         state_key = _make_key(sym, cand["unique_key"], sig, cand["candle_ts"])
                                         t_qty = shark_res.get("total_qty", 0)
                                         update_trade_progress(state_key, shark_order_placed=True, total_qty=t_qty)
+                                        record_trade_activity_ts()
+                                        reset_quiet_scan_stats()
                                         logger.info(f"Marked shark_order_placed=True for {state_key}")
                                         failed_accs = shark_res.get("failed_accounts") or []
                                         real_failures = [
@@ -1915,6 +2055,8 @@ async def main_loop():
                                             part_reason = " | ".join([f"{f['account']}: {f['reason']}" for f in real_failures])
                                             await notify_signal_rejection(sym, sig, f"Partial Account Rejection: {part_reason}", cand=cand)
                                     elif shark_res and shark_res.get("status") == "trailed":
+                                        record_trade_activity_ts()
+                                        reset_quiet_scan_stats()
                                         logger.info(f"✅ Position for {sym} successfully trailed SL/TP on continuation signal.")
                                     elif shark_res and shark_res.get("status") in ("skipped", "error"):
                                         fail_reason = shark_res.get("reason", "Broker execution rejected")
@@ -1985,6 +2127,10 @@ async def main_loop():
                                 logger.error(f"Error dispatching daily digest: {e_dig}")
                         if now_ist.hour != 22:
                             daily_digest_sent_today = False
+
+                        _QUIET_SCAN_STATS["scans_completed"] = int(_QUIET_SCAN_STATS.get("scans_completed", 0)) + 1
+                        _QUIET_SCAN_STATS["pairs_scanned"] = len(active_pairs)
+                        await maybe_dispatch_inactivity_notice(session)
 
                         total_sent = len(raw_candidates)
                         elapsed = (datetime.now() - start_t).total_seconds()

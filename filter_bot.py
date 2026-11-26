@@ -882,6 +882,25 @@ async def dispatch_filtered_alert(alert_data: dict, formatted_message: str):
         tf = alert_data.get("tf_label", "")
         message_sync.record_broadcast_group("filter", admin_msg_id, recipients, desc=f"{sym} {tf}")
 
+
+async def broadcast_market_status(formatted_message: str, exclude_chat_ids: set = None) -> int:
+    """Broadcasts a system/market-status update to all registered Filter Bot subscribers."""
+    subscribers = user_prefs.get_all_subscribers()
+    if not subscribers or not _filter_app_instance:
+        return 0
+    excluded = {str(x) for x in (exclude_chat_ids or set())}
+    sent_count = 0
+    for cid in subscribers:
+        if str(cid) in excluded:
+            continue
+        try:
+            m = await _send_filter_message_safe(_filter_app_instance.bot, str(cid), formatted_message)
+            if m:
+                sent_count += 1
+        except Exception as e_sub:
+            logger.warning(f"Failed market status broadcast to filter subscriber {cid}: {e_sub}")
+    return sent_count
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_str = str(context.error or "")
     if "Message is not modified" in err_str:

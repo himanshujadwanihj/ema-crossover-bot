@@ -782,6 +782,61 @@ def set_last_lookout_ts(ts: float = None) -> None:
     _save(state)
 
 
+def get_last_trade_activity_ts() -> float:
+    """
+    Returns persisted unix timestamp of the most recent live trade execution/trail.
+    Falls back to scanning existing shark_order_placed state entries if unset.
+    """
+    state = _load()
+    try:
+        saved = float(state.get("_LAST_TRADE_ACTIVITY_TS") or 0.0)
+        if saved > 0.0:
+            return saved
+    except Exception:
+        pass
+
+    latest = 0.0
+    for k, v in state.items():
+        if not isinstance(v, dict) or not v.get("shark_order_placed"):
+            continue
+        for field in ("limit_filled_at", "limit_placed_at", "sent_at"):
+            dt = _parse_iso_dt(v.get(field))
+            if dt is not None:
+                ts_val = dt.timestamp()
+                if ts_val > latest:
+                    latest = ts_val
+    return latest
+
+
+def record_trade_activity_ts(ts: float = None) -> None:
+    """Persists timestamp of latest live trade activity (monotonic forward)."""
+    state = _load()
+    new_ts = float(ts if ts is not None else time.time())
+    existing = get_last_trade_activity_ts()
+    if new_ts > existing:
+        state["_LAST_TRADE_ACTIVITY_TS"] = new_ts
+        _save(state)
+    elif "_LAST_TRADE_ACTIVITY_TS" not in state and existing > 0.0:
+        state["_LAST_TRADE_ACTIVITY_TS"] = existing
+        _save(state)
+
+
+def get_last_inactivity_notice_ts() -> float:
+    """Returns persisted unix timestamp of last market inactivity broadcast."""
+    state = _load()
+    try:
+        return float(state.get("_LAST_INACTIVITY_NOTICE_TS") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def set_last_inactivity_notice_ts(ts: float = None) -> None:
+    """Persists timestamp of last market inactivity broadcast across restarts."""
+    state = _load()
+    state["_LAST_INACTIVITY_NOTICE_TS"] = float(ts if ts is not None else time.time())
+    _save(state)
+
+
 def resume_trading_manually() -> None:
     """Manually unpauses circuit breaker if desired."""
     state = _load()

@@ -83,10 +83,14 @@ def update_symbol_cache(symbol: str, tf_data: dict) -> None:
             else:
                 detail_str = f"{trend} Structure"
                 
+            raw_rsi = float(row.get('rsi', 0.0) or 0.0)
+            raw_adx = float(row.get('adx', 0.0) or 0.0)
             tf_summary[tf] = {
                 "trend": trend,
                 "ema9": ema9,
                 "ema26": ema26,
+                "rsi": raw_rsi if raw_rsi == raw_rsi else 0.0,
+                "adx": raw_adx if raw_adx == raw_adx else 0.0,
                 "bars_ago": bars_ago,
                 "cross_price": cross_price,
                 "detail": detail_str,
@@ -349,3 +353,54 @@ def format_filter_result_card(norm_tfs: list, matches: list, target_trend: str =
         msg_lines.append(f"\n<i>...and {total_matched - display_limit} more coins matched.</i>")
         
     return "\n".join(msg_lines)
+
+
+def summarize_market_regime_snapshot() -> dict:
+    """
+    Aggregates the current in-memory MARKET_CACHE across all scanned pairs to explain
+    market-wide conditions (HTF conflicts, extended RSI extremes, choppy ADX, BTC structure).
+    """
+    btc_trends = {"1H": "?", "4H": "?", "1D": "?"}
+    total_coins = 0
+    htf_split_count = 0
+    aligned_3star_count = 0
+    overbought_count = 0
+    oversold_count = 0
+    choppy_adx_count = 0
+
+    for sym, data in list(MARKET_CACHE.items()):
+        tfs = data.get("timeframes") or {}
+        if not tfs:
+            continue
+        total_coins += 1
+        t1h = str((tfs.get("1H") or {}).get("trend") or "Neutral")
+        t4h = str((tfs.get("4H") or {}).get("trend") or "Neutral")
+        t1d = str((tfs.get("1D") or {}).get("trend") or "Neutral")
+
+        if "BTC" in sym.upper() and "USDT" in sym.upper():
+            btc_trends = {"1H": t1h, "4H": t4h, "1D": t1d}
+
+        htf_vals = [t for t in (t1h, t4h, t1d) if t in ("Bullish", "Bearish")]
+        if t1h in ("Bullish", "Bearish") and t1h == t4h == t1d:
+            aligned_3star_count += 1
+        elif len(set(htf_vals)) > 1:
+            htf_split_count += 1
+
+        rsi_1h = float((tfs.get("1H") or {}).get("rsi") or 0.0)
+        adx_1h = float((tfs.get("1H") or {}).get("adx") or 0.0)
+        if rsi_1h > 62.0:
+            overbought_count += 1
+        elif 0.0 < rsi_1h < 38.0:
+            oversold_count += 1
+        if 0.0 < adx_1h < 20.0:
+            choppy_adx_count += 1
+
+    return {
+        "btc_trends": btc_trends,
+        "total_coins": total_coins,
+        "htf_split_count": htf_split_count,
+        "aligned_3star_count": aligned_3star_count,
+        "overbought_count": overbought_count,
+        "oversold_count": oversold_count,
+        "choppy_adx_count": choppy_adx_count,
+    }
