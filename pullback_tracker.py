@@ -161,9 +161,9 @@ async def check_symbol_pullbacks(symbol: str, tf_data: dict, session=None) -> bo
     if is_cb_paused:
         return False
 
-    # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
-    from config import is_weekend_trading_blocked
-    if is_weekend_trading_blocked(symbol):
+    # Commodities & US Stocks are closed & excluded from weekend analysis/trades; BTC & ETH analyze 7 days/week.
+    from config import is_weekend_analysis_blocked
+    if is_weekend_analysis_blocked(symbol):
         logger.debug(f"WEEKEND RETEST BLOCKED: {symbol} skipped on Saturday/Sunday.")
         return False
 

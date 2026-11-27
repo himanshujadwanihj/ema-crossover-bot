@@ -371,52 +371,74 @@ def is_night_maintenance_window(now_utc=None) -> bool:
     )
 
 
-def is_weekend_trading_blocked(symbol: str) -> bool:
-    """
-    STRICT USER DIRECTIVE:
-    'no trdes of comodities and btc and eth on sat and sunday in any case'
-    Blocks trades for:
-      - Commodities (Gold, Silver, Crude Oil, Natural Gas)
-      - BTC (Bitcoin)
-      - ETH (Ethereum)
-      - US Stock Tokens (Closed on weekends)
-    On Saturday and Sunday in either UTC or IST timezone.
-    """
+def _extract_symbol_clean_base(symbol: str) -> tuple:
+    clean = str(symbol or "").upper().replace("/", "").replace("_", "").replace("-", "").split(":")[0]
+    base = clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
+    return clean, base
+
+
+def is_btc_or_eth_symbol(symbol: str) -> bool:
+    """Returns True strictly for BTC or ETH spot/perp pairs."""
+    _, base = _extract_symbol_clean_base(symbol)
+    return base in ("BTC", "ETH")
+
+
+def is_eth_symbol(symbol: str) -> bool:
+    """Returns True strictly for ETH pairs (excludes ETHW/ETHFI etc.)."""
+    _, base = _extract_symbol_clean_base(symbol)
+    return base == "ETH"
+
+
+def _is_sat_or_sun_utc_or_ist() -> bool:
     from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
-    is_sat_or_sun = now_utc.weekday() in (5, 6)
-    if not is_sat_or_sun:
-        try:
-            import zoneinfo
-            now_ist = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Kolkata"))
-            is_sat_or_sun = now_ist.weekday() in (5, 6)
-        except Exception:
-            pass
-
-    if not is_sat_or_sun:
+    if now_utc.weekday() in (5, 6):
+        return True
+    try:
+        import zoneinfo
+        now_ist = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Kolkata"))
+        return now_ist.weekday() in (5, 6)
+    except Exception:
         return False
 
-    clean = symbol.upper().replace("/", "").replace("_", "").replace("-", "").split(":")[0]
-    base = clean.replace("USDT", "").replace("USD", "").replace("FDUSD", "")
-    
-    # 1. Exact BTC and ETH
-    if base in ("BTC", "ETH"):
-        return True
 
-    # 2. Commodities (Gold, Silver, Crude Oil, Natgas)
+def _is_weekend_non_crypto_asset(clean: str, base: str) -> bool:
+    # Commodities (Gold, Silver, Crude Oil, Natgas)
     if any(clean.startswith(c) for c in ["XAU", "XAUT", "XAG", "NATGAS", "CL", "CRUDEOIL"]) or base in ("GOLD", "SILVER", "OIL"):
         return True
-
-    # 3. US Equities / Stocks (Exact symbol matching - avoids substring collisions like HBAR/BAT matching BA)
+    # US Equities / Stocks (Exact symbol matching - avoids substring collisions like HBAR/BAT matching BA)
     us_stocks_exact = {
-        "NVDA", "TSLA", "MSTR", "AAPL", "AMZN", "GOOGL", "META", "MSFT", 
-        "COINB", "AMDB", "QQQ", "SPY", "BABAB", "INTCB", "DISB", "PYPLB", 
-        "BAB", "XOMB", "SOXL", "SNDKB"
+        "NVDA", "TSLA", "MSTR", "AAPL", "AMZN", "GOOGL", "META", "MSFT",
+        "COINB", "AMDB", "QQQ", "SPY", "BABAB", "INTCB", "DISB", "PYPLB",
+        "BAB", "XOMB", "SOXL", "SNDKB",
     }
-    if base in us_stocks_exact or (len(base) > 3 and base.endswith("B") and base[:-1] in us_stocks_exact):
-        return True
+    return base in us_stocks_exact or (len(base) > 3 and base.endswith("B") and base[:-1] in us_stocks_exact)
 
-    return False
+
+def is_weekend_analysis_blocked(symbol: str) -> bool:
+    """
+    WEEKEND ANALYSIS & SIGNAL RULE:
+    - Commodities & US Stock Tokens: strictly NO scanning, analysis, or signals on Sat & Sun.
+    - BTC & ETH + Altcoins: FULL-WEEK (7-day) analysis & Telegram signals allowed.
+    """
+    if not _is_sat_or_sun_utc_or_ist():
+        return False
+    clean, base = _extract_symbol_clean_base(symbol)
+    return _is_weekend_non_crypto_asset(clean, base)
+
+
+def is_weekend_trading_blocked(symbol: str) -> bool:
+    """
+    WEEKEND LIVE EXECUTION RULE:
+    - Commodities, US Stock Tokens, BTC, and ETH: strictly weekday-only (Mon-Fri) auto-trading;
+      blocked from live trade execution on Saturday and Sunday.
+    """
+    if not _is_sat_or_sun_utc_or_ist():
+        return False
+    clean, base = _extract_symbol_clean_base(symbol)
+    if base in ("BTC", "ETH"):
+        return True
+    return _is_weekend_non_crypto_asset(clean, base)
 
 
 def is_allowed_trading_asset(symbol: str) -> bool:

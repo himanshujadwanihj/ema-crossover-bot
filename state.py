@@ -239,7 +239,7 @@ def update_latest_shark_state(symbol: str, updates: dict) -> bool:
 
 
 
-def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0, target_r: float = 1.5) -> None:
+def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0, target_r: float = 1.5, auto_be_r: float = 0.0, limit_expire_mins: float = None) -> None:
     state = _load()
     key = _make_key(symbol, tf, signal, candle_ts)
     risk = abs(entry - sl) if (entry and sl) else (entry * 0.01 if entry else 1.0)
@@ -263,6 +263,8 @@ def mark_sent(symbol: str, tf: str, signal: str, candle_ts: str, entry: float = 
         "initial_sl": sl,
         "cur_sl": sl,
         "target_r": target_r,
+        "auto_be_r": float(auto_be_r or 0.0),
+        "limit_expire_mins": float(limit_expire_mins) if limit_expire_mins else None,
         "tp": eff_tp1,
         "tp1": eff_tp1,
         "tp2": eff_tp2,

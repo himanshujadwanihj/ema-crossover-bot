@@ -1121,24 +1121,13 @@ class SharkExchangeExecutor:
             if tp2: tp2 = tp2 * multiplier
             if tp3: tp3 = tp3 * multiplier
 
-        # 1. BTC / ETH / Gold Weekend Rule (Weekdays Mon-Fri Allowed; Sat-Sun No Trade)
-        clean_base = clean_sym.upper().replace("USDT", "").replace("USD", "").replace("-PERP", "")
-        is_btc_or_eth = clean_base in ("BTC", "ETH")
-        is_commodity = any(m in clean_sym.upper() for m in ("XAU", "GOLD", "XAUT", "XAG", "CL", "NATGAS"))
-        is_weekend_restricted = is_btc_or_eth or is_commodity
-        if is_weekend_restricted:
-            try:
-                import zoneinfo
-                now_ist = datetime.now(timezone.utc).astimezone(zoneinfo.ZoneInfo("Asia/Kolkata"))
-                is_weekday = now_ist.weekday() < 5  # 0-4 = Mon-Fri, 5-6 = Sat-Sun
-            except Exception:
-                is_weekday = True
-
-            if not is_weekday:
-                logger.info(f"WEEKEND EXCLUSION: {clean_sym} [{signal}] skipped on Saturday/Sunday per user directive. Telegram alert only.")
-                return {"status": "skipped", "reason": f"{clean_sym} trading is paused on weekends (Sat/Sun). Weekdays only."}
-            else:
-                logger.info(f"⚡ WEEKDAY EXECUTION: {clean_sym} [{signal}] active for Shark execution on Weekdays (Mon-Fri).")
+        # 1. BTC / ETH / Commodities Weekend Rule (Weekdays Mon-Fri Allowed; Sat-Sun Execution Blocked)
+        from config import is_weekend_trading_blocked
+        if is_weekend_trading_blocked(clean_sym):
+            logger.info(f"WEEKEND EXCLUSION: {clean_sym} [{signal}] skipped on Saturday/Sunday per user directive. Analysis alert only.")
+            return {"status": "skipped", "reason": f"{clean_sym} trading is paused on weekends (Sat/Sun). Weekdays only."}
+        elif clean_sym.upper().replace("USDT", "").replace("USD", "") in ("BTC", "ETH") or any(m in clean_sym.upper() for m in ("XAU", "GOLD", "XAUT", "XAG", "CL", "NATGAS")):
+            logger.info(f"⚡ WEEKDAY EXECUTION: {clean_sym} [{signal}] active for Shark execution on Weekdays (Mon-Fri).")
 
         # 2. US Stock Tokens: AUTO-TRADING STOPPED per User Directive
         # Signals continue to be broadcast to Telegram, but automatic execution is disabled.
@@ -1997,9 +1986,14 @@ class SharkExchangeExecutor:
 
                 if order_time is not None:
                     elapsed_mins = (now_utc - order_time).total_seconds() / 60.0
-                    # USER DIRECTIVE: Strict 30-Minute Expiry on Shark Exchange
-                    if elapsed_mins >= 30.0:
-                        sym = clean_contract_symbol(o.get("symbol") or "")
+                    sym = clean_contract_symbol(o.get("symbol") or "")
+                    order_expire_mins = float(max_minutes)
+                    if sym:
+                        from state import get_latest_symbol_state
+                        st_exp = get_latest_symbol_state(sym)
+                        if st_exp and st_exp.get("limit_expire_mins"):
+                            order_expire_mins = float(st_exp["limit_expire_mins"])
+                    if elapsed_mins >= order_expire_mins:
                         cid = o.get("clientOrderId")
                         if not cid and sym in self._pending_entry_orders:
                             cid = self._pending_entry_orders[sym].get("clientOrderId")
@@ -2007,14 +2001,14 @@ class SharkExchangeExecutor:
                         if cid:
                             st, res = await self.shark_delete(session, "/v1/order/delete-order", {"clientOrderId": str(cid)})
                             if st in (200, 201):
-                                logger.info(f"EXCHANGE SWEEPER: Cancelled expired entry order {cid} for {sym} (Age: {elapsed_mins:.1f} mins)")
+                                logger.info(f"EXCHANGE SWEEPER: Cancelled expired entry order {cid} for {sym} (Age: {elapsed_mins:.1f} mins >= {order_expire_mins:.0f} mins)")
                                 self._pending_entry_orders.pop(sym, None)
                                 self._session_active_symbols.pop(sym, None)
                                 from telegram_bot import send_text_alert
                                 msg = (
-                                    f"⏳ <b>SHARK AUTO-ORDER EXPIRED & CANCELLED (30-MIN LIMIT EXPIRATION)</b>\n\n"
+                                    f"⏳ <b>SHARK AUTO-ORDER EXPIRED & CANCELLED ({int(order_expire_mins)}-MIN LIMIT EXPIRATION)</b>\n\n"
                                     f"<b>Asset:</b> {sym}\n"
-                                    f"<b>Status:</b> Entry limit not filled within {int(max_minutes)} minutes.\n"
+                                    f"<b>Status:</b> Entry limit not filled within {int(order_expire_mins)} minutes.\n"
                                     f"<b>Action:</b> ✅ Order cancelled directly on exchange with ₹0 INR loss."
                                 )
                                 await self.send_alert(msg)
@@ -2311,8 +2305,10 @@ class SharkExchangeExecutor:
                     tp3 = state_entry.get("tp3")
 
                 live_sl_order_p = float(sl_orders[0].get("stopLossPrice") or sl_orders[0].get("stopPrice") or sl_orders[0].get("price") or 0) if sl_orders else 0
-                initial_sl_val = live_sl_order_p or (float(state_entry.get("initial_sl") or 0) if state_entry else 0)
+                orig_sl_stored = float(state_entry.get("initial_sl") or 0) if state_entry else 0
+                initial_sl_val = live_sl_order_p or orig_sl_stored
                 risk_step = abs(entry_price - initial_sl_val) if (initial_sl_val > 0 and initial_sl_val != entry_price) else (entry_price * 0.015)
+                orig_risk_step = abs(entry_price - orig_sl_stored) if (orig_sl_stored > 0 and orig_sl_stored != entry_price) else risk_step
 
                 # Anti-Shock Breakeven Shield: protect opposing open altcoin winners >= +0.7R when BTC shocks
                 if pos_qty_abs > 0 and sl_orders and mark_p > 0:
@@ -2358,6 +2354,50 @@ class SharkExchangeExecutor:
                                     ]
                     except Exception as e_sbe:
                         logger.debug(f"Anti-shock BE check error for {sym}: {e_sbe}")
+
+                # Profit-Triggered Auto-Breakeven (+1.2R) for BTC & ETH 1H Squeeze trades (PF 1.52 -> 1.79 backtested)
+                if pos_qty_abs > 0 and sl_orders and mark_p > 0:
+                    try:
+                        from config import is_btc_or_eth_symbol
+                        uk_be = str((state_entry or {}).get("unique_key") or "")
+                        auto_be_r = float((state_entry or {}).get("auto_be_r") or 0.0)
+                        if (
+                            auto_be_r <= 0.0
+                            and "15M_TightSqueeze" not in uk_be
+                            and is_btc_or_eth_symbol(sym)
+                            and ("1H_SqueezeBreakout" in uk_be or "1H_RangeBreak" in uk_be)
+                        ):
+                            auto_be_r = 1.2
+                        already_be_trailed = bool(
+                            (state_entry and (state_entry.get("tp1_hit") or (state_entry.get("trail_stage") or 0) > 0 or state_entry.get("be_hit_time_shield") or state_entry.get("be_hit")))
+                            or (direction == "BUY" and live_sl_order_p >= entry_price * 0.9995)
+                            or (direction == "SELL" and live_sl_order_p > 0 and live_sl_order_p <= entry_price * 1.0005)
+                        )
+                        reached_auto_be = auto_be_r > 0 and (
+                            (direction == "BUY" and mark_p >= entry_price + auto_be_r * orig_risk_step)
+                            or (direction == "SELL" and mark_p <= entry_price - auto_be_r * orig_risk_step)
+                        )
+                        if not already_be_trailed and reached_auto_be and (time.time() - self._tp_sl_heal_lock.get(sym + "_auto_be", 0) > 120):
+                            be_sl = round_price(sym, entry_price * (1.0008 if direction == "BUY" else 0.9992))
+                            logger.info(f"🛡️ AUTO-BREAKEVEN (+{auto_be_r:.1f}R): {sym} [{direction}] Mark={mark_p} -> SL {live_sl_order_p} → {be_sl}")
+                            ok_abe = await self.modify_stop_loss(session, sym, direction, be_sl, pos_qty_abs, is_trailed=True)
+                            if ok_abe:
+                                self._tp_sl_heal_lock[sym + "_auto_be"] = time.time()
+                                from state import update_latest_shark_state
+                                update_latest_shark_state(sym, {"be_hit": True, "be_hit_time_shield": True, "cur_sl": be_sl})
+                                if state_entry is not None:
+                                    state_entry["be_hit"] = True
+                                    state_entry["be_hit_time_shield"] = True
+                                    state_entry["cur_sl"] = be_sl
+                                live_sl_order_p = be_sl
+                                await self.send_alert(
+                                    f"🛡️ <b>AUTO-BREAKEVEN ARMED (+{auto_be_r:.1f}R PROFIT LOCK)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"<b>Asset:</b> {sym} [{direction}]\n"
+                                    f"<b>Mark Price:</b> {format_price(mark_p)} | <b>Entry:</b> {format_price(entry_price)}\n"
+                                    f"<b>SL Protected:</b> <code>{format_price(be_sl)}</code> (Fee-Buffered BE)"
+                                )
+                    except Exception as e_abe:
+                        logger.debug(f"Auto-BE check error for {sym}: {e_abe}")
 
                 # Active Trade TP1 Target Resolution (2.2R for Squeeze/Runaway/RangeBreak, 1.5R standard — 100% Unified Exit)
                 target_r = _resolve_target_r(state_entry)

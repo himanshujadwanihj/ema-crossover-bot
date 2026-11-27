@@ -185,9 +185,9 @@ async def resolve_pending_trades_async(session: aiohttp.ClientSession, semaphore
             limit_placed_at_str = data.get("limit_placed_at") or sent_at_str
             limit_placed_at = _parse_iso_dt(limit_placed_at_str) or sent_at
 
-            # USER DIRECTIVE: Strict 30-Minute Limit Order Expiry Everywhere!
-            # If entry limit order is not filled within 30 minutes, it is cancelled.
-            limit_cutoff = limit_placed_at + timedelta(minutes=30)
+            # Use trade-specific limit expiry (45m for ETH 15M Tight Squeeze, 30m default elsewhere)
+            limit_expire_mins = float(data.get("limit_expire_mins") or 30.0)
+            limit_cutoff = limit_placed_at + timedelta(minutes=limit_expire_mins)
 
             limit_filled = data.get("limit_filled", False)
             limit_filled_at_str = data.get("limit_filled_at")
@@ -388,12 +388,10 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
             tf_data = await fetch_all_timeframes_async(session, symbol, semaphore)
         if not tf_data: return 0
 
-        # Weekend Commodity & Stock Suppression Rule (Commodities & US Equities closed on Sat/Sun IST)
-        # BTC and ETH are crypto 24/7 and fully ACTIVE on weekends per user directive.
-        # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
-        from config import is_weekend_trading_blocked
-        if is_weekend_trading_blocked(symbol):
-            logger.info(f"WEEKEND TRADING PAUSED: {symbol} skipped — zero trades for commodities, BTC, and ETH on Saturday/Sunday.")
+        # Weekend Analysis Suppression: Commodities & US Equities closed Sat/Sun; BTC & ETH analyze 7 days/week.
+        from config import is_weekend_analysis_blocked, is_btc_or_eth_symbol, is_eth_symbol
+        if is_weekend_analysis_blocked(symbol):
+            logger.info(f"WEEKEND ANALYSIS PAUSED: {symbol} skipped — commodities and US stocks closed on Saturday/Sunday.")
             return 0
 
         from telegram_bot import TF_ORDER
@@ -432,8 +430,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                     candle_ts = str(df_1h.index[-2])
 
                     range_width_pct = (range_high - range_low) / max(range_low, 1e-8)
-                    # Valid consolidation range is 0.8% to 8.5% (prevents wild swinging chop from qualifying)
-                    is_valid_consolidation = (0.008 <= range_width_pct <= 0.085)
+                    is_btc_eth_1h = is_btc_or_eth_symbol(symbol)
+                    # BTC & ETH 1H Squeeze requires tighter 0.6%-4.5% box compression (Alts/Commodities keep 0.8%-8.5%)
+                    is_valid_consolidation = (0.006 <= range_width_pct <= 0.045) if is_btc_eth_1h else (0.008 <= range_width_pct <= 0.085)
 
                     from state import get_active_radar, mark_radar_triggered
                     from fetcher import fetch_futures_microstructure_async
@@ -473,8 +472,9 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
 
                     # ─────────────────────────────────────────────────────────────
                     # DUAL ENGINE: BRANCH A — SFP / LIQUIDITY SWEEP REVERSAL ENGINE
+                    # Disabled across ALL crypto per 120d/41d backtest (-41R BTC/ETH, -30R Alts); Commodities only.
                     # ─────────────────────────────────────────────────────────────
-                    if is_valid_consolidation:
+                    if is_valid_consolidation and is_commodity_symbol(symbol):
                         # 1. BEAR TRAP REVERSAL (Support Sweep + Reclaim -> BUY):
                         if c_low < range_low:
                             sweep_depth_pct = ((range_low - c_low) / range_low) * 100.0
@@ -566,11 +566,32 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                             bb_w_1h = ((4.0 * bb_std_1h) / bb_mid_1h * 100.0) if bb_mid_1h > 0 else 99.0
                             h1_tr_b = str(tf_states.get("1H", "")).lower()
                             h4_tr_b = str(tf_states.get("4H", "")).lower()
+                            d1_tr_b = str(tf_states.get("1D", "")).lower()
                             if bb_w_1h <= 4.5:
-                                if candle_close <= (range_low * 0.998) and h1_tr_b == "bearish" and h4_tr_b == "bearish":
+                                d1_ok_sell = (not is_btc_eth_1h) or (d1_tr_b == "bearish")
+                                d1_ok_buy = (not is_btc_eth_1h) or (d1_tr_b == "bullish")
+                                if candle_close <= (range_low * 0.998) and h1_tr_b == "bearish" and h4_tr_b == "bearish" and d1_ok_sell:
                                     sq_signal = 'SELL'
-                                elif candle_close >= (range_high * 1.002) and h1_tr_b == "bullish" and h4_tr_b == "bullish":
+                                elif candle_close >= (range_high * 1.002) and h1_tr_b == "bullish" and h4_tr_b == "bullish" and d1_ok_buy:
                                     sq_signal = 'BUY'
+
+                        # Extra guard for BTC/ETH Stage-1 Radar triggers: ensure tight box + BB/TTM pinch + 4H+1D alignment
+                        if sq_signal and is_btc_eth_1h:
+                            target_tr_1h = "bullish" if sq_signal == "BUY" else "bearish"
+                            h4_cur = str(tf_states.get("4H", "")).lower()
+                            d1_cur = str(tf_states.get("1D", "")).lower()
+                            bb_mid_chk = float(df_1h['close'].iloc[-21:-1].mean()) if len(df_1h) >= 21 else 0.0
+                            bb_std_chk = float(df_1h['close'].iloc[-21:-1].std()) if len(df_1h) >= 21 else 0.0
+                            bb_w_chk = ((4.0 * bb_std_chk) / bb_mid_chk * 100.0) if bb_mid_chk > 0 else 99.0
+                            if not is_valid_consolidation:
+                                logger.info(f"FILTERED BTC/ETH 1H SQUEEZE: {symbol} box {range_width_pct:.2%} outside [0.6%-4.5%].")
+                                sq_signal = None
+                            elif bb_w_chk > 4.5:
+                                logger.info(f"FILTERED BTC/ETH 1H SQUEEZE: {symbol} BB width {bb_w_chk:.2f}% > 4.50%.")
+                                sq_signal = None
+                            elif h4_cur != target_tr_1h or d1_cur != target_tr_1h:
+                                logger.info(f"FILTERED BTC/ETH 1H SQUEEZE: {symbol} {sq_signal} misaligned with 4H={h4_cur} / 1D={d1_cur}.")
+                                sq_signal = None
 
                         if sq_signal:
                             req_body = 0.35 if has_radar else 0.45
@@ -707,11 +728,12 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                         is_dedicated_squeeze=True,
                                         is_trap_reversal=is_trap_reversal
                                     )
+                                    auto_be_1h = 1.2 if (is_btc_eth_1h and not is_trap_reversal) else 0.0
                                     if sq_queued:
-                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r)
+                                        mark_sent(symbol, unique_sq_key, sq_signal, candle_ts, entry=entry, sl=dyn_sl, tp=tp1, tp1=tp1, tp2=tp2, target_r=target_r, auto_be_r=auto_be_1h)
                                         if has_radar:
                                             mark_radar_triggered(symbol)
-                                        logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1})")
+                                        logger.info(f"💥 DEDICATED 1H BREAKOUT/BREAKDOWN/REVERSAL TRIGGERED for {symbol} ({sq_signal}) @ {entry} (Target: {target_r}R = {tp1}, AutoBE={auto_be_1h}R)")
 
                                         # AUTO-TRADING ENROLLMENT:
                                         # Capture 1H Squeeze Breakout / Reversal candidate for Shark Exchange execution
@@ -724,6 +746,7 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
                                             "tp2": tp2,
                                             "tp": tp1,
                                             "target_r": target_r,
+                                            "auto_be_r": auto_be_1h,
                                             "aligned_count": 4,  # High-conviction verified setup with CVD + volume
                                             "is_3_htf_aligned": True,
                                             "is_30m_early": False,
@@ -863,6 +886,136 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
             except Exception as e_rc:
                 logger.warning(f"15M runaway chase engine error for {symbol}: {e_rc}", exc_info=True)
 
+        # -- 0C. ETH-ONLY 15M TIGHT 12H SQUEEZE ENGINE (ETH_E7b: 45m Pullback Limit, 2.2R, No Auto-BE) --
+        # Verified 120d ETH edge: 48-bar (12H) box 0.5%-2.5%, Vol>=1.8x, Body>=45%, CVD + 4H trend aligned.
+        eth_15m_sq_cand = None
+        if is_eth_symbol(symbol) and (not in_crypto_shock) and (not sq_candidate) and df_15m_rc is not None and len(df_15m_rc) >= 54:
+            try:
+                from state import is_coin_on_cooldown, set_coin_cooldown
+                c15_dt_sq = df_15m_rc.index[-2]
+                if hasattr(c15_dt_sq, "tzinfo") and c15_dt_sq.tzinfo is None:
+                    c15_dt_sq = c15_dt_sq.replace(tzinfo=timezone.utc)
+                elif not hasattr(c15_dt_sq, "tzinfo"):
+                    c15_dt_sq = pd.to_datetime(c15_dt_sq, utc=True)
+
+                secs_15_sq = (datetime.now(timezone.utc) - c15_dt_sq).total_seconds()
+                if 0 <= secs_15_sq <= 1020 and not is_coin_on_cooldown(symbol, "15M_TIGHT_SQUEEZE", max_hours=1.5):
+                    from indicators import _compute_indicators
+                    from fetcher import fetch_futures_microstructure_async
+                    df_15m_sq_ind = _compute_indicators(df_15m_rc)
+                    box_48 = df_15m_rc.iloc[-50:-2]
+                    box_hi = float(box_48['high'].max())
+                    box_lo = float(box_48['low'].min())
+                    box_width = (box_hi - box_lo) / max(box_lo, 1e-9)
+
+                    if 0.005 <= box_width <= 0.025:
+                        c15_open = float(df_15m_rc['open'].iloc[-2])
+                        c15_high = float(df_15m_rc['high'].iloc[-2])
+                        c15_low = float(df_15m_rc['low'].iloc[-2])
+                        c15_close = float(df_15m_rc['close'].iloc[-2])
+                        c15_vol = float(df_15m_rc['volume'].iloc[-2])
+                        vol_sma_15 = float(df_15m_rc['volume'].iloc[-22:-2].mean()) if len(df_15m_rc) >= 22 else c15_vol
+                        body_15 = abs(c15_close - c15_open) / max(c15_high - c15_low, 1e-8)
+                        rsi_15_sq = float(df_15m_sq_ind['rsi'].iloc[-2]) if 'rsi' in df_15m_sq_ind and not pd.isna(df_15m_sq_ind['rsi'].iloc[-2]) else 50.0
+                        atr_15_sq = float(df_15m_sq_ind['atr'].iloc[-2]) if 'atr' in df_15m_sq_ind and not pd.isna(df_15m_sq_ind['atr'].iloc[-2]) else (c15_close * 0.004)
+                        adx_15_sq = float(df_15m_sq_ind['adx'].iloc[-2]) if 'adx' in df_15m_sq_ind and not pd.isna(df_15m_sq_ind['adx'].iloc[-2]) else 25.0
+
+                        h4_tr_sq = str(tf_states.get("4H", "")).lower()
+                        eth_sq_sig = None
+                        if vol_sma_15 > 0 and c15_vol >= (1.8 * vol_sma_15) and body_15 >= 0.45:
+                            if c15_close > box_hi and h4_tr_sq == "bullish" and 48.0 <= rsi_15_sq <= 74.0:
+                                eth_sq_sig = "BUY"
+                            elif c15_close < box_lo and h4_tr_sq == "bearish" and 26.0 <= rsi_15_sq <= 52.0:
+                                eth_sq_sig = "SELL"
+
+                        if eth_sq_sig:
+                            candle_15_ts_sq = str(df_15m_rc.index[-2])
+                            unique_eth_sq_key = f"15M_TightSqueeze_{eth_sq_sig}_{candle_15_ts_sq}"
+                            if not is_already_sent(symbol, unique_eth_sq_key, eth_sq_sig, candle_15_ts_sq):
+                                micro_15_sq = await fetch_futures_microstructure_async(session, symbol, eth_sq_sig, df=df_15m_rc, closed_only=True)
+                                cvd_sq_ok = (micro_15_sq.get("cvd_metrics") or {}).get("is_aligned", True)
+                                if cvd_sq_ok:
+                                    box_mid = 0.5 * (box_hi + box_lo)
+                                    retest_lim = (box_hi * 1.001) if eth_sq_sig == "BUY" else (box_lo * 0.999)
+                                    raw_entry = min(c15_close, retest_lim) if eth_sq_sig == "BUY" else max(c15_close, retest_lim)
+                                    entry = round_price(symbol, raw_entry)
+
+                                    if eth_sq_sig == "BUY":
+                                        raw_sl = min(float(df_15m_rc['low'].iloc[-6:-1].min()) - 0.3 * atr_15_sq, box_mid)
+                                        sl_dist = min(max(entry - raw_sl, entry * 0.007), entry * 0.016)
+                                        sl = round_price(symbol, entry - sl_dist)
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (entry * 0.01)
+                                        tp1 = round_price(symbol, entry + 2.2 * risk)
+                                        cross_type_eth_sq = "🚀 ETH 15M Tight 12H Squeeze Breakout (Pullback Limit + CVD ✅)"
+                                    else:
+                                        raw_sl = max(float(df_15m_rc['high'].iloc[-6:-1].max()) + 0.3 * atr_15_sq, box_mid)
+                                        sl_dist = min(max(raw_sl - entry, entry * 0.007), entry * 0.016)
+                                        sl = round_price(symbol, entry + sl_dist)
+                                        risk = abs(entry - sl) if (entry and sl and entry != sl) else (entry * 0.01)
+                                        tp1 = round_price(symbol, entry - 2.2 * risk)
+                                        cross_type_eth_sq = "🩸 ETH 15M Tight 12H Squeeze Breakdown (Pullback Limit + CVD ✅)"
+
+                                    tp2 = tp1
+                                    target_r = 2.2
+                                    from telegram_bot import queue_alert
+                                    eth_sq_queued = await queue_alert(
+                                        symbol=symbol,
+                                        tf_label="15M",
+                                        signal=eth_sq_sig,
+                                        entry=entry,
+                                        sl=sl,
+                                        tp=tp1,
+                                        tf_states=tf_states,
+                                        cross_type=cross_type_eth_sq,
+                                        candle_time=candle_15_ts_sq,
+                                        macro_struct=macro_struct,
+                                        tp1=tp1, tp2=tp2,
+                                        rr1=target_r, rr2=target_r,
+                                        lbl1="2.2R Target (100% Exit)", lbl2="2.2R Target (100% Exit)",
+                                        tf_data=tf_data,
+                                        is_special_list=(symbol in SPECIAL_LIST),
+                                        rsi=rsi_15_sq,
+                                        adx=adx_15_sq,
+                                        is_dedicated_squeeze=True,
+                                        is_eth_tight_squeeze=True,
+                                    )
+                                    if eth_sq_queued:
+                                        mark_sent(
+                                            symbol, unique_eth_sq_key, eth_sq_sig, candle_15_ts_sq,
+                                            entry=entry, sl=sl, tp=tp1, tp1=tp1, tp2=tp2,
+                                            target_r=target_r, auto_be_r=0.0, limit_expire_mins=45.0,
+                                        )
+                                        set_coin_cooldown(symbol, "15M_TIGHT_SQUEEZE")
+                                        aligned_eth_sq = sum(1 for t in ["1H", "4H", "1D", "1W"] if tf_states.get(t, "neutral").lower() == ("bullish" if eth_sq_sig == "BUY" else "bearish"))
+                                        eth_15m_sq_cand = {
+                                            "symbol": symbol,
+                                            "signal": eth_sq_sig,
+                                            "entry": entry,
+                                            "sl": sl,
+                                            "tp1": tp1,
+                                            "tp2": tp2,
+                                            "tp": tp1,
+                                            "target_r": target_r,
+                                            "auto_be_r": 0.0,
+                                            "limit_expire_mins": 45.0,
+                                            "aligned_count": max(aligned_eth_sq, 2),
+                                            "is_3_htf_aligned": aligned_eth_sq >= 3,
+                                            "is_30m_early": False,
+                                            "is_special": (symbol in SPECIAL_LIST),
+                                            "is_dedicated_squeeze": True,
+                                            "is_eth_tight_squeeze": True,
+                                            "unique_key": unique_eth_sq_key,
+                                            "candle_ts": candle_15_ts_sq,
+                                            "rr2": target_r,
+                                            "rsi": rsi_15_sq,
+                                            "adx": adx_15_sq,
+                                            "tf_label": "15M",
+                                            "cross_type": cross_type_eth_sq,
+                                        }
+                                        logger.info(f"⚡ ETH 15M TIGHT 12H SQUEEZE TRIGGERED: {symbol} [{eth_sq_sig}] @ {entry} SL={sl} TP={tp1} (Box={box_width:.2%}, Vol={c15_vol/vol_sma_15:.1f}x)")
+            except Exception as e_eth_sq:
+                logger.warning(f"ETH 15M tight squeeze engine error for {symbol}: {e_eth_sq}", exc_info=True)
+
         # -- 1. EMA CROSSOVER ENGINE --
         # BUG #1 FIX: Collect ALL crossover candidates from ALL timeframes (not just the first one).
         # Previously `return cand` was inside the loop causing all 4H/1D signals to be silently dropped.
@@ -871,6 +1024,8 @@ async def process_symbol_async(session, symbol, semaphore, tf_data=None, shock_c
             all_crossover_candidates.append(sq_candidate)
         if rc_candidate:
             all_crossover_candidates.append(rc_candidate)
+        if eth_15m_sq_cand:
+            all_crossover_candidates.append(eth_15m_sq_cand)
 
         crossover_labels = [] if in_crypto_shock else ["5M", "15M", "30M", "1H", "4H", "1D", "1W"]
         for label in crossover_labels:
@@ -1102,8 +1257,8 @@ async def scan_single_symbol_async(session, symbol, semaphore, shock_ctx=None):
         radar_cand = None
         if not in_crypto_shock:
             try:
-                from config import is_weekend_trading_blocked
-                if not is_weekend_trading_blocked(symbol):
+                from config import is_weekend_analysis_blocked
+                if not is_weekend_analysis_blocked(symbol):
                     df_1h = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get("1h")
                     if df_1h is not None and len(df_1h) >= 25:
                         from fetcher import fetch_futures_microstructure_async
@@ -1135,8 +1290,8 @@ async def scan_single_symbol_async(session, symbol, semaphore, shock_ctx=None):
         retest_cand = None
         from pullback_tracker import WATCHLIST, TOP_COINS, TOP_25_ALTS, ADDITIONAL_ALTS
         retest_allowed_coins = set(TOP_COINS + TOP_25_ALTS + ADDITIONAL_ALTS + WATCHLIST)
-        from config import is_weekend_trading_blocked
-        is_retest_eligible = (not in_crypto_shock) and ((symbol in retest_allowed_coins) if is_weekend else True) and not is_weekend_trading_blocked(symbol)
+        from config import is_weekend_analysis_blocked
+        is_retest_eligible = (not in_crypto_shock) and ((symbol in retest_allowed_coins) if is_weekend else True) and not is_weekend_analysis_blocked(symbol)
 
         if is_retest_eligible:
             # Run EMA Support/Resistance Retest Check
@@ -1734,17 +1889,10 @@ async def main_loop():
                                     if sym_clean == excl_clean or sym_base == excl_base:
                                         return False, f"Symbol {sym} is in AUTO_TRADE_EXCLUDED_SYMBOLS config."
 
-                                # USER DIRECTIVE: Weekdays (Mon-Fri) BTC & ETH can be traded!
-                                # Weekend (Saturday & Sunday): Strictly NO trades on BTC, ETH, and Gold!
-                                import zoneinfo
-                                ist_tz_elig = zoneinfo.ZoneInfo("Asia/Kolkata")
-                                now_ist_elig = datetime.now(ist_tz_elig)
-                                is_weekend_elig = now_ist_elig.weekday() in (5, 6) # 5 = Saturday, 6 = Sunday
-
-                                is_btc_eth_check = sym_base in ("BTC", "ETH")
-                                is_gold_check = any(c_name in sym_clean for c_name in ["XAU", "GOLD", "XAUT", "XAG"])
-
-                                if is_weekend_elig and (is_btc_eth_check or is_gold_check):
+                                # USER DIRECTIVE: Weekdays (Mon-Fri) BTC, ETH & Commodities can be traded!
+                                # Weekend (Saturday & Sunday): Strictly NO live execution for BTC, ETH, and Commodities!
+                                from config import is_weekend_trading_blocked
+                                if is_weekend_trading_blocked(sym):
                                     return False, f"Weekend trading paused for {sym} (Sat/Sun per directive). Weekdays only."
 
                                 # USER DIRECTIVE: Stop US stock tokens in auto-trading (trade only crypto & commodities)
@@ -1909,12 +2057,17 @@ async def main_loop():
                                 else:
                                     logger.info(f"Auto-trade filtered candidate {c.get('symbol')} [{c.get('signal')}]: {reason}")
                                     from executor import is_us_stock_token
-                                    if is_us_stock_token(c.get("symbol", "")):
-                                        from state import update_trade_outcome, _make_key
-                                        st_k = _make_key(c.get("symbol"), c.get("unique_key"), c.get("signal"), c.get("candle_ts"))
+                                    from config import is_weekend_trading_blocked
+                                    from state import update_trade_outcome, _make_key
+                                    rej_sym = c.get("symbol", "")
+                                    if is_us_stock_token(rej_sym):
+                                        st_k = _make_key(rej_sym, c.get("unique_key"), c.get("signal"), c.get("candle_ts"))
                                         update_trade_outcome(st_k, "SIGNAL_ONLY_US_STOCK")
+                                    elif is_weekend_trading_blocked(rej_sym):
+                                        st_k = _make_key(rej_sym, c.get("unique_key"), c.get("signal"), c.get("candle_ts"))
+                                        update_trade_outcome(st_k, "SIGNAL_ONLY_WEEKEND")
                                     else:
-                                        await notify_signal_rejection(c.get("symbol"), c.get("signal"), reason, cand=c)
+                                        await notify_signal_rejection(rej_sym, c.get("signal"), reason, cand=c)
 
                             if eligible_candidates and not executor.is_configured():
                                 from config import PAPER_TRADING_ENABLED

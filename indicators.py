@@ -893,11 +893,15 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
     try:
         import zoneinfo
         from datetime import datetime, timezone
-        from config import US_STOCK_TOKENS
+        from config import US_STOCK_TOKENS, is_btc_or_eth_symbol, is_weekend_analysis_blocked
         import pandas as pd
+
+        if is_weekend_analysis_blocked(symbol):
+            return {"eligible": False, "reason": "Commodity/US equity market closed on weekend"}
 
         # Always evaluate on COMPLETED closed candles (exclude live forming bar iloc[-1])
         df_eval = df_tf.iloc[:-1] if len(df_tf) >= 26 else df_tf
+        is_btc_eth = is_btc_or_eth_symbol(symbol)
 
         # ── TICK 1: ACTIVE MARKET & LIQUIDITY CHECK ──
         sym_clean = symbol.upper().strip()
@@ -955,8 +959,13 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
             return {"eligible": False, "reason": "Invalid price"}
 
         compression_pct = ((range_high - range_low) / curr_price) * 100.0
-        min_comp = 0.40 if tf_label.upper() == "1H" else 0.30
-        max_comp = (6.00 if ttm_squeeze else 5.00) if tf_label.upper() == "1H" else 2.50
+        if is_btc_eth and tf_label.upper() == "1H":
+            # Backtest-verified tight compression band for BTC/ETH 1H squeezes (0.60% - 4.50%)
+            min_comp = 0.60
+            max_comp = 4.50
+        else:
+            min_comp = 0.40 if tf_label.upper() == "1H" else 0.30
+            max_comp = (6.00 if ttm_squeeze else 5.00) if tf_label.upper() == "1H" else 2.50
 
         if compression_pct < min_comp:
             return {"eligible": False, "reason": f"Dead flatline (compression {compression_pct:.2f}% < {min_comp}%)"}
@@ -969,13 +978,24 @@ def evaluate_watchlist_coiling_candidate(symbol: str, df_tf, micro: dict = None,
         if not is_gold_or_stock and oi_change_1h < -1.50:
             return {"eligible": False, "reason": f"Heavy OI outflow {oi_change_1h:+.2f}% < -1.50%"}
 
-        # ── TICK 5: TREND & LEVERAGE ALIGNMENT (1H+4H aligned, or extreme >= 0.025% funding dislocation) ──
+        # ── TICK 5: TREND & LEVERAGE ALIGNMENT ──
+        # BTC & ETH require strict 1H+4H+1D triple HTF alignment; Altcoins/Commodities keep 1H+4H or funding dislocation.
         funding_pct = float(micro.get("funding_pct", 0.0))
         tf_states = tf_states or {}
         h1_trend = str(tf_states.get("1H", "neutral")).lower()
         h4_trend = str(tf_states.get("4H", "neutral")).lower()
+        d1_trend = str(tf_states.get("1D", "neutral")).lower()
 
-        if h1_trend == "bullish" and h4_trend == "bullish":
+        if is_btc_eth:
+            if h1_trend == "bullish" and h4_trend == "bullish" and d1_trend == "bullish":
+                direction = "BUY"
+                squeeze_type = "🚀 SHORT SQUEEZE (1H+4H+1D Bullish Base)"
+            elif h1_trend == "bearish" and h4_trend == "bearish" and d1_trend == "bearish":
+                direction = "SELL"
+                squeeze_type = "🩸 LONG SQUEEZE (1H+4H+1D Bearish Breakdown)"
+            else:
+                return {"eligible": False, "reason": f"BTC/ETH require 1H+4H+1D alignment (1H={h1_trend}, 4H={h4_trend}, 1D={d1_trend})"}
+        elif h1_trend == "bullish" and h4_trend == "bullish":
             direction = "BUY"
             squeeze_type = "🚀 SHORT SQUEEZE (Bullish Trend Base)"
         elif h1_trend == "bearish" and h4_trend == "bearish":

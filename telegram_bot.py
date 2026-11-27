@@ -318,22 +318,25 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         logger.info(f"🚫 BLOCKED duplicate notification for {symbol} ({tf_label} {signal}) — already alerted recently.")
         return False
 
-    # STRICT USER DIRECTIVE: No trades of commodities, BTC, and ETH on Sat and Sunday in any case
-    from config import is_weekend_trading_blocked
-    if is_weekend_trading_blocked(symbol):
-        logger.info(f"🚫 BLOCKED alert for {symbol} ({tf_label} {signal}) — No commodities, BTC, or ETH on Saturday/Sunday.")
+    # Commodities & US Stocks blocked on Sat & Sun; BTC & ETH analysis/alerts remain active full week.
+    from config import is_weekend_analysis_blocked, is_weekend_trading_blocked, is_eth_symbol
+    if is_weekend_analysis_blocked(symbol):
+        logger.info(f"🚫 BLOCKED alert for {symbol} ({tf_label} {signal}) — Commodities and US stocks closed on Saturday/Sunday.")
         return False
 
-    # STRICT SQUEEZE TIMEFRAME RULE (User Directive: '1 hr squeze pr hi raho fir'):
-    # Legacy 15M Squeezes remain blocked; 15M 8H-Breakout Runaway Chase is explicitly allowed cleanly.
+    # STRICT SQUEEZE TIMEFRAME RULE:
+    # Generic 15M Squeezes remain blocked; 15M 8H-Breakout Runaway Chase & ETH-only 15M Tight 12H Squeeze are allowed cleanly.
     is_runaway_chase = kwargs.get("is_runaway_chase", False) or ("Runaway" in cross_type)
+    is_eth_tight_sq = is_eth_symbol(symbol) and (str(tf_label).upper() in ["15M", "15MIN"]) and (
+        kwargs.get("is_eth_tight_squeeze", False) or ("Tight 12H Squeeze" in cross_type)
+    )
     is_sq_check = (not is_runaway_chase) and (
         ("Squeeze" in cross_type)
         or kwargs.get("is_dedicated_squeeze", False)
         or ("Breakout" in cross_type and "Retest" not in cross_type)
     )
-    if is_sq_check and str(tf_label).upper() not in ["1H", "1HR", "60M"]:
-        logger.info(f"🚫 BLOCKED Squeeze alert for {symbol} ({tf_label}) — Squeeze breakouts strictly restricted to 1H timeframe.")
+    if is_sq_check and str(tf_label).upper() not in ["1H", "1HR", "60M"] and not is_eth_tight_sq:
+        logger.info(f"🚫 BLOCKED Squeeze alert for {symbol} ({tf_label}) — Squeeze breakouts strictly restricted to 1H timeframe (except ETH 15M Tight Squeeze).")
         return False
 
     is_retest = "Retest" in cross_type
@@ -439,7 +442,10 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
     try:
         df_signal = None
         if isinstance(tf_data, dict):
-            df_signal = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get(tf_label)
+            if str(tf_label).upper() in ["15M", "15MIN"]:
+                df_signal = tf_data.get("15M") if tf_data.get("15M") is not None else tf_data.get("15m")
+            if df_signal is None:
+                df_signal = tf_data.get("1H") if tf_data.get("1H") is not None else tf_data.get(tf_label)
         micro = await fetch_futures_microstructure_async(None, symbol, signal, df=df_signal)
     except Exception as e_micro:
         logger.warning(f"Error fetching microstructure for {symbol}: {e_micro}")
@@ -469,6 +475,7 @@ async def queue_alert(symbol, tf_label, signal, entry, sl, tp, tf_states, cross_
         "is_squeeze": is_dedicated_sq,
         "is_dedicated_squeeze": is_dedicated_sq,
         "is_runaway_chase": is_runaway_chase,
+        "is_eth_tight_squeeze": is_eth_tight_sq,
     }
     
     if is_retest_sig:
@@ -611,7 +618,8 @@ def _build_single_coin_block(data, index=None):
     # Squeeze Badge header & Market Dynamic explanation (Strict separation: Dedicated Squeeze / Runaway takes priority)
     is_dedicated_sq = bool(data.get("is_dedicated_squeeze", False))
     is_runaway_sq = bool(data.get("is_runaway_chase", False) or ("Runaway" in cross_type))
-    if is_dedicated_sq or is_runaway_sq:
+    is_eth_tight_sq = bool(data.get("is_eth_tight_squeeze", False) or ("Tight 12H Squeeze" in cross_type))
+    if is_dedicated_sq or is_runaway_sq or is_eth_tight_sq:
         is_squeeze = True
         is_retest = False
         is_cross = False
@@ -620,7 +628,17 @@ def _build_single_coin_block(data, index=None):
         is_cross = ("Cross" in cross_type or "Crossover" in cross_type) and not is_retest
         is_squeeze = ("Squeeze" in cross_type or "Breakout" in cross_type or "Breakdown" in cross_type) and not is_retest and not is_cross
     if is_squeeze:
-        if is_runaway_sq:
+        if is_eth_tight_sq:
+            sq_icon = "⚡"
+            if signal == "BUY":
+                squeeze_title = "🚀 ETH 15M TIGHT SQUEEZE BREAKOUT"
+                action_desc = "🟢 BUY (LONG) — ETH 12H Tight Coil + 4H Trend"
+                market_dynamic = "⚡ <b>12H Tight Box Expansion:</b> ETH 15M broke 0.5%–2.5% coil on >=1.8x Vol + CVD aligned with 4H trend (Pullback Limit @ 2.2R)."
+            else:
+                squeeze_title = "🩸 ETH 15M TIGHT SQUEEZE BREAKDOWN"
+                action_desc = "🔴 SELL (SHORT) — ETH 12H Tight Coil + 4H Trend"
+                market_dynamic = "⚡ <b>12H Tight Box Breakdown:</b> ETH 15M broke below 0.5%–2.5% coil on >=1.8x Vol + CVD aligned with 4H trend (Pullback Limit @ 2.2R)."
+        elif is_runaway_sq:
             sq_icon = "⚡"
             if signal == "BUY":
                 squeeze_title = "🚀 15M RUNAWAY BULLISH BREAKOUT"
@@ -704,6 +722,12 @@ def _build_single_coin_block(data, index=None):
     target_tp = tp1 or data.get("tp")
     f_rr = float(rr1) if rr1 is not None else (float(data.get("rr")) if data.get("rr") is not None else 1.5)
     block += f"🎯 <b>TARGET ({f_rr:.1f}R — 100% Full Exit):</b> {format_price(target_tp, symbol)} (1:{f_rr:.1f} R:R)\n"
+    try:
+        from config import is_btc_or_eth_symbol, is_weekend_trading_blocked
+        if is_btc_or_eth_symbol(symbol) and is_weekend_trading_blocked(symbol):
+            block += "📊 <b>Mode:</b> <i>Weekend Analysis Only (BTC/ETH live trading Mon–Fri)</i>\n"
+    except Exception:
+        pass
         
     # -- AI SIGNAL ANALYSIS BLOCK --
     try:
@@ -922,7 +946,10 @@ async def flush_alerts():
                 sig = item.get("signal", "BUY")
                 ctype_b = str(item.get("cross_type", ""))
                 is_rc_b = bool(item.get("is_runaway_chase") or ("Runaway" in ctype_b))
-                if is_rc_b:
+                is_eth_sq_b = bool(item.get("is_eth_tight_squeeze") or ("Tight 12H Squeeze" in ctype_b))
+                if is_eth_sq_b:
+                    header = "⚡ <b>ETH 15M TIGHT SQUEEZE BREAKOUT TRIGGERED</b>\n" if sig == "BUY" else "⚡ <b>ETH 15M TIGHT SQUEEZE BREAKDOWN TRIGGERED</b>\n"
+                elif is_rc_b:
                     header = "⚡ <b>15M RUNAWAY CHASER TRIGGERED (BULLISH SURGE)</b>\n" if sig == "BUY" else "⚡ <b>15M RUNAWAY CHASER TRIGGERED (BEARISH DUMP)</b>\n"
                 elif "Bear Trap" in ctype_b:
                     header = "🪤 <b>1H BEAR TRAP REVERSAL TRIGGERED</b>\n"
